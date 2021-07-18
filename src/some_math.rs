@@ -1,5 +1,5 @@
-mod vector_impl;
 mod matrix_impl;
+mod vector_impl;
 
 pub type Color = Vector3;
 pub type Point = Vector3;
@@ -36,10 +36,14 @@ pub fn point_in_2d(point: Point, square: [Point; 2], axis: usize) -> bool {
     return true;
 }
 
-pub fn order_numbers(x: f64, y: f64) -> (f64, f64, bool){
+pub fn order_numbers(x: f64, y: f64) -> (f64, f64, bool) {
     if x <= y {
         return (x, y, false);
     } else {
         return (y, x, true);
     }
+}
+
+pub fn reflect(vec: &Vector3, normal: &Vector3) -> Vector3 {
+    *vec - 2.0 * ((*vec) * (*normal)) * (*normal)
 }

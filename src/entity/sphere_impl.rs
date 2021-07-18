@@ -5,7 +5,7 @@ use crate::{data::HitInfo, material::Material, some_math::Point};
 use super::{obj_traits::Hittable, Ray, Sphere};
 
 impl Sphere {
-    pub fn new(center: Point, radius: f64, material: Arc<dyn Material>) -> Self {
+    pub fn new(center: Point, radius: f64, material: Arc<dyn Material + Send + Sync>) -> Self {
         Sphere {
             center,
             radius,
@@ -31,6 +31,11 @@ impl Hittable for Sphere {
             hit_point,
             t,
             normal,
+            material: self.material.clone(),
         });
+    }
+
+    fn is_light(&self) -> bool {
+        self.material.is_light()
     }
 }

@@ -1,5 +1,5 @@
 use std::{
-    ops::{Add, Div, Mul, Sub},
+    ops::{Add, AddAssign, Div, DivAssign, Mul, Sub},
     usize,
 };
 
@@ -42,7 +42,9 @@ impl Vector3 {
     pub fn to_u8(&self) -> [u8; 3] {
         let mut res = [0; 3];
         for n in 0..3 {
-            res[n] = (clamp(self.data[n], 0.0, 1.0) * 255.0) as u8;
+            // gamma correction 2.0
+            res[n] = (clamp(self.data[n].sqrt(), 0.0, 1.0) * 255.0) as u8;
+            // res[n] = (clamp(self.data[n], 0.0, 1.0) * 255.0) as u8;
         }
         return res;
     }
@@ -104,6 +106,14 @@ impl Add<Vector3> for Vector3 {
     }
 }
 
+impl AddAssign<Vector3> for Vector3 {
+    fn add_assign(&mut self, rhs: Vector3) {
+        for n in 0..3 {
+            self.data[n] += rhs.data[n];
+        }
+    }
+}
+
 impl Mul<Vector3> for Vector3 {
     type Output = f64;
 
@@ -145,6 +155,14 @@ impl Div<f64> for Vector3 {
             data[n] = self.data[n] / rhs;
         }
         return Vector3 { data };
+    }
+}
+
+impl DivAssign<f64> for Vector3 {
+    fn div_assign(&mut self, rhs: f64) {
+        for n in 0..3 {
+            self.data[n] /= rhs;
+        }
     }
 }
 

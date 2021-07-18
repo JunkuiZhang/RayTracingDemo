@@ -17,4 +17,6 @@ mod world;
 fn main() {
     let mut world = World::new();
     world.default_scene();
+    world.shade_pixel();
+    world.save_image();
 }
