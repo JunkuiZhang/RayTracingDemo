@@ -25,14 +25,26 @@ impl Hittable for Sphere {
             return None;
         }
         let t = (-b - indicator.sqrt()) / (2.0 * a);
-        let hit_point = ray_in.at(t);
-        let normal = (hit_point - self.center).normalize();
-        return Some(HitInfo {
-            hit_point,
-            t,
-            normal,
-            material: self.material.clone(),
-        });
+        if t > 0.0 {
+            let hit_point = ray_in.at(t);
+            let normal = (hit_point - self.center).normalize();
+            return Some(HitInfo {
+                hit_point,
+                t,
+                normal,
+                material: self.material.clone(),
+            });
+        } else {
+            let t = (-b + indicator.sqrt()) / (2.0 * a);
+            let hit_point = ray_in.at(t);
+            let normal = (hit_point - self.center).normalize();
+            return Some(HitInfo {
+                hit_point,
+                t,
+                normal,
+                material: self.material.clone(),
+            });
+        }
     }
 
     fn is_light(&self) -> bool {

@@ -23,15 +23,19 @@ impl Material for DiffuseLight {
         }
     }
 
-    fn emit(&self) -> Option<Color> {
-        Some(self.color)
+    fn emit(&self) -> Color {
+        self.color
     }
 
-    fn naive_render(&self) -> Color {
+    fn get_color(&self) -> Color {
         self.color
     }
 
     fn is_light(&self) -> bool {
         true
+    }
+
+    fn get_fresnel(&self, ray_in_dir: &Vector3, hit_normal: &Vector3) -> f64 {
+        1.0
     }
 }

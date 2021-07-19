@@ -65,11 +65,9 @@ impl ThreadPool {
     }
 
     pub fn shut_down(&self) {
-        self.sender.send(Message::Terminate).unwrap();
-    }
-
-    pub fn get_thread_num(&self) -> usize {
-        self.workers.len()
+        for _ in 0..self.workers.len() {
+            self.sender.send(Message::Terminate).unwrap();
+        }
     }
 }
 

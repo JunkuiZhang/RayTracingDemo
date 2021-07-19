@@ -1,4 +1,5 @@
 use std::{
+    fmt::Display,
     ops::{Add, AddAssign, Div, DivAssign, Mul, Sub},
     usize,
 };
@@ -41,20 +42,14 @@ impl Vector3 {
 
     pub fn to_u8(&self) -> [u8; 3] {
         let mut res = [0; 3];
-        for n in 0..3 {
-            // gamma correction 2.0
-            res[n] = (clamp(self.data[n].sqrt(), 0.0, 1.0) * 255.0) as u8;
-            // res[n] = (clamp(self.data[n], 0.0, 1.0) * 255.0) as u8;
+        for (num, r) in self.data.iter().zip(&mut res) {
+            *r = (clamp((*num).sqrt(), 0.0, 1.0) * 255.0) as u8;
         }
         return res;
     }
 
     pub fn length_square(&self) -> f64 {
-        let mut res = 0.0;
-        for n in 0..3 {
-            res += self.data[n] * self.data[n];
-        }
-        return res;
+        return self.data.iter().map(|num| (*num) * (*num)).sum();
     }
 
     pub fn length(&self) -> f64 {
@@ -67,8 +62,8 @@ impl Vector3 {
 
     pub fn naive_mul(&self, rhs: Vector3) -> Vector3 {
         let mut data = [0.0; 3];
-        for n in 0..3 {
-            data[n] = self.data[n] * rhs.data[n];
+        for ((a, b), r) in self.data.iter().zip(&rhs.data).zip(&mut data) {
+            *r = (*a) * (*b);
         }
         return Vector3 { data };
     }
@@ -99,8 +94,8 @@ impl Add<Vector3> for Vector3 {
 
     fn add(self, rhs: Vector3) -> Self::Output {
         let mut data = [0.0; 3];
-        for n in 0..3 {
-            data[n] = self.data[n] + rhs.data[n];
+        for ((s, r), res) in self.data.iter().zip(&rhs.data).zip(&mut data) {
+            *res = *s + *r;
         }
         return Vector3 { data };
     }
@@ -108,8 +103,8 @@ impl Add<Vector3> for Vector3 {
 
 impl AddAssign<Vector3> for Vector3 {
     fn add_assign(&mut self, rhs: Vector3) {
-        for n in 0..3 {
-            self.data[n] += rhs.data[n];
+        for (a, b) in self.data.iter_mut().zip(&rhs.data) {
+            *a += *b;
         }
     }
 }
@@ -119,8 +114,8 @@ impl Mul<Vector3> for Vector3 {
 
     fn mul(self, rhs: Vector3) -> Self::Output {
         let mut res = 0.0;
-        for n in 0..3 {
-            res += self.data[n] * rhs.data[n];
+        for (a, b) in self.data.iter().zip(&rhs.data) {
+            res += (*a) * (*b);
         }
         return res;
     }
@@ -131,8 +126,8 @@ impl Mul<f64> for Vector3 {
 
     fn mul(self, rhs: f64) -> Self::Output {
         let mut data = [0.0; 3];
-        for n in 0..3 {
-            data[n] = self.data[n] * rhs;
+        for (num, res) in self.data.iter().zip(&mut data) {
+            *res = (*num) * rhs;
         }
         return Vector3 { data };
     }
@@ -151,8 +146,8 @@ impl Div<f64> for Vector3 {
 
     fn div(self, rhs: f64) -> Self::Output {
         let mut data = [0.0; 3];
-        for n in 0..3 {
-            data[n] = self.data[n] / rhs;
+        for (num, res) in self.data.iter().zip(&mut data) {
+            *res = (*num) / rhs;
         }
         return Vector3 { data };
     }
@@ -160,8 +155,8 @@ impl Div<f64> for Vector3 {
 
 impl DivAssign<f64> for Vector3 {
     fn div_assign(&mut self, rhs: f64) {
-        for n in 0..3 {
-            self.data[n] /= rhs;
+        for num in self.data.iter_mut() {
+            *num /= rhs;
         }
     }
 }
@@ -171,9 +166,15 @@ impl Sub<Vector3> for Vector3 {
 
     fn sub(self, rhs: Vector3) -> Self::Output {
         let mut data = [0.0; 3];
-        for n in 0..3 {
-            data[n] = self.data[n] - rhs.data[n];
+        for ((a, b), r) in self.data.iter().zip(&rhs.data).zip(&mut data) {
+            *r = *a - *b;
         }
         return Vector3 { data };
+    }
+}
+
+impl Display for Vector3 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({}, {}, {})", self.data[0], self.data[1], self.data[2])
     }
 }

@@ -47,3 +47,10 @@ pub fn order_numbers(x: f64, y: f64) -> (f64, f64, bool) {
 pub fn reflect(vec: &Vector3, normal: &Vector3) -> Vector3 {
     *vec - 2.0 * ((*vec) * (*normal)) * (*normal)
 }
+
+pub fn refract(vec: &Vector3, normal: &Vector3, factor: f64) -> Vector3 {
+    let cos_theta = ((-1.0) * (*vec) * (*normal)).min(1.0);
+    let r_out_perp = factor * (*vec + cos_theta * (*normal));
+    let r_out_para = (1.0 - r_out_perp.length_square()).abs().sqrt() * (*normal);
+    return r_out_para + r_out_perp;
+}

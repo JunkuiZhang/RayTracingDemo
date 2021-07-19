@@ -27,9 +27,7 @@ impl Rectangle {
             let move_trans = Vector3::new([-x_center, 0.0, -z_center]);
             let mut rotated_position = [Point::default(); 2];
             for n in 0..2 {
-                // println!("MOVE TRANS: {:?}", move_trans);
                 rotated_position[n] = rotate_around_y(points[n] + move_trans, angle) - move_trans;
-                // println!("{:?} ==> {:?}", points[n], rotated_position[n]);
             }
             for n in 0..2 {
                 trans_points[n] = rotate_around_y(rotated_position[n], -angle);
@@ -85,11 +83,10 @@ impl Hittable for Rectangle {
         if t_min > t_max || t_min <= 0.0 {
             return None;
         }
-        let mut hit_point = ray_origin + t_min * ray_direction;
+        let hit_point = ray_in.at(t_min);
         let normal;
         if let Some(angle) = self.angle_rotate_y {
             normal = rotate_around_y(hit_normal, angle);
-            // println!("{:?}", hit_point);
         } else {
             normal = hit_normal;
         }

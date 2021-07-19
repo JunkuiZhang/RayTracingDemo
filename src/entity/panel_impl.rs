@@ -70,7 +70,7 @@ impl Light for Panel {
     }
 
     fn get_light_color(&self) -> crate::some_math::Color {
-        self.material.emit().unwrap()
+        self.material.emit()
     }
 }
 
