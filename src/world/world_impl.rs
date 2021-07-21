@@ -154,11 +154,11 @@ impl World {
             Arc::new(white),
             // Arc::new(blue),
         )));
-        // self.add(Arc::new(Sphere::new(
-        //     Point::new([150.0, 60.0, -160.0]),
-        //     60.0,
-        //     Arc::new(glass),
-        // )));
+        self.add(Arc::new(Sphere::new(
+            Point::new([150.0, 60.0, -160.0]),
+            60.0,
+            Arc::new(glass),
+        )));
         self.camera = Camera::new(
             Point::new([300.0, 300.0, 800.0]),
             Vector3::new([0.0, 0.0, -1.0]),
