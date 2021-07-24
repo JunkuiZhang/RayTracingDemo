@@ -51,6 +51,6 @@ pub fn reflect(vec: &Vector3, normal: &Vector3) -> Vector3 {
 pub fn refract(vec: &Vector3, normal: &Vector3, factor: f64) -> Vector3 {
     let cos_theta = ((-1.0) * (*vec) * (*normal)).min(1.0);
     let r_out_perp = factor * (*vec + cos_theta * (*normal));
-    let r_out_para = (1.0 - r_out_perp.length_square()).abs().sqrt() * (*normal);
-    return r_out_para + r_out_perp;
+    let r_out_para = (-1.0) * (1.0 - r_out_perp.length_square()).abs().sqrt() * (*normal);
+    return (r_out_para + r_out_perp).normalize();
 }

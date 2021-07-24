@@ -60,7 +60,7 @@ impl ThreadPool {
     }
 
     pub fn work(&self, w: u32) {
-        // let job = Box::new(w);
+        // let job = Box::new(w); 
         self.sender.send(Message::NewWork(w)).unwrap();
     }
 

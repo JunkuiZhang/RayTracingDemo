@@ -3,7 +3,14 @@ use std::{sync::Arc, time::SystemTime, u32};
 use image::{ImageBuffer, Rgb};
 use rand::prelude::ThreadRng;
 
-use crate::{camera::Camera, entity::{obj_traits::Hittable, Panel, Rectangle, Sphere}, material::{DiffuseLight, DiffuseMat, Glass, Metal}, settings::{IMAGE_PATH, THREAD_NUM, WINDOW_HEIGHT, WINDOW_WIDTH}, some_math::{Color, Point, Vector3}, world::multithread_impl::ThreadPool};
+use crate::{
+    camera::Camera,
+    entity::{obj_traits::Hittable, Panel, Rectangle, Sphere},
+    material::{DiffuseLight, DiffuseMat, Glass, Metal},
+    settings::{IMAGE_PATH, THREAD_NUM, WINDOW_HEIGHT, WINDOW_WIDTH},
+    some_math::{Color, Point, Vector3},
+    world::multithread_impl::ThreadPool,
+};
 
 use super::World;
 
@@ -70,7 +77,7 @@ impl World {
         let red = DiffuseMat::new(Color::new([0.65, 0.05, 0.05]));
         let white = DiffuseMat::new(Color::new([0.75, 0.75, 0.75]));
         let green = DiffuseMat::new(Color::new([0.12, 0.45, 0.15]));
-        // let cupper = Metal::new(Color::new([0.7, 0.45, 0.2]), 0.5);
+        let cupper = Metal::new(Color::new([0.7, 0.45, 0.2]), 0.5);
         let glass = Glass::new(Color::new([0.9, 0.9, 0.9]), 1.5);
         let light = DiffuseLight::new(Color::new([7.0, 7.0, 7.0]));
         // light
@@ -151,8 +158,8 @@ impl World {
             ],
             Some(-5.0),
             // None,
-            Arc::new(white),
-            // Arc::new(blue),
+            // Arc::new(white),
+            Arc::new(cupper),
         )));
         self.add(Arc::new(Sphere::new(
             Point::new([150.0, 60.0, -160.0]),

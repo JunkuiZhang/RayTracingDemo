@@ -17,7 +17,7 @@ impl Glass {
 impl Material for Glass {
     fn scatter(&self, ray_in: &Ray, hit_normal: &Vector3, rng: &mut ThreadRng) -> ScatterInfo {
         let reflection_portion = self.get_fresnel(&ray_in.direction, hit_normal);
-        if rng.gen_bool(reflection_portion) {
+        if rng.gen_range(0.0..1.0) < reflection_portion {
             let scatter_dir = reflect(&ray_in.direction, hit_normal);
             return ScatterInfo {
                 scatter_dir: scatter_dir,
@@ -61,8 +61,7 @@ impl Material for Glass {
     }
 
     fn get_fresnel(&self, ray_in_dir: &Vector3, hit_normal: &Vector3) -> f64 {
-        // let f0 = 0.05;
-        // return f0 + (1.0 - f0) * ((*ray_in_dir) * (*hit_normal)).abs().powi(5);
-        1.0
+        let f0 = 0.05;
+        return f0 + (1.0 - f0) * ((*ray_in_dir) * (*hit_normal)).abs().powi(5);
     }
 }
