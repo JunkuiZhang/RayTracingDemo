@@ -15,7 +15,7 @@ impl DiffuseLight {
 }
 
 impl Material for DiffuseLight {
-    fn scatter(&self, ray_in: &Ray, hit_normal: &Vector3, rng: &mut ThreadRng) -> ScatterInfo {
+    fn scatter(&self, _ray_in: &Ray, hit_normal: &Vector3, _rng: &mut ThreadRng) -> ScatterInfo {
         ScatterInfo {
             scatter_dir: *hit_normal,
             color: self.color,
@@ -35,7 +35,7 @@ impl Material for DiffuseLight {
         true
     }
 
-    fn get_fresnel(&self, ray_in_dir: &Vector3, hit_normal: &Vector3) -> f64 {
+    fn get_fresnel(&self, _ray_in_dir: &Vector3, _hit_normal: &Vector3) -> f64 {
         1.0
     }
 }

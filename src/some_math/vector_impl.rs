@@ -175,6 +175,10 @@ impl Sub<Vector3> for Vector3 {
 
 impl Display for Vector3 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "({}, {}, {})", self.data[0], self.data[1], self.data[2])
+        write!(
+            f,
+            "({:.2}, {:.2}, {:.2})",
+            self.data[0], self.data[1], self.data[2]
+        )
     }
 }

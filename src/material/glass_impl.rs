@@ -20,7 +20,7 @@ impl Material for Glass {
         if rng.gen_range(0.0..1.0) < reflection_portion {
             let scatter_dir = reflect(&ray_in.direction, hit_normal);
             return ScatterInfo {
-                scatter_dir: scatter_dir,
+                scatter_dir,
                 color: self.color,
                 pdf: 1.0,
             };

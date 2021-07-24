@@ -18,7 +18,10 @@ pub fn rotate_vec_given_normal(vec: &Vector3, normal: &Vector3) -> Vector3 {
     let trans_rotate_z = matrix_rotate_around_z(-sin_theta, cos_theta);
     let trans_rotate_y = matrix_rotate_around_y(-sin_phi, cos_phi);
     let res = trans_rotate_y * (trans_rotate_z * (*vec));
-    // println!("{:?} around {:?} with ({}, {}, {}, {}) by {:?}, {:?} ==> {:?}", *vec, *normal, sin_theta, cos_theta, sin_phi, cos_phi,trans_rotate_y, trans_rotate_z, res);
+    // println!(
+    //     "{} around {} with ({}, {}, {}, {}) by {}, {} ==> {}",
+    //     *vec, *normal, sin_theta, cos_theta, sin_phi, cos_phi, trans_rotate_y, trans_rotate_z, res
+    // );
     return res;
 }
 
