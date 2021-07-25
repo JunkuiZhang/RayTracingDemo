@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::SystemTime};
 
 use image::{ImageBuffer, Rgb};
 use rand::prelude::ThreadRng;
@@ -13,9 +13,9 @@ mod multithread_impl;
 mod world_impl;
 
 pub struct World {
+    start_time: SystemTime,
     pub objects: Vec<Arc<dyn Hittable + Send + Sync>>,
     pub camera: Camera,
-    pub image_buffer: ImageBuffer<Rgb<u8>, Vec<u8>>,
     pub rng: ThreadRng,
     pub lights: Vec<Arc<dyn HittableLight + Send + Sync>>,
 }

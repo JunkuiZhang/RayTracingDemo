@@ -5,10 +5,11 @@ use rand::prelude::ThreadRng;
 
 use crate::{
     camera::Camera,
+    data::PixelContainer,
     entity::{obj_traits::Hittable, Panel, Rectangle, Sphere},
     material::{DiffuseLight, DiffuseMat, Glass, Metal},
-    settings::{IMAGE_PATH, THREAD_NUM, WINDOW_HEIGHT, WINDOW_WIDTH},
-    some_math::{Color, Point, Vector3},
+    settings::{SAMPLES_PER_PIXEL, THREAD_NUM, WINDOW_HEIGHT, WINDOW_WIDTH},
+    some_math::{generate_neighbor_pixel_coordinate, num_inline, Color, Point, Vector3},
     world::multithread_impl::ThreadPool,
 };
 
@@ -17,16 +18,22 @@ use super::World;
 impl World {
     pub fn new() -> Self {
         World {
+            start_time: SystemTime::now(),
             objects: Vec::new(),
             lights: Vec::new(),
             camera: Camera::default(),
-            image_buffer: ImageBuffer::new(WINDOW_WIDTH, WINDOW_HEIGHT),
             rng: ThreadRng::default(),
         }
     }
 
-    pub fn shade_pixel(&mut self) {
-        let start_time = SystemTime::now();
+    pub fn run(&mut self) {
+        self.start_time = SystemTime::now();
+        let raw_pixel = self.shade_pixel();
+        let proc_pixel = self.outlier_removal(&raw_pixel);
+    }
+
+    fn shade_pixel(&mut self) -> PixelContainer {
+        println!("==> Starting shading...");
         let c = Arc::new(self.camera);
         let o = Arc::new(self.objects.clone());
         let l = Arc::new(self.lights.clone());
@@ -34,12 +41,12 @@ impl World {
         for job in 0..WINDOW_HEIGHT {
             thread_pool.work(job);
         }
-        let mut res = [[0u8; (WINDOW_WIDTH * 3) as usize]; WINDOW_HEIGHT as usize];
+        let mut res = PixelContainer::new();
         let mut num = 0;
         let mut last_portion = 0;
         'job_loop: loop {
             if let Ok(job_res) = thread_pool.result.recv() {
-                res[job_res.0 as usize] = job_res.1;
+                res.data[job_res.0 as usize] = job_res.1;
                 num += 1;
                 let portion = ((num as f64 / WINDOW_HEIGHT as f64) * 100.0) as u32;
                 if portion > last_portion {
@@ -52,21 +59,62 @@ impl World {
             }
         }
         thread_pool.shut_down();
-        self.image_buffer =
-            ImageBuffer::<Rgb<u8>, Vec<u8>>::from_vec(WINDOW_WIDTH, WINDOW_HEIGHT, res.concat())
+        let image_buffer =
+            ImageBuffer::<Rgb<u8>, Vec<u8>>::from_vec(WINDOW_WIDTH, WINDOW_HEIGHT, res.to_pixels())
                 .unwrap();
+        println!("Saving raw image..");
+        image_buffer
+            .save(format!("{}SPP.png", SAMPLES_PER_PIXEL))
+            .unwrap();
         println!(
-            "Total time cost: {}",
+            "Ray tracing time cost: {}",
             SystemTime::now()
-                .duration_since(start_time)
+                .duration_since(self.start_time)
                 .unwrap()
                 .as_secs()
         );
+        return res;
     }
 
-    pub fn save_image(&self) {
-        println!("Saving image..");
-        self.image_buffer.save(IMAGE_PATH).unwrap();
+    fn outlier_removal(&self, raw_data: &PixelContainer) -> PixelContainer {
+        println!("==> Removing outlier");
+        let mut res_vec = PixelContainer::new();
+        for row_num in 0..WINDOW_HEIGHT as usize {
+            for col_num in 0..WINDOW_WIDTH as usize {
+                let mut r_vec = Vec::new();
+                let mut g_vec = Vec::new();
+                let mut b_vec = Vec::new();
+                for (col, row) in generate_neighbor_pixel_coordinate(col_num, row_num) {
+                    r_vec.push(raw_data.data[row][col * 3]);
+                    g_vec.push(raw_data.data[row][col * 3 + 1]);
+                    b_vec.push(raw_data.data[row][col * 3 + 2]);
+                }
+                res_vec.data[row_num][col_num * 3] =
+                    num_inline(&r_vec, raw_data.data[row_num][col_num * 3]);
+                res_vec.data[row_num][col_num * 3 + 1] =
+                    num_inline(&g_vec, raw_data.data[row_num][col_num * 3 + 1]);
+                res_vec.data[row_num][col_num * 3 + 2] =
+                    num_inline(&b_vec, raw_data.data[row_num][col_num * 3 + 2]);
+            }
+        }
+        let image_buffer = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_vec(
+            WINDOW_WIDTH,
+            WINDOW_HEIGHT,
+            res_vec.to_pixels(),
+        )
+        .unwrap();
+        println!("Saving processed image..");
+        image_buffer
+            .save(format!("{}SPP-outlier-removed.png", SAMPLES_PER_PIXEL))
+            .unwrap();
+        println!(
+            "Outlier removal time cost: {}",
+            SystemTime::now()
+                .duration_since(self.start_time)
+                .unwrap()
+                .as_secs()
+        );
+        return res_vec;
     }
 
     fn add(&mut self, obj: Arc<dyn Hittable + Send + Sync>) {

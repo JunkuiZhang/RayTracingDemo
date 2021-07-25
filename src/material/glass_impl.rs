@@ -40,6 +40,7 @@ impl Material for Glass {
             } else {
                 scatter_dir = refract(&ray_in.direction, hit_normal, refraction_ratio);
             }
+            // let scatter_dir = refract(&ray_in.direction, hit_normal, refraction_ratio);
             return ScatterInfo {
                 scatter_dir,
                 color: self.color,

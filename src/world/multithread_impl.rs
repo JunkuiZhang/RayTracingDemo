@@ -17,7 +17,7 @@ use crate::{
 
 pub struct ThreadPool {
     workers: Vec<Worker>,
-    pub result: Receiver<Arc<(u32, [u8; (WINDOW_WIDTH * 3) as usize])>>,
+    pub result: Receiver<Arc<(u32, [f64; (WINDOW_WIDTH * 3) as usize])>>,
     sender: Sender<Message>,
 }
 
@@ -60,7 +60,7 @@ impl ThreadPool {
     }
 
     pub fn work(&self, w: u32) {
-        // let job = Box::new(w); 
+        // let job = Box::new(w);
         self.sender.send(Message::NewWork(w)).unwrap();
     }
 
@@ -75,7 +75,7 @@ impl Worker {
     pub fn new(
         id: usize,
         receiver: Arc<Mutex<Receiver<Message>>>,
-        res_sender: Sender<Arc<(u32, [u8; (WINDOW_WIDTH * 3) as usize])>>,
+        res_sender: Sender<Arc<(u32, [f64; (WINDOW_WIDTH * 3) as usize])>>,
         camera: Arc<Camera>,
         objects: Arc<Vec<Arc<dyn Hittable + Send + Sync>>>,
         lights: Arc<Vec<Arc<dyn HittableLight + Send + Sync>>>,

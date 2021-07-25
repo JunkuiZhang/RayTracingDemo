@@ -1,3 +1,5 @@
+use crate::settings::{WINDOW_HEIGHT, WINDOW_WIDTH};
+
 mod matrix_impl;
 mod vector_impl;
 
@@ -53,4 +55,29 @@ pub fn refract(vec: &Vector3, normal: &Vector3, factor: f64) -> Vector3 {
     let r_out_perp = factor * (*vec + cos_theta * (*normal));
     let r_out_para = (-1.0) * (1.0 - r_out_perp.length_square()).abs().sqrt() * (*normal);
     return (r_out_para + r_out_perp).normalize();
+}
+
+pub fn generate_neighbor_pixel_coordinate(col_num: usize, row_num: usize) -> Vec<(usize, usize)> {
+    let mut res = Vec::with_capacity(48);
+    for col_modifier in (-3)..4 {
+        for row_modifier in (-3)..4 {
+            if col_modifier == 0 && row_modifier == 0 {
+                continue;
+            }
+            let col = col_num as i32 + col_modifier;
+            let row = row_num as i32 + row_modifier;
+            if col < 0 || col >= WINDOW_WIDTH as i32 || row < 0 || row >= WINDOW_HEIGHT as i32 {
+                continue;
+            }
+            res.push((col as usize, row as usize));
+        }
+    }
+    return res;
+}
+
+pub fn num_inline(list: &Vec<f64>, target: f64) -> f64 {
+    let mean = list.iter().sum::<f64>() / list.len() as f64;
+    let sigma =
+        (list.iter().map(|num| ((*num) - mean).powi(2)).sum::<f64>() / list.len() as f64).sqrt();
+    return clamp(target, mean - 2.0 * sigma, mean + 2.0 * sigma);
 }
