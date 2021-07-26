@@ -1,4 +1,8 @@
-use std::{sync::Arc, time::SystemTime, u32};
+use std::{
+    sync::{Arc, RwLock},
+    time::SystemTime,
+    u32,
+};
 
 use image::{ImageBuffer, Rgb};
 use rand::prelude::ThreadRng;
@@ -19,9 +23,10 @@ impl World {
     pub fn new() -> Self {
         World {
             start_time: SystemTime::now(),
-            objects: Vec::new(),
-            lights: Vec::new(),
-            camera: Camera::default(),
+            last_end_time: SystemTime::now(),
+            objects: Arc::new(RwLock::new(Vec::new())),
+            lights: Arc::new(RwLock::new(Vec::new())),
+            camera: Arc::new(Camera::default()),
             rng: ThreadRng::default(),
         }
     }
@@ -29,24 +34,48 @@ impl World {
     pub fn run(&mut self) {
         self.start_time = SystemTime::now();
         let raw_pixel = self.shade_pixel();
-        let proc_pixel = self.outlier_removal(&raw_pixel);
+        let proc_pixel = self.outlier_removal(raw_pixel);
     }
 
-    fn shade_pixel(&mut self) -> PixelContainer {
+    fn shade_pixel(&mut self) -> Box<PixelContainer> {
+        // fn shade_pixel(&mut self) {
         println!("==> Starting shading...");
-        let c = Arc::new(self.camera);
-        let o = Arc::new(self.objects.clone());
-        let l = Arc::new(self.lights.clone());
-        let thread_pool = ThreadPool::new(THREAD_NUM, c, o, l);
+        let thread_pool = ThreadPool::new(
+            THREAD_NUM,
+            self.camera.clone(),
+            self.objects.clone(),
+            self.lights.clone(),
+        );
         for job in 0..WINDOW_HEIGHT {
             thread_pool.work(job);
         }
+        let res = self.res_process(&thread_pool);
+        thread_pool.shut_down();
+        let image_buffer =
+            ImageBuffer::<Rgb<u8>, Vec<u8>>::from_vec(WINDOW_WIDTH, WINDOW_HEIGHT, res.to_pixels())
+                .unwrap();
+        println!("Saving raw image..");
+        image_buffer
+            .save(format!("{}SPP.png", SAMPLES_PER_PIXEL))
+            .unwrap();
+        let t_end = SystemTime::now();
+        println!(
+            "Ray tracing time cost: {}",
+            t_end.duration_since(self.start_time).unwrap().as_secs()
+        );
+        self.last_end_time = t_end;
+        return Box::new(res);
+    }
+
+    fn res_process(&self, thread_pool: &ThreadPool) -> PixelContainer {
         let mut res = PixelContainer::new();
         let mut num = 0;
         let mut last_portion = 0;
         'job_loop: loop {
             if let Ok(job_res) = thread_pool.result.recv() {
-                res.data[job_res.0 as usize] = job_res.1;
+                let row_num = job_res.0 as usize;
+                let row_content = job_res.1.clone();
+                res.set_row(row_num, row_content);
                 num += 1;
                 let portion = ((num as f64 / WINDOW_HEIGHT as f64) * 100.0) as u32;
                 if portion > last_portion {
@@ -58,43 +87,23 @@ impl World {
                 break 'job_loop;
             }
         }
-        thread_pool.shut_down();
-        let image_buffer =
-            ImageBuffer::<Rgb<u8>, Vec<u8>>::from_vec(WINDOW_WIDTH, WINDOW_HEIGHT, res.to_pixels())
-                .unwrap();
-        println!("Saving raw image..");
-        image_buffer
-            .save(format!("{}SPP.png", SAMPLES_PER_PIXEL))
-            .unwrap();
-        println!(
-            "Ray tracing time cost: {}",
-            SystemTime::now()
-                .duration_since(self.start_time)
-                .unwrap()
-                .as_secs()
-        );
         return res;
     }
 
-    fn outlier_removal(&self, raw_data: &PixelContainer) -> PixelContainer {
+    fn outlier_removal(&self, raw_data: Box<PixelContainer>) -> Box<PixelContainer> {
         println!("==> Removing outlier");
         let mut res_vec = PixelContainer::new();
         for row_num in 0..WINDOW_HEIGHT as usize {
             for col_num in 0..WINDOW_WIDTH as usize {
-                let mut r_vec = Vec::new();
-                let mut g_vec = Vec::new();
-                let mut b_vec = Vec::new();
+                let mut colors_vec = Vec::new();
                 for (col, row) in generate_neighbor_pixel_coordinate(col_num, row_num) {
-                    r_vec.push(raw_data.data[row][col * 3]);
-                    g_vec.push(raw_data.data[row][col * 3 + 1]);
-                    b_vec.push(raw_data.data[row][col * 3 + 2]);
+                    colors_vec.push(raw_data.get_colors(col, row));
                 }
-                res_vec.data[row_num][col_num * 3] =
-                    num_inline(&r_vec, raw_data.data[row_num][col_num * 3]);
-                res_vec.data[row_num][col_num * 3 + 1] =
-                    num_inline(&g_vec, raw_data.data[row_num][col_num * 3 + 1]);
-                res_vec.data[row_num][col_num * 3 + 2] =
-                    num_inline(&b_vec, raw_data.data[row_num][col_num * 3 + 2]);
+                res_vec.set_colors(
+                    col_num,
+                    row_num,
+                    num_inline(&colors_vec, raw_data.get_colors(col_num, row_num)),
+                );
             }
         }
         let image_buffer = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_vec(
@@ -107,18 +116,17 @@ impl World {
         image_buffer
             .save(format!("{}SPP-outlier-removed.png", SAMPLES_PER_PIXEL))
             .unwrap();
+        let t_end = SystemTime::now();
         println!(
-            "Outlier removal time cost: {}",
-            SystemTime::now()
-                .duration_since(self.start_time)
-                .unwrap()
-                .as_secs()
+            "Outlier removal time cost: {}, total cost: {}",
+            t_end.duration_since(self.last_end_time).unwrap().as_secs(),
+            t_end.duration_since(self.start_time).unwrap().as_secs()
         );
-        return res_vec;
+        return Box::new(res_vec);
     }
 
     fn add(&mut self, obj: Arc<dyn Hittable + Send + Sync>) {
-        self.objects.push(obj);
+        self.objects.write().unwrap().push(obj);
     }
 
     pub fn default_scene(&mut self) {
@@ -137,7 +145,7 @@ impl World {
             Vector3::new([0.0, -1.0, 0.0]),
             Arc::new(light),
         )));
-        self.lights.push(Arc::new(Panel::new(
+        self.lights.write().unwrap().push(Arc::new(Panel::new(
             [
                 Point::new([225.0, 599.0, -350.0]),
                 Point::new([375.0, 599.0, -200.0]),
@@ -214,10 +222,10 @@ impl World {
             60.0,
             Arc::new(glass),
         )));
-        self.camera = Camera::new(
+        self.camera = Arc::new(Camera::new(
             Point::new([300.0, 300.0, 800.0]),
             Vector3::new([0.0, 0.0, -1.0]),
             Vector3::new([0.0, 1.0, 0.0]),
-        );
+        ));
     }
 }

@@ -75,9 +75,44 @@ pub fn generate_neighbor_pixel_coordinate(col_num: usize, row_num: usize) -> Vec
     return res;
 }
 
-pub fn num_inline(list: &Vec<f64>, target: f64) -> f64 {
-    let mean = list.iter().sum::<f64>() / list.len() as f64;
-    let sigma =
-        (list.iter().map(|num| ((*num) - mean).powi(2)).sum::<f64>() / list.len() as f64).sqrt();
-    return clamp(target, mean - 2.0 * sigma, mean + 2.0 * sigma);
+pub fn num_inline(list: &Vec<[f64; 3]>, target: [f64; 3]) -> [f64; 3] {
+    let l = list.len();
+    let mut res = target.clone();
+    let mut r_vec = Vec::with_capacity(l);
+    let mut g_vec = Vec::with_capacity(l);
+    let mut b_vec = Vec::with_capacity(l);
+    for colors in list.iter() {
+        r_vec.push(colors[0]);
+        g_vec.push(colors[1]);
+        b_vec.push(colors[2]);
+    }
+    let mean_r = r_vec.iter().sum::<f64>() / l as f64;
+    let mean_g = g_vec.iter().sum::<f64>() / l as f64;
+    let mean_b = b_vec.iter().sum::<f64>() / l as f64;
+    let sigma_r = (r_vec
+        .iter()
+        .map(|num| ((*num) - mean_r).powi(2))
+        .sum::<f64>()
+        / l as f64)
+        .sqrt();
+    let sigma_g = (g_vec
+        .iter()
+        .map(|num| ((*num) - mean_g).powi(2))
+        .sum::<f64>()
+        / l as f64)
+        .sqrt();
+    let sigma_b = (b_vec
+        .iter()
+        .map(|num| ((*num) - mean_b).powi(2))
+        .sum::<f64>()
+        / l as f64)
+        .sqrt();
+    res[0] = clamp(target[0], mean_r - 2.0 * sigma_r, mean_r + 2.0 * sigma_r);
+    res[1] = clamp(target[1], mean_g - 2.0 * sigma_g, mean_g + 2.0 * sigma_g);
+    res[2] = clamp(target[2], mean_b - 2.0 * sigma_b, mean_b + 2.0 * sigma_b);
+    return res;
+}
+
+pub fn to_u8(num: &f64) -> u8 {
+    (clamp((*num).sqrt(), 0.0, 1.0) * 255.0) as u8
 }

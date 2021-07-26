@@ -15,8 +15,9 @@ use crate::{
 
 pub fn shade(
     ray_in: &Ray,
-    objects: &Arc<Vec<Arc<dyn Hittable + Send + Sync>>>,
-    lights: &Arc<Vec<Arc<dyn HittableLight + Send + Sync>>>,
+    // objects: &Arc<Vec<Arc<dyn Hittable + Send + Sync>>>,
+    objects: &Vec<Arc<dyn Hittable + Send + Sync>>,
+    lights: &Vec<Arc<dyn HittableLight + Send + Sync>>,
     depth: i32,
     rng: &mut ThreadRng,
     dismiss_light: bool,
@@ -47,7 +48,8 @@ pub fn shade(
 
 fn ray_hit(
     ray_in: &Ray,
-    objects: &Arc<Vec<Arc<dyn Hittable + Send + Sync>>>,
+    // objects: &Arc<Vec<Arc<dyn Hittable + Send + Sync>>>,
+    objects: &Vec<Arc<dyn Hittable + Send + Sync>>,
     dismiss_light: bool,
 ) -> Option<HitInfo> {
     let mut t = INFINITY;
@@ -71,8 +73,9 @@ fn shade_point(
     point: &Point,
     point_material: &Arc<dyn Material>,
     point_normal: &Vector3,
-    objects: &Arc<Vec<Arc<dyn Hittable + Send + Sync>>>,
-    lights: &Arc<Vec<Arc<dyn HittableLight + Send + Sync>>>,
+    // objects: &Arc<Vec<Arc<dyn Hittable + Send + Sync>>>,
+    objects: &Vec<Arc<dyn Hittable + Send + Sync>>,
+    lights: &Vec<Arc<dyn HittableLight + Send + Sync>>,
     depth: i32,
     rng: &mut ThreadRng,
     dismiss_light: bool,

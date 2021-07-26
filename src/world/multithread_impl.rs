@@ -1,7 +1,7 @@
 use std::{
     sync::{
         mpsc::{self, Receiver, Sender},
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
     },
     thread,
 };
@@ -10,14 +10,14 @@ use rand::prelude::ThreadRng;
 
 use crate::{
     camera::Camera,
+    data::RowPixels,
     entity::obj_traits::{Hittable, HittableLight},
-    settings::WINDOW_WIDTH,
     world::job_distribution::process_job_sequence,
 };
 
 pub struct ThreadPool {
     workers: Vec<Worker>,
-    pub result: Receiver<Arc<(u32, [f64; (WINDOW_WIDTH * 3) as usize])>>,
+    pub result: Receiver<Arc<(u32, RowPixels)>>,
     sender: Sender<Message>,
 }
 
@@ -35,8 +35,8 @@ impl ThreadPool {
     pub fn new(
         size: usize,
         camera: Arc<Camera>,
-        objects: Arc<Vec<Arc<dyn Hittable + Send + Sync>>>,
-        lights: Arc<Vec<Arc<dyn HittableLight + Send + Sync>>>,
+        objects: Arc<RwLock<Vec<Arc<dyn Hittable + Send + Sync>>>>,
+        lights: Arc<RwLock<Vec<Arc<dyn HittableLight + Send + Sync>>>>,
     ) -> Self {
         let mut workers = Vec::with_capacity(size);
         let (sender, receiver) = mpsc::channel();
@@ -75,21 +75,21 @@ impl Worker {
     pub fn new(
         id: usize,
         receiver: Arc<Mutex<Receiver<Message>>>,
-        res_sender: Sender<Arc<(u32, [f64; (WINDOW_WIDTH * 3) as usize])>>,
+        res_sender: Sender<Arc<(u32, RowPixels)>>,
         camera: Arc<Camera>,
-        objects: Arc<Vec<Arc<dyn Hittable + Send + Sync>>>,
-        lights: Arc<Vec<Arc<dyn HittableLight + Send + Sync>>>,
+        objects: Arc<RwLock<Vec<Arc<dyn Hittable + Send + Sync>>>>,
+        lights: Arc<RwLock<Vec<Arc<dyn HittableLight + Send + Sync>>>>,
     ) -> Self {
         let thread = thread::spawn(move || loop {
             let mut rng = ThreadRng::default();
-            let c = camera.clone();
-            let o = objects.clone();
-            let l = lights.clone();
+            let o = objects.read().unwrap();
+            let l = lights.read().unwrap();
             let msg = receiver.lock().unwrap().recv().unwrap();
             match msg {
                 Message::NewWork(work) => {
                     println!("Thread {} working..", id);
-                    let res = Arc::new(process_job_sequence(work, &c, &o, &l, &mut rng));
+                    let res =
+                        Arc::new(process_job_sequence(work, camera.clone(), &o, &l, &mut rng));
                     res_sender.send(res).unwrap();
                 }
                 Message::Terminate => {

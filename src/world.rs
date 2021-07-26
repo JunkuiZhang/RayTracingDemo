@@ -1,6 +1,8 @@
-use std::{sync::Arc, time::SystemTime};
+use std::{
+    sync::{Arc, RwLock},
+    time::SystemTime,
+};
 
-use image::{ImageBuffer, Rgb};
 use rand::prelude::ThreadRng;
 
 use crate::{
@@ -14,8 +16,9 @@ mod world_impl;
 
 pub struct World {
     start_time: SystemTime,
-    pub objects: Vec<Arc<dyn Hittable + Send + Sync>>,
-    pub camera: Camera,
+    last_end_time: SystemTime,
+    pub objects: Arc<RwLock<Vec<Arc<dyn Hittable + Send + Sync>>>>,
+    pub camera: Arc<Camera>,
     pub rng: ThreadRng,
-    pub lights: Vec<Arc<dyn HittableLight + Send + Sync>>,
+    pub lights: Arc<RwLock<Vec<Arc<dyn HittableLight + Send + Sync>>>>,
 }
