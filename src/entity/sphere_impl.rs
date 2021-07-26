@@ -5,11 +5,17 @@ use crate::{data::HitInfo, material::Material, some_math::Point};
 use super::{obj_traits::Hittable, Ray, Sphere};
 
 impl Sphere {
-    pub fn new(center: Point, radius: f64, material: Arc<dyn Material + Send + Sync>) -> Self {
+    pub fn new(
+        center: Point,
+        radius: f64,
+        material: Arc<dyn Material + Send + Sync>,
+        id: usize,
+    ) -> Self {
         Sphere {
             center,
             radius,
             material,
+            id,
         }
     }
 }
@@ -33,6 +39,7 @@ impl Hittable for Sphere {
                 t,
                 normal,
                 material: self.material.clone(),
+                obj_id: self.id,
             });
         } else {
             let t = (-b + indicator.sqrt()) / (2.0 * a);
@@ -43,6 +50,7 @@ impl Hittable for Sphere {
                 t,
                 normal,
                 material: self.material.clone(),
+                obj_id: self.id,
             });
         }
     }

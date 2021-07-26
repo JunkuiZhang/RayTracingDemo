@@ -17,6 +17,7 @@ impl Rectangle {
         points: [Point; 2],
         angle_rotate_y: Option<f64>,
         material: Arc<dyn Material + Send + Sync>,
+        id: usize,
     ) -> Self {
         if let Some(angle) = angle_rotate_y {
             let mut trans_points = [Point::default(); 2];
@@ -37,6 +38,7 @@ impl Rectangle {
                 angle_rotate_y,
                 trans_points,
                 material,
+                id,
             };
         } else {
             return Rectangle {
@@ -44,6 +46,7 @@ impl Rectangle {
                 angle_rotate_y,
                 trans_points: points.clone(),
                 material,
+                id,
             };
         }
     }
@@ -95,6 +98,7 @@ impl Hittable for Rectangle {
             t: t_min,
             normal,
             material: self.material.clone(),
+            obj_id: self.id,
         });
     }
 

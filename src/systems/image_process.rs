@@ -4,16 +4,20 @@ use crate::{
 };
 
 pub fn pixel_filter(gb0: &GBInfo, gb1: &GBInfo, c0: Color, c1: Color, sigma: f64) -> f64 {
-    normal_filter(1.0, gb0.normal, gb1.normal)
-        * (depth_filter(
-            0.2,
-            gb0.distance,
-            gb1.distance,
-            gb0.hit_point,
-            gb1.hit_point,
-            gb0.normal,
-        ) + luminance_filter(1.0, c0, c1, sigma))
-        .exp()
+    if gb0.hit_obj_id != gb1.hit_obj_id {
+        return 0.0;
+    } else {
+        return normal_filter(1.0, gb0.normal, gb1.normal)
+            * (depth_filter(
+                0.2,
+                gb0.distance,
+                gb1.distance,
+                gb0.hit_point,
+                gb1.hit_point,
+                gb0.normal,
+            ) + luminance_filter(1.0, c0, c1, sigma))
+            .exp();
+    }
 }
 
 #[inline]

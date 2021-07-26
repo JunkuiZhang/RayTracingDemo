@@ -10,14 +10,14 @@ use rand::prelude::ThreadRng;
 
 use crate::{
     camera::Camera,
-    data::{GeometryRowBuffer, RowPixels},
+    data::{RowColGBuffer, RowColPixels},
     entity::obj_traits::{Hittable, HittableLight},
     world::job_distribution::process_job_sequence,
 };
 
 pub struct ThreadPool {
     workers: Vec<Worker>,
-    pub result: Receiver<Arc<(u32, RowPixels, GeometryRowBuffer)>>,
+    pub result: Receiver<Arc<(u32, RowColPixels, RowColGBuffer)>>,
     sender: Sender<Message>,
 }
 
@@ -75,7 +75,7 @@ impl Worker {
     pub fn new(
         id: usize,
         receiver: Arc<Mutex<Receiver<Message>>>,
-        res_sender: Sender<Arc<(u32, RowPixels, GeometryRowBuffer)>>,
+        res_sender: Sender<Arc<(u32, RowColPixels, RowColGBuffer)>>,
         camera: Arc<Camera>,
         objects: Arc<RwLock<Vec<Arc<dyn Hittable + Send + Sync>>>>,
         lights: Arc<RwLock<Vec<Arc<dyn HittableLight + Send + Sync>>>>,

@@ -36,6 +36,7 @@ pub fn shade(
                 distance: (ray_in.at(info.t) - ray_in.origin).length(),
                 normal: info.normal,
                 hit_point: info.hit_point,
+                hit_obj_id: info.obj_id,
             }
         }
         return shade_point(

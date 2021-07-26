@@ -18,11 +18,13 @@ impl Panel {
         points: [Point; 2],
         normal: Vector3,
         material: Arc<dyn Material + Send + Sync>,
+        id: usize,
     ) -> Self {
         Panel {
             points,
             normal,
             material,
+            id,
         }
     }
 }
@@ -45,6 +47,7 @@ impl Hittable for Panel {
                 t,
                 normal: self.normal,
                 material: self.material.clone(),
+                obj_id: self.id,
             });
         } else {
             return None;

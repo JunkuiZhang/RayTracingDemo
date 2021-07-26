@@ -9,31 +9,21 @@ mod gbuffer_impl;
 mod pixel_data_impl;
 
 pub struct PixelContainer {
-    data: Vec<RowPixels>,
+    data: Vec<RowColPixels>,
 }
 
 #[derive(Debug, Clone)]
-pub struct RowPixels {
-    data: Vec<f64>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ColPixels {
+pub struct RowColPixels {
     data: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]
 pub struct GeometryBuffer {
-    data: Vec<GeometryRowBuffer>,
+    data: Vec<RowColGBuffer>,
 }
 
 #[derive(Debug, Clone)]
-pub struct GeometryRowBuffer {
-    data: Vec<GBInfo>,
-}
-
-#[derive(Debug, Clone)]
-pub struct GeometryColBuffer {
+pub struct RowColGBuffer {
     data: Vec<GBInfo>,
 }
 
@@ -51,6 +41,7 @@ pub struct HitInfo {
     pub t: f64,
     pub normal: Vector3,
     pub material: Arc<dyn Material>,
+    pub obj_id: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -58,4 +49,10 @@ pub struct ScatterInfo {
     pub scatter_dir: Vector3,
     pub color: Color,
     pub pdf: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum FilterType {
+    Row,
+    Col,
 }

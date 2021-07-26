@@ -8,7 +8,7 @@ use image::{ImageBuffer, Rgb};
 
 use crate::{
     camera::Camera,
-    data::{GeometryBuffer, PixelContainer},
+    data::{FilterType, GeometryBuffer, PixelContainer},
     entity::{obj_traits::Hittable, Panel, Rectangle, Sphere},
     material::{DiffuseLight, DiffuseMat, Glass, Metal},
     settings::{FILTER_STEP, SAMPLES_PER_PIXEL, THREAD_NUM, WINDOW_HEIGHT, WINDOW_WIDTH},
@@ -56,22 +56,8 @@ impl World {
         }
         let res = self.res_process(&thread_pool);
         thread_pool.shut_down();
-        let image_buffer = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_vec(
-            WINDOW_WIDTH,
-            WINDOW_HEIGHT,
-            res.0.to_pixels(),
-        )
-        .unwrap();
-        println!("Saving raw image..");
-        image_buffer
-            .save(format!("00-{}SPP.png", SAMPLES_PER_PIXEL))
-            .unwrap();
-        let t_end = SystemTime::now();
-        println!(
-            "Ray tracing time cost: {}",
-            t_end.duration_since(self.start_time).unwrap().as_secs()
-        );
-        self.last_end_time = t_end;
+
+        self.save_image(&res.0, "origin-img".to_string(), 0);
         return res;
     }
 
@@ -114,29 +100,12 @@ impl World {
                     col_num,
                     row_num,
                     num_inline(&colors_vec, raw_data.get_colors(col_num, row_num)),
+                    FilterType::Row,
                 );
             }
         }
-        let image_buffer = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_vec(
-            WINDOW_WIDTH,
-            WINDOW_HEIGHT,
-            res_vec.to_pixels(),
-        )
-        .unwrap();
-        println!("Saving processed image..");
-        image_buffer
-            .save(format!(
-                "0{}-{}SPP-outlier-removed.png",
-                indicator, SAMPLES_PER_PIXEL
-            ))
-            .unwrap();
-        let t_end = SystemTime::now();
-        println!(
-            "Outlier removal time cost: {}, total cost: {}",
-            t_end.duration_since(self.last_end_time).unwrap().as_secs(),
-            t_end.duration_since(self.start_time).unwrap().as_secs()
-        );
-        self.last_end_time = t_end;
+
+        self.save_image(&res_vec, "outlier-removal".to_string(), indicator);
         return res_vec;
     }
 
@@ -145,85 +114,54 @@ impl World {
         processed_img: PixelContainer,
         gbuffer: GeometryBuffer,
     ) -> PixelContainer {
-        println!("==> Row filtering...");
-        let mut res_vec = PixelContainer::new();
         // row process
-        for row_num in 0..WINDOW_HEIGHT as usize {
-            let row_pixels = processed_img.get_row_content(row_num);
-            let row_gbuffer = gbuffer.get_row_content(row_num);
-            for col_num in 0..WINDOW_WIDTH as usize {
-                let gb0 = row_gbuffer.get_data(col_num);
-                let c0 = row_pixels.get_color(col_num);
-                let mut weights = 1.0;
-                let mut res_pixel = c0.clone();
-                for step in 0..FILTER_STEP {
-                    let sample_points = generate_num_sequence(col_num, step);
-                    let mut color_vec = Vec::new();
-                    color_vec.push(c0);
-                    for temp_sample in sample_points.iter() {
-                        color_vec.push(row_pixels.get_color(*temp_sample));
-                    }
-                    let temp_l = color_vec.len();
-                    let color_mean = sum_vector_list(&color_vec) / temp_l as f64;
-                    let color_sigma = (color_vec
-                        .iter()
-                        .map(|c| (*c - color_mean).length_square())
-                        .sum::<f64>()
-                        / (temp_l - 1) as f64)
-                        .sqrt();
-
-                    for sample in sample_points {
-                        let c1 = row_pixels.get_color(sample);
-                        let gb1 = row_gbuffer.get_data(sample);
-                        let w = pixel_filter(gb0, gb1, c0, c1, color_sigma);
-                        weights += w;
-                        res_pixel += w * c1;
-                    }
-                }
-                if weights > 0.0 {
-                    res_pixel /= weights;
-                }
-                res_vec.set_colors(col_num, row_num, res_pixel.data);
-            }
-        }
-
-        let image_buffer = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_vec(
-            WINDOW_WIDTH,
-            WINDOW_HEIGHT,
-            res_vec.to_pixels(),
-        )
-        .unwrap();
-        println!("Saving filtered image..");
-        image_buffer
-            .save(format!("02-{}SPP-row-filtered.png", SAMPLES_PER_PIXEL))
-            .unwrap();
-        let t_end = SystemTime::now();
-        println!(
-            "Image filter time cost: {}, total cost: {}",
-            t_end.duration_since(self.last_end_time).unwrap().as_secs(),
-            t_end.duration_since(self.start_time).unwrap().as_secs()
-        );
-        self.last_end_time = t_end;
+        let res_vec = self.filter_image(&processed_img, &gbuffer, FilterType::Row);
+        self.save_image(&res_vec, "row-filter".to_string(), 2);
         return res_vec;
     }
 
     fn col_filter(&mut self, processed_img: PixelContainer, gbuffer: GeometryBuffer) {
-        println!("==> Col filtering...");
+        let res_vec = self.filter_image(&processed_img, &gbuffer, FilterType::Col);
+        self.save_image(&res_vec, "col-filter".to_string(), 4);
+    }
+
+    fn filter_image(
+        &self,
+        input_pixels: &PixelContainer,
+        input_gbuffer: &GeometryBuffer,
+        filter_type: FilterType,
+    ) -> PixelContainer {
+        let x_axis_total_num;
+        let y_axis_total_num;
+        let label;
+        match filter_type {
+            FilterType::Row => {
+                x_axis_total_num = WINDOW_WIDTH;
+                y_axis_total_num = WINDOW_HEIGHT;
+                label = "Row-filter".to_string();
+            }
+            FilterType::Col => {
+                x_axis_total_num = WINDOW_HEIGHT;
+                y_axis_total_num = WINDOW_WIDTH;
+                label = "Col-filter".to_string();
+            }
+        }
+        println!("==> {} filtering...", label);
         let mut res_vec = PixelContainer::new();
-        for col_num in 0..WINDOW_WIDTH as usize {
-            let col_pixels = processed_img.get_col_content(col_num);
-            let col_gbuffer = gbuffer.get_col_content(col_num);
-            for row_num in 0..WINDOW_WIDTH as usize {
-                let gb0 = col_gbuffer.get_data(row_num);
-                let c0 = col_pixels.get_color(row_num);
+        for y_value in 0..y_axis_total_num as usize {
+            let y_axis_pixels = input_pixels.get_x_or_y(y_value, filter_type);
+            let y_axis_gbuffer = input_gbuffer.get_x_or_y(y_value, filter_type);
+            for x_value in 0..x_axis_total_num as usize {
+                let gb0 = y_axis_gbuffer.get_data(x_value);
+                let c0 = y_axis_pixels.get_color(x_value);
                 let mut weights = 1.0;
                 let mut res_pixel = c0.clone();
                 for step in 0..FILTER_STEP {
-                    let sample_points = generate_num_sequence(row_num, step);
+                    let sample_points = generate_num_sequence(x_value, step);
                     let mut color_vec = Vec::new();
                     color_vec.push(c0);
                     for temp_sample in sample_points.iter() {
-                        color_vec.push(col_pixels.get_color(*temp_sample));
+                        color_vec.push(y_axis_pixels.get_color(*temp_sample));
                     }
                     let temp_l = color_vec.len();
                     let color_mean = sum_vector_list(&color_vec) / temp_l as f64;
@@ -235,8 +173,8 @@ impl World {
                         .sqrt();
 
                     for sample in sample_points {
-                        let c1 = col_pixels.get_color(sample);
-                        let gb1 = col_gbuffer.get_data(sample);
+                        let c1 = y_axis_pixels.get_color(sample);
+                        let gb1 = y_axis_gbuffer.get_data(sample);
                         let w = pixel_filter(gb0, gb1, c0, c1, color_sigma);
                         weights += w;
                         res_pixel += w * c1;
@@ -245,33 +183,39 @@ impl World {
                 if weights > 0.0 {
                     res_pixel /= weights;
                 }
-                res_vec.set_colors(col_num, row_num, res_pixel.data);
+                res_vec.set_colors(x_value, y_value, res_pixel.data, filter_type);
             }
         }
+        return res_vec;
+    }
 
+    fn save_image(&mut self, res_vec: &PixelContainer, process_label: String, num: usize) {
         let image_buffer = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_vec(
             WINDOW_WIDTH,
             WINDOW_HEIGHT,
             res_vec.to_pixels(),
         )
         .unwrap();
-        println!("Saving filtered image..");
+        println!("Saving {} image..", process_label);
         image_buffer
-            .save(format!("04-{}SPP-col-filtered.png", SAMPLES_PER_PIXEL))
+            .save(format!(
+                "0{}-{}SPP-{}.png",
+                num, SAMPLES_PER_PIXEL, process_label
+            ))
             .unwrap();
         let t_end = SystemTime::now();
         println!(
-            "Image filter time cost: {}, total cost: {}",
+            "Image {} time cost: {}, total cost: {}",
+            process_label,
             t_end.duration_since(self.last_end_time).unwrap().as_secs(),
             t_end.duration_since(self.start_time).unwrap().as_secs()
         );
-    }
-
-    fn add(&mut self, obj: Arc<dyn Hittable + Send + Sync>) {
-        self.objects.write().unwrap().push(obj);
+        self.last_end_time = t_end;
     }
 
     pub fn default_scene(&mut self) {
+        let mut objs: Vec<Arc<dyn Hittable + Send + Sync>> = Vec::new();
+
         let red = DiffuseMat::new(Color::new([0.65, 0.05, 0.05]));
         let white = DiffuseMat::new(Color::new([0.75, 0.75, 0.75]));
         let green = DiffuseMat::new(Color::new([0.12, 0.45, 0.15]));
@@ -279,77 +223,79 @@ impl World {
         let glass = Glass::new(Color::new([0.9, 0.9, 0.9]), 1.5);
         let light = DiffuseLight::new(Color::new([7.0, 7.0, 7.0]));
         // light
-        self.add(Arc::new(Panel::new(
+        let panel_light = Arc::new(Panel::new(
             [
                 Point::new([225.0, 599.0, -350.0]),
                 Point::new([375.0, 599.0, -200.0]),
             ],
             Vector3::new([0.0, -1.0, 0.0]),
             Arc::new(light),
-        )));
-        self.lights.write().unwrap().push(Arc::new(Panel::new(
-            [
-                Point::new([225.0, 599.0, -350.0]),
-                Point::new([375.0, 599.0, -200.0]),
-            ],
-            Vector3::new([0.0, -1.0, 0.0]),
-            Arc::new(light),
-        )));
+            objs.len(),
+        ));
+
+        objs.push(panel_light.clone());
+        self.lights.write().unwrap().push(panel_light);
         // top
-        self.add(Arc::new(Panel::new(
+        objs.push(Arc::new(Panel::new(
             [
                 Point::new([0.0, 600.0, -600.0]),
                 Point::new([600.0, 600.0, 0.0]),
             ],
             Vector3::new([0.0, -1.0, 0.0]),
             Arc::new(white),
+            objs.len(),
         )));
         // left
-        self.add(Arc::new(Panel::new(
+        objs.push(Arc::new(Panel::new(
             [
                 Point::new([0.0, 0.0, -600.0]),
                 Point::new([0.0, 600.0, 0.0]),
             ],
             Vector3::new([1.0, 0.0, 0.0]),
             Arc::new(green),
+            objs.len(),
         )));
         // back
-        self.add(Arc::new(Panel::new(
+        objs.push(Arc::new(Panel::new(
             [
                 Point::new([0.0, 0.0, -600.0]),
                 Point::new([600.0, 600.0, -600.0]),
             ],
             Vector3::new([0.0, 0.0, 1.0]),
             Arc::new(white),
+            objs.len(),
         )));
         // right
-        self.add(Arc::new(Panel::new(
+        objs.push(Arc::new(Panel::new(
             [
                 Point::new([600.0, 0.0, -600.0]),
                 Point::new([600.0, 600.0, 0.0]),
             ],
             Vector3::new([-1.0, 0.0, 0.0]),
             Arc::new(red),
+            objs.len(),
         )));
         // bottom
-        self.add(Arc::new(Panel::new(
+        objs.push(Arc::new(Panel::new(
             [
                 Point::new([0.0, 0.0, -600.0]),
                 Point::new([600.0, 0.0, 0.0]),
             ],
             Vector3::new([0.0, 1.0, 0.0]),
             Arc::new(white),
+            objs.len(),
         )));
-        self.add(Arc::new(Rectangle::new(
+        objs.push(Arc::new(Rectangle::new(
             [
                 Point::new([110.0, 0.0, -460.0]),
                 Point::new([280.0, 330.0, -280.0]),
             ],
             Some(10.0),
             Arc::new(white),
+            objs.len(),
             // Arc::new(blue),
         )));
-        self.add(Arc::new(Rectangle::new(
+        objs.push(Arc::new(Rectangle::new(
             [
                 Point::new([350.0, 0.0, -270.0]),
                 Point::new([500.0, 150.0, -120.0]),
@@ -357,6 +303,7 @@ impl World {
             Some(-5.0),
             // None,
             Arc::new(white),
+            objs.len(),
             // Arc::new(cupper),
         )));
         // self.add(Arc::new(Sphere::new(
@@ -369,5 +316,6 @@ impl World {
             Vector3::new([0.0, 0.0, -1.0]),
             Vector3::new([0.0, 1.0, 0.0]),
         ));
+        self.objects = Arc::new(RwLock::new(objs));
     }
 }

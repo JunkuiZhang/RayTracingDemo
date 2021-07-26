@@ -16,6 +16,7 @@ pub struct Sphere {
     pub center: Point,
     pub radius: f64,
     pub material: Arc<dyn Material + Send + Sync>,
+    id: usize,
 }
 
 #[derive(Clone)]
@@ -23,6 +24,7 @@ pub struct Panel {
     pub points: [Point; 2],
     pub normal: Vector3,
     pub material: Arc<dyn Material + Send + Sync>,
+    id: usize,
 }
 
 #[derive(Clone)]
@@ -32,6 +34,7 @@ pub struct Rectangle {
     pub angle_rotate_y: Option<f64>,
     pub trans_points: [Point; 2],
     pub material: Arc<dyn Material + Send + Sync>,
+    id: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
