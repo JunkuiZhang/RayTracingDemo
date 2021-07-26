@@ -1,8 +1,4 @@
-use std::{
-    fmt::Display,
-    ops::{Add, AddAssign, Div, DivAssign, Mul, Sub},
-    usize,
-};
+use std::{fmt::Display, iter::Sum, ops::{Add, AddAssign, Div, DivAssign, Mul, Sub}, usize};
 
 use super::{clamp, Color, Vector3};
 

@@ -107,12 +107,37 @@ pub fn num_inline(list: &Vec<[f64; 3]>, target: [f64; 3]) -> [f64; 3] {
         .sum::<f64>()
         / l as f64)
         .sqrt();
-    res[0] = clamp(target[0], mean_r - 2.0 * sigma_r, mean_r + 2.0 * sigma_r);
-    res[1] = clamp(target[1], mean_g - 2.0 * sigma_g, mean_g + 2.0 * sigma_g);
-    res[2] = clamp(target[2], mean_b - 2.0 * sigma_b, mean_b + 2.0 * sigma_b);
+    res[0] = clamp(target[0], mean_r - 1.5 * sigma_r, mean_r + 1.5 * sigma_r);
+    res[1] = clamp(target[1], mean_g - 1.5 * sigma_g, mean_g + 1.5 * sigma_g);
+    res[2] = clamp(target[2], mean_b - 1.5 * sigma_b, mean_b + 1.5 * sigma_b);
+    return res;
+}
+
+pub fn generate_num_sequence(base_num: usize, step: usize) -> Vec<usize> {
+    let mut res = Vec::with_capacity(6);
+    for i in 1..4 {
+        let interval = i as i32;
+        let n0 = base_num as i32 - interval;
+        let n1 = base_num as i32 + interval;
+        if n0 >= 0 {
+            res.push(n0 as usize);
+        }
+        if n1 < WINDOW_WIDTH as i32 {
+            res.push(n1 as usize);
+        }
+    }
     return res;
 }
 
 pub fn to_u8(num: &f64) -> u8 {
     (clamp((*num).sqrt(), 0.0, 1.0) * 255.0) as u8
+}
+
+pub fn sum_vector_list(list: &Vec<Vector3>) -> Vector3 {
+    let mut res = Vector3::new([0.0, 0.0, 0.0]);
+    for vec in list {
+        res += *vec;
+    }
+    res /= list.len() as f64;
+    return res;
 }

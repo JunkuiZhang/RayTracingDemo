@@ -3,7 +3,7 @@ use std::{f64::INFINITY, sync::Arc};
 use rand::prelude::ThreadRng;
 
 use crate::{
-    data::HitInfo,
+    data::{GBInfo, HitInfo},
     entity::{
         obj_traits::{Hittable, HittableLight},
         Ray,
@@ -15,12 +15,13 @@ use crate::{
 
 pub fn shade(
     ray_in: &Ray,
-    // objects: &Arc<Vec<Arc<dyn Hittable + Send + Sync>>>,
     objects: &Vec<Arc<dyn Hittable + Send + Sync>>,
     lights: &Vec<Arc<dyn HittableLight + Send + Sync>>,
     depth: i32,
     rng: &mut ThreadRng,
     dismiss_light: bool,
+    gb_indicator: bool,
+    gbuffer_data: &mut GBInfo,
 ) -> Color {
     if depth < 0 {
         return Color::BLACK;
@@ -30,7 +31,13 @@ pub fn shade(
         dl = false;
     }
     if let Some(info) = ray_hit(ray_in, objects, dl) {
-        // return info.material.naive_render();
+        if gb_indicator {
+            *gbuffer_data = GBInfo {
+                distance: (ray_in.at(info.t) - ray_in.origin).length(),
+                normal: info.normal,
+                hit_point: info.hit_point,
+            }
+        }
         return shade_point(
             ray_in,
             &info.hit_point,
@@ -123,6 +130,8 @@ fn shade_point(
         depth,
         rng,
         dismiss_light,
+        false,
+        &mut GBInfo::default(),
     )) * ((*point_normal) * scatter_info.scatter_dir).abs()
         / scatter_info.pdf
         * fresnel_factor

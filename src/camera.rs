@@ -48,9 +48,15 @@ impl Camera {
     ) -> [Ray; SAMPLES_PER_PIXEL] {
         let mut res = [Ray::default(); SAMPLES_PER_PIXEL];
         for n in 0..SAMPLES_PER_PIXEL {
-            let target = self.upper_left_point
-                + (col_num as f64 + rng.gen_range(0.0..1.0)) * self.u
-                - (row_num as f64 + rng.gen_range(0.0..1.0)) * self.v;
+            let target;
+            if n == 0 {
+                target = self.upper_left_point + (col_num as f64 + 0.5) * self.u
+                    - (row_num as f64 + 0.5) * self.v;
+            } else {
+                target = self.upper_left_point
+                    + (col_num as f64 + rng.gen_range(0.0..1.0)) * self.u
+                    - (row_num as f64 + rng.gen_range(0.0..1.0)) * self.v;
+            }
             let ray = Ray::new(self.position, (target - self.position).normalize());
             res[n] = ray;
         }

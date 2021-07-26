@@ -5,15 +5,18 @@ use std::{
 };
 
 use image::{ImageBuffer, Rgb};
-use rand::prelude::ThreadRng;
 
 use crate::{
     camera::Camera,
-    data::PixelContainer,
+    data::{GeometryBuffer, PixelContainer},
     entity::{obj_traits::Hittable, Panel, Rectangle, Sphere},
     material::{DiffuseLight, DiffuseMat, Glass, Metal},
     settings::{SAMPLES_PER_PIXEL, THREAD_NUM, WINDOW_HEIGHT, WINDOW_WIDTH},
-    some_math::{generate_neighbor_pixel_coordinate, num_inline, Color, Point, Vector3},
+    some_math::{
+        generate_neighbor_pixel_coordinate, generate_num_sequence, num_inline, sum_vector_list,
+        Color, Point, Vector3,
+    },
+    systems::image_process::pixel_filter,
     world::multithread_impl::ThreadPool,
 };
 
@@ -27,17 +30,17 @@ impl World {
             objects: Arc::new(RwLock::new(Vec::new())),
             lights: Arc::new(RwLock::new(Vec::new())),
             camera: Arc::new(Camera::default()),
-            rng: ThreadRng::default(),
         }
     }
 
     pub fn run(&mut self) {
         self.start_time = SystemTime::now();
-        let raw_pixel = self.shade_pixel();
+        let (raw_pixel, gbuffer) = self.shade_pixel();
         let proc_pixel = self.outlier_removal(raw_pixel);
+        self.denoising(proc_pixel, gbuffer);
     }
 
-    fn shade_pixel(&mut self) -> Box<PixelContainer> {
+    fn shade_pixel(&mut self) -> (PixelContainer, GeometryBuffer) {
         // fn shade_pixel(&mut self) {
         println!("==> Starting shading...");
         let thread_pool = ThreadPool::new(
@@ -51,9 +54,12 @@ impl World {
         }
         let res = self.res_process(&thread_pool);
         thread_pool.shut_down();
-        let image_buffer =
-            ImageBuffer::<Rgb<u8>, Vec<u8>>::from_vec(WINDOW_WIDTH, WINDOW_HEIGHT, res.to_pixels())
-                .unwrap();
+        let image_buffer = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_vec(
+            WINDOW_WIDTH,
+            WINDOW_HEIGHT,
+            res.0.to_pixels(),
+        )
+        .unwrap();
         println!("Saving raw image..");
         image_buffer
             .save(format!("{}SPP.png", SAMPLES_PER_PIXEL))
@@ -64,18 +70,21 @@ impl World {
             t_end.duration_since(self.start_time).unwrap().as_secs()
         );
         self.last_end_time = t_end;
-        return Box::new(res);
+        return res;
     }
 
-    fn res_process(&self, thread_pool: &ThreadPool) -> PixelContainer {
-        let mut res = PixelContainer::new();
+    fn res_process(&self, thread_pool: &ThreadPool) -> (PixelContainer, GeometryBuffer) {
+        let mut pixel_res = PixelContainer::new();
+        let mut gbuffer_res = GeometryBuffer::new();
         let mut num = 0;
         let mut last_portion = 0;
         'job_loop: loop {
             if let Ok(job_res) = thread_pool.result.recv() {
                 let row_num = job_res.0 as usize;
                 let row_content = job_res.1.clone();
-                res.set_row(row_num, row_content);
+                let gb_row_content = job_res.2.clone();
+                pixel_res.set_row(row_num, row_content);
+                gbuffer_res.set_row(row_num, gb_row_content);
                 num += 1;
                 let portion = ((num as f64 / WINDOW_HEIGHT as f64) * 100.0) as u32;
                 if portion > last_portion {
@@ -87,10 +96,10 @@ impl World {
                 break 'job_loop;
             }
         }
-        return res;
+        return (pixel_res, gbuffer_res);
     }
 
-    fn outlier_removal(&self, raw_data: Box<PixelContainer>) -> Box<PixelContainer> {
+    fn outlier_removal(&self, raw_data: PixelContainer) -> PixelContainer {
         println!("==> Removing outlier");
         let mut res_vec = PixelContainer::new();
         for row_num in 0..WINDOW_HEIGHT as usize {
@@ -122,7 +131,67 @@ impl World {
             t_end.duration_since(self.last_end_time).unwrap().as_secs(),
             t_end.duration_since(self.start_time).unwrap().as_secs()
         );
-        return Box::new(res_vec);
+        return res_vec;
+    }
+
+    fn denoising(&self, processed_img: PixelContainer, gbuffer: GeometryBuffer) {
+        println!("==> Filtering...");
+        let mut res_vec = PixelContainer::new();
+        // row process
+        for row_num in 0..WINDOW_HEIGHT as usize {
+            let row_pixels = processed_img.get_row_content(row_num);
+            let row_gbuffer = gbuffer.get_row_content(row_num);
+            for col_num in 0..WINDOW_WIDTH as usize {
+                let sample_points = generate_num_sequence(col_num, 4);
+                let gb0 = row_gbuffer.get_data(col_num);
+                let c0 = row_pixels.get_color(col_num);
+
+                let mut color_vec = Vec::new();
+                color_vec.push(c0);
+                for temp_sample in sample_points.iter() {
+                    color_vec.push(row_pixels.get_color(*temp_sample));
+                }
+                let temp_l = color_vec.len();
+                let color_mean = sum_vector_list(&color_vec) / temp_l as f64;
+                let color_sigma = (color_vec
+                    .iter()
+                    .map(|c| (*c - color_mean).length_square())
+                    .sum::<f64>()
+                    / temp_l as f64)
+                    .sqrt();
+
+                let mut weights = 1.0;
+                let mut res_pixel = c0.clone();
+                for sample in sample_points {
+                    let c1 = row_pixels.get_color(sample);
+                    let gb1 = row_gbuffer.get_data(sample);
+                    let w = pixel_filter(gb0, gb1, c0, c1, color_sigma);
+                    weights += w;
+                    res_pixel += w * c1;
+                }
+                if weights > 0.0 {
+                    res_pixel /= weights;
+                }
+                res_vec.set_colors(col_num, row_num, res_pixel.data);
+            }
+        }
+
+        let image_buffer = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_vec(
+            WINDOW_WIDTH,
+            WINDOW_HEIGHT,
+            res_vec.to_pixels(),
+        )
+        .unwrap();
+        println!("Saving filtered image..");
+        image_buffer
+            .save(format!("{}SPP-outlier-filtered.png", SAMPLES_PER_PIXEL))
+            .unwrap();
+        let t_end = SystemTime::now();
+        println!(
+            "Image filter time cost: {}, total cost: {}",
+            t_end.duration_since(self.last_end_time).unwrap().as_secs(),
+            t_end.duration_since(self.start_time).unwrap().as_secs()
+        );
     }
 
     fn add(&mut self, obj: Arc<dyn Hittable + Send + Sync>) {
@@ -214,14 +283,14 @@ impl World {
             ],
             Some(-5.0),
             // None,
-            // Arc::new(white),
-            Arc::new(cupper),
+            Arc::new(white),
+            // Arc::new(cupper),
         )));
-        self.add(Arc::new(Sphere::new(
-            Point::new([150.0, 60.0, -160.0]),
-            60.0,
-            Arc::new(glass),
-        )));
+        // self.add(Arc::new(Sphere::new(
+        //     Point::new([150.0, 60.0, -160.0]),
+        //     60.0,
+        //     Arc::new(glass),
+        // )));
         self.camera = Arc::new(Camera::new(
             Point::new([300.0, 300.0, 800.0]),
             Vector3::new([0.0, 0.0, -1.0]),
