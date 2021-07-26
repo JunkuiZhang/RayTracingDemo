@@ -3,7 +3,7 @@ use crate::{
     some_math::{to_u8, Color},
 };
 
-use super::{PixelContainer, RowPixels};
+use super::{ColPixels, PixelContainer, RowPixels};
 
 impl PixelContainer {
     pub fn new() -> Self {
@@ -28,6 +28,16 @@ impl PixelContainer {
 
     pub fn get_row_content(&self, row_num: usize) -> &RowPixels {
         &self.data[row_num]
+    }
+
+    pub fn get_col_content(&self, col_num: usize) -> ColPixels {
+        let mut data = Vec::with_capacity((WINDOW_HEIGHT * 3) as usize);
+        for row in self.data.iter() {
+            for num in row.get_color(col_num).data.iter() {
+                data.push(*num);
+            }
+        }
+        return ColPixels { data };
     }
 
     pub fn set_row(&mut self, row_num: usize, row_content: RowPixels) {
@@ -74,5 +84,19 @@ impl RowPixels {
         self.set_value(col_num * 3, color[0]);
         self.set_value(col_num * 3 + 1, color[1]);
         self.set_value(col_num * 3 + 2, color[2]);
+    }
+}
+
+impl ColPixels {
+    fn get_value(&self, index: usize) -> f64 {
+        self.data[index]
+    }
+
+    pub fn get_color(&self, row_num: usize) -> Color {
+        Color::new([
+            self.get_value(row_num * 3),
+            self.get_value(row_num * 3 + 1),
+            self.get_value(row_num * 3 + 2),
+        ])
     }
 }

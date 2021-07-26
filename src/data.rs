@@ -17,6 +17,12 @@ pub struct RowPixels {
     data: Vec<f64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ColPixels {
+    data: Vec<f64>,
+}
+
+#[derive(Debug, Clone)]
 pub struct GeometryBuffer {
     data: Vec<GeometryRowBuffer>,
 }
@@ -26,11 +32,17 @@ pub struct GeometryRowBuffer {
     data: Vec<GBInfo>,
 }
 
+#[derive(Debug, Clone)]
+pub struct GeometryColBuffer {
+    data: Vec<GBInfo>,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GBInfo {
     pub distance: f64,
     pub normal: Vector3,
     pub hit_point: Point,
+    pub hit_obj_id: usize,
 }
 
 #[derive(Clone)]

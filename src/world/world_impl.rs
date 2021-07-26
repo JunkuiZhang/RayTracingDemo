@@ -11,7 +11,7 @@ use crate::{
     data::{GeometryBuffer, PixelContainer},
     entity::{obj_traits::Hittable, Panel, Rectangle, Sphere},
     material::{DiffuseLight, DiffuseMat, Glass, Metal},
-    settings::{SAMPLES_PER_PIXEL, THREAD_NUM, WINDOW_HEIGHT, WINDOW_WIDTH},
+    settings::{FILTER_STEP, SAMPLES_PER_PIXEL, THREAD_NUM, WINDOW_HEIGHT, WINDOW_WIDTH},
     some_math::{
         generate_neighbor_pixel_coordinate, generate_num_sequence, num_inline, sum_vector_list,
         Color, Point, Vector3,
@@ -36,8 +36,10 @@ impl World {
     pub fn run(&mut self) {
         self.start_time = SystemTime::now();
         let (raw_pixel, gbuffer) = self.shade_pixel();
-        let proc_pixel = self.outlier_removal(raw_pixel);
-        self.denoising(proc_pixel, gbuffer);
+        let proc_pixel_0 = self.outlier_removal(raw_pixel, 1);
+        let proc_pixel_1 = self.row_filter(proc_pixel_0, gbuffer.clone());
+        let proc_pixel_2 = self.outlier_removal(proc_pixel_1, 3);
+        self.col_filter(proc_pixel_2, gbuffer);
     }
 
     fn shade_pixel(&mut self) -> (PixelContainer, GeometryBuffer) {
@@ -62,7 +64,7 @@ impl World {
         .unwrap();
         println!("Saving raw image..");
         image_buffer
-            .save(format!("{}SPP.png", SAMPLES_PER_PIXEL))
+            .save(format!("00-{}SPP.png", SAMPLES_PER_PIXEL))
             .unwrap();
         let t_end = SystemTime::now();
         println!(
@@ -99,7 +101,7 @@ impl World {
         return (pixel_res, gbuffer_res);
     }
 
-    fn outlier_removal(&self, raw_data: PixelContainer) -> PixelContainer {
+    fn outlier_removal(&mut self, raw_data: PixelContainer, indicator: usize) -> PixelContainer {
         println!("==> Removing outlier");
         let mut res_vec = PixelContainer::new();
         for row_num in 0..WINDOW_HEIGHT as usize {
@@ -123,7 +125,10 @@ impl World {
         .unwrap();
         println!("Saving processed image..");
         image_buffer
-            .save(format!("{}SPP-outlier-removed.png", SAMPLES_PER_PIXEL))
+            .save(format!(
+                "0{}-{}SPP-outlier-removed.png",
+                indicator, SAMPLES_PER_PIXEL
+            ))
             .unwrap();
         let t_end = SystemTime::now();
         println!(
@@ -131,43 +136,49 @@ impl World {
             t_end.duration_since(self.last_end_time).unwrap().as_secs(),
             t_end.duration_since(self.start_time).unwrap().as_secs()
         );
+        self.last_end_time = t_end;
         return res_vec;
     }
 
-    fn denoising(&self, processed_img: PixelContainer, gbuffer: GeometryBuffer) {
-        println!("==> Filtering...");
+    fn row_filter(
+        &mut self,
+        processed_img: PixelContainer,
+        gbuffer: GeometryBuffer,
+    ) -> PixelContainer {
+        println!("==> Row filtering...");
         let mut res_vec = PixelContainer::new();
         // row process
         for row_num in 0..WINDOW_HEIGHT as usize {
             let row_pixels = processed_img.get_row_content(row_num);
             let row_gbuffer = gbuffer.get_row_content(row_num);
             for col_num in 0..WINDOW_WIDTH as usize {
-                let sample_points = generate_num_sequence(col_num, 4);
                 let gb0 = row_gbuffer.get_data(col_num);
                 let c0 = row_pixels.get_color(col_num);
-
-                let mut color_vec = Vec::new();
-                color_vec.push(c0);
-                for temp_sample in sample_points.iter() {
-                    color_vec.push(row_pixels.get_color(*temp_sample));
-                }
-                let temp_l = color_vec.len();
-                let color_mean = sum_vector_list(&color_vec) / temp_l as f64;
-                let color_sigma = (color_vec
-                    .iter()
-                    .map(|c| (*c - color_mean).length_square())
-                    .sum::<f64>()
-                    / temp_l as f64)
-                    .sqrt();
-
                 let mut weights = 1.0;
                 let mut res_pixel = c0.clone();
-                for sample in sample_points {
-                    let c1 = row_pixels.get_color(sample);
-                    let gb1 = row_gbuffer.get_data(sample);
-                    let w = pixel_filter(gb0, gb1, c0, c1, color_sigma);
-                    weights += w;
-                    res_pixel += w * c1;
+                for step in 0..FILTER_STEP {
+                    let sample_points = generate_num_sequence(col_num, step);
+                    let mut color_vec = Vec::new();
+                    color_vec.push(c0);
+                    for temp_sample in sample_points.iter() {
+                        color_vec.push(row_pixels.get_color(*temp_sample));
+                    }
+                    let temp_l = color_vec.len();
+                    let color_mean = sum_vector_list(&color_vec) / temp_l as f64;
+                    let color_sigma = (color_vec
+                        .iter()
+                        .map(|c| (*c - color_mean).length_square())
+                        .sum::<f64>()
+                        / (temp_l - 1) as f64)
+                        .sqrt();
+
+                    for sample in sample_points {
+                        let c1 = row_pixels.get_color(sample);
+                        let gb1 = row_gbuffer.get_data(sample);
+                        let w = pixel_filter(gb0, gb1, c0, c1, color_sigma);
+                        weights += w;
+                        res_pixel += w * c1;
+                    }
                 }
                 if weights > 0.0 {
                     res_pixel /= weights;
@@ -184,7 +195,69 @@ impl World {
         .unwrap();
         println!("Saving filtered image..");
         image_buffer
-            .save(format!("{}SPP-outlier-filtered.png", SAMPLES_PER_PIXEL))
+            .save(format!("02-{}SPP-row-filtered.png", SAMPLES_PER_PIXEL))
+            .unwrap();
+        let t_end = SystemTime::now();
+        println!(
+            "Image filter time cost: {}, total cost: {}",
+            t_end.duration_since(self.last_end_time).unwrap().as_secs(),
+            t_end.duration_since(self.start_time).unwrap().as_secs()
+        );
+        self.last_end_time = t_end;
+        return res_vec;
+    }
+
+    fn col_filter(&mut self, processed_img: PixelContainer, gbuffer: GeometryBuffer) {
+        println!("==> Col filtering...");
+        let mut res_vec = PixelContainer::new();
+        for col_num in 0..WINDOW_WIDTH as usize {
+            let col_pixels = processed_img.get_col_content(col_num);
+            let col_gbuffer = gbuffer.get_col_content(col_num);
+            for row_num in 0..WINDOW_WIDTH as usize {
+                let gb0 = col_gbuffer.get_data(row_num);
+                let c0 = col_pixels.get_color(row_num);
+                let mut weights = 1.0;
+                let mut res_pixel = c0.clone();
+                for step in 0..FILTER_STEP {
+                    let sample_points = generate_num_sequence(row_num, step);
+                    let mut color_vec = Vec::new();
+                    color_vec.push(c0);
+                    for temp_sample in sample_points.iter() {
+                        color_vec.push(col_pixels.get_color(*temp_sample));
+                    }
+                    let temp_l = color_vec.len();
+                    let color_mean = sum_vector_list(&color_vec) / temp_l as f64;
+                    let color_sigma = (color_vec
+                        .iter()
+                        .map(|c| (*c - color_mean).length_square())
+                        .sum::<f64>()
+                        / (temp_l - 1) as f64)
+                        .sqrt();
+
+                    for sample in sample_points {
+                        let c1 = col_pixels.get_color(sample);
+                        let gb1 = col_gbuffer.get_data(sample);
+                        let w = pixel_filter(gb0, gb1, c0, c1, color_sigma);
+                        weights += w;
+                        res_pixel += w * c1;
+                    }
+                }
+                if weights > 0.0 {
+                    res_pixel /= weights;
+                }
+                res_vec.set_colors(col_num, row_num, res_pixel.data);
+            }
+        }
+
+        let image_buffer = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_vec(
+            WINDOW_WIDTH,
+            WINDOW_HEIGHT,
+            res_vec.to_pixels(),
+        )
+        .unwrap();
+        println!("Saving filtered image..");
+        image_buffer
+            .save(format!("04-{}SPP-col-filtered.png", SAMPLES_PER_PIXEL))
             .unwrap();
         let t_end = SystemTime::now();
         println!(
