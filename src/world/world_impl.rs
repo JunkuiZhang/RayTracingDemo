@@ -38,8 +38,11 @@ impl World {
         let (raw_pixel, gbuffer) = self.shade_pixel();
         let proc_pixel_0 = self.outlier_removal(raw_pixel, 1);
         let proc_pixel_1 = self.row_filter(proc_pixel_0, gbuffer.clone());
+        // let proc_pixel_1 = self.col_filter(proc_pixel_0, gbuffer.clone());
         let proc_pixel_2 = self.outlier_removal(proc_pixel_1, 3);
-        self.col_filter(proc_pixel_2, gbuffer);
+        let proc_pixel_3 = self.col_filter(proc_pixel_2, gbuffer);
+        // let prec_pixel_3 = self.row_filter(proc_pixel_2, gbuffer);
+        self.outlier_removal(proc_pixel_3, 5);
     }
 
     fn shade_pixel(&mut self) -> (PixelContainer, GeometryBuffer) {
@@ -120,9 +123,14 @@ impl World {
         return res_vec;
     }
 
-    fn col_filter(&mut self, processed_img: PixelContainer, gbuffer: GeometryBuffer) {
+    fn col_filter(
+        &mut self,
+        processed_img: PixelContainer,
+        gbuffer: GeometryBuffer,
+    ) -> PixelContainer {
         let res_vec = self.filter_image(&processed_img, &gbuffer, FilterType::Col);
         self.save_image(&res_vec, "col-filter".to_string(), 4);
+        return res_vec;
     }
 
     fn filter_image(
@@ -219,8 +227,8 @@ impl World {
         let red = DiffuseMat::new(Color::new([0.65, 0.05, 0.05]));
         let white = DiffuseMat::new(Color::new([0.75, 0.75, 0.75]));
         let green = DiffuseMat::new(Color::new([0.12, 0.45, 0.15]));
-        let cupper = Metal::new(Color::new([0.7, 0.45, 0.2]), 0.5);
-        let glass = Glass::new(Color::new([0.9, 0.9, 0.9]), 1.5);
+        // let cupper = Metal::new(Color::new([0.7, 0.45, 0.2]), 0.5);
+        // let glass = Glass::new(Color::new([0.9, 0.9, 0.9]), 1.5);
         let light = DiffuseLight::new(Color::new([7.0, 7.0, 7.0]));
         // light
         let panel_light = Arc::new(Panel::new(
