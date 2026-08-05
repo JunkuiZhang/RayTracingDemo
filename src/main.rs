@@ -7,6 +7,8 @@ mod cpu_reference;
 mod data;
 mod entity;
 mod material;
+mod realtime;
+mod renderer;
 mod settings;
 mod some_math;
 mod systems;
@@ -14,14 +16,21 @@ mod world;
 
 fn main() -> ExitCode {
     match parse_arguments(env::args().skip(1)) {
-        Ok(Some(config)) => match cpu_reference::run(config) {
+        Ok(Command::CpuReference(config)) => match cpu_reference::run(config) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("CPU 参考渲染失败：{error}");
                 ExitCode::FAILURE
             }
         },
-        Ok(None) => {
+        Ok(Command::Realtime) => match realtime::run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("实时 DX12 渲染器启动失败：{error}");
+                ExitCode::FAILURE
+            }
+        },
+        Ok(Command::Help) => {
             print_help();
             ExitCode::SUCCESS
         }
@@ -33,15 +42,19 @@ fn main() -> ExitCode {
     }
 }
 
-fn parse_arguments(
-    arguments: impl IntoIterator<Item = String>,
-) -> Result<Option<CpuReferenceConfig>, String> {
+enum Command {
+    Realtime,
+    CpuReference(CpuReferenceConfig),
+    Help,
+}
+
+fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Command, String> {
     let mut arguments = arguments.into_iter();
     let Some(command) = arguments.next() else {
-        return Ok(None);
+        return Ok(Command::Realtime);
     };
     if command == "--help" || command == "-h" {
-        return Ok(None);
+        return Ok(Command::Help);
     }
     if command != "--cpu-reference" {
         return Err(format!("未知命令：{command}"));
@@ -71,7 +84,7 @@ fn parse_arguments(
             _ => return Err(format!("未知参数：{argument}")),
         }
     }
-    Ok(Some(config))
+    Ok(Command::CpuReference(config))
 }
 
 fn parse_seed(value: &str) -> Result<u64, String> {
@@ -90,13 +103,13 @@ fn print_help() {
     println!(
         "RayTracingDemo\n\n\
          用法：\n  \
+         cargo run --release                 启动实时 DX12 窗口\n  \
          cargo run --release -- --cpu-reference [选项]\n\n\
          选项：\n  \
          --samples <数量>       每像素采样数，默认 1\n  \
          --seed <整数或十六进制> 固定随机种子\n  \
          --output-dir <目录>    输出目录，默认 output/cpu-reference\n  \
          --skip-denoise         只保存原始路径追踪结果\n  \
-         --help, -h             显示帮助\n\n\
-         默认入口暂不启动渲染；后续阶段将由实时 DX12 窗口接管。"
+         --help, -h             显示帮助"
     );
 }
