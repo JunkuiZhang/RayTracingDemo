@@ -118,12 +118,3 @@ pub fn num_inline(list: &Vec<[f64; 3]>, target: [f64; 3]) -> [f64; 3] {
 pub fn to_u8(num: &f64) -> u8 {
     (clamp((*num).sqrt(), 0.0, 1.0) * 255.0) as u8
 }
-
-pub fn sum_vector_list(list: &Vec<Vector3>) -> Vector3 {
-    let mut res = Vector3::new([0.0, 0.0, 0.0]);
-    for vec in list {
-        res += *vec;
-    }
-    res /= list.len() as f64;
-    return res;
-}

@@ -12,10 +12,8 @@ use crate::{
     entity::{obj_traits::Hittable, Panel, Rectangle},
     material::{DiffuseLight, DiffuseMat},
     settings::{FILTER_STEP, SAMPLES_PER_PIXEL, THREAD_NUM, WINDOW_HEIGHT, WINDOW_WIDTH},
-    some_math::{
-        generate_neighbor_pixel_coordinate, num_inline, sum_vector_list, Color, Point, Vector3,
-    },
-    systems::image_process::{is_same_surface, pixel_filter},
+    some_math::{generate_neighbor_pixel_coordinate, num_inline, Color, Point, Vector3},
+    systems::image_process::{is_same_surface, luminance, pixel_filter},
     world::multithread_impl::ThreadPool,
 };
 
@@ -179,11 +177,15 @@ impl World {
                     }
                 }
 
-                let color_mean = sum_vector_list(&sample_colors);
+                let luminance_mean = sample_colors
+                    .iter()
+                    .map(|color| luminance(*color))
+                    .sum::<f64>()
+                    / sample_colors.len() as f64;
                 let variance_divisor = sample_colors.len().saturating_sub(1).max(1) as f64;
                 let color_sigma = (sample_colors
                     .iter()
-                    .map(|color| (*color - color_mean).length_square())
+                    .map(|color| (luminance(*color) - luminance_mean).powi(2))
                     .sum::<f64>()
                     / variance_divisor)
                     .sqrt();
