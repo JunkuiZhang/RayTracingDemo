@@ -55,6 +55,24 @@ cargo run --release
 
 如需用 PIX 捕获，在 PIX 中选择 Launch Win32，目标程序填写 `target\debug\ray_tracing_demo.exe`，启动后捕获任意一帧。PIX 和 Windows“图形工具”需要另行安装。
 
+## 阶段 2：Compute Shader 基础设施
+
+默认窗口现在由 Compute Shader 写入动态渐变纹理，再复制到交换链显示。窗口标题每半秒更新一次 FPS、GPU Pass 耗时和 Shader 状态：
+
+```text
+RayTracingDemo - 阶段 2 | FPS 240 | GPU 0.422 ms | Shader 内嵌 DXIL
+```
+
+构建脚本会从 Windows SDK 中自动查找 `dxc.exe`，并将 [`shaders/stage2_gradient.hlsl`](shaders/stage2_gradient.hlsl) 编译为 DXIL。运行 Debug 窗口时修改并保存该 HLSL 文件，程序会自动重新编译和替换 Compute Pipeline；编译失败时保留上一版本，并在标准错误中输出完整的 DXC 信息。
+
+阶段 2 同时加入：
+
+- 统一的资源状态跟踪和传统 Resource Barrier。
+- RTV 与 Shader 可见描述符堆包装。
+- 持久映射、按三帧上下文分区的 Upload Ring。
+- GPU Timestamp Query 和 Readback Buffer。
+- `output/shader-cache` 下的开发期 Shader 编译缓存。
+
 ## 检查项目
 
 ```powershell

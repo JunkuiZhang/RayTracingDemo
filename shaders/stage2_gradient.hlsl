@@ -18,6 +18,6 @@ void main(uint3 dispatch_id : SV_DispatchThreadID)
 
     float2 uv = (float2(dispatch_id.xy) + 0.5) / float2(output_width, output_height);
     float pulse = 0.5 + 0.5 * sin(elapsed_seconds * 1.5 + uv.x * 6.2831853);
-    float3 color = float3(uv.x, uv.y, 0.2 + 0.6 * pulse);
+    float3 color = float3(uv.x, uv.y, 0.15 + 0.7 * pulse);
     output_texture[dispatch_id.xy] = float4(color, 1.0);
 }

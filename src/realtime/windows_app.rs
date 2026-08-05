@@ -1,4 +1,8 @@
-use std::{error::Error, io};
+use std::{
+    error::Error,
+    io,
+    time::{Duration, Instant},
+};
 
 use winit::{
     application::ApplicationHandler,
@@ -28,6 +32,8 @@ struct RealtimeApplication {
     window: Option<Window>,
     renderer: Option<Dx12Renderer>,
     failure: Option<String>,
+    stats_started: Option<Instant>,
+    frames_since_stats: u32,
 }
 
 impl RealtimeApplication {
@@ -45,7 +51,7 @@ impl ApplicationHandler for RealtimeApplication {
         }
 
         let attributes = Window::default_attributes()
-            .with_title("RayTracingDemo - DX12 阶段 1")
+            .with_title("RayTracingDemo - DX12 阶段 2")
             .with_inner_size(LogicalSize::new(1280, 720))
             .with_min_inner_size(LogicalSize::new(320, 180));
         let window = match event_loop.create_window(attributes) {
@@ -90,6 +96,21 @@ impl ApplicationHandler for RealtimeApplication {
                 if let Some(renderer) = self.renderer.as_mut() {
                     if let Err(error) = renderer.render() {
                         return self.fail(event_loop, format!("提交 DX12 帧：{error}"));
+                    }
+                    self.frames_since_stats += 1;
+                    let now = Instant::now();
+                    let started = self.stats_started.get_or_insert(now);
+                    let elapsed = now.duration_since(*started);
+                    if elapsed >= Duration::from_millis(500) {
+                        let fps = self.frames_since_stats as f64 / elapsed.as_secs_f64();
+                        window.set_title(&format!(
+                            "RayTracingDemo - 阶段 2 | FPS {:.0} | GPU {:.3} ms | Shader {}",
+                            fps,
+                            renderer.gpu_time_ms(),
+                            renderer.shader_status()
+                        ));
+                        self.stats_started = Some(now);
+                        self.frames_since_stats = 0;
                     }
                 }
                 window.request_redraw();

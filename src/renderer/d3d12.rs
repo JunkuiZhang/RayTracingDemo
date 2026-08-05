@@ -18,13 +18,15 @@ use winit::{
 };
 
 use self::{
-    descriptor::DescriptorHeap, pipeline::ComputePipeline, resource::TrackedResource,
-    upload::UploadRing,
+    descriptor::DescriptorHeap, pipeline::ComputePipeline, profiler::GpuProfiler,
+    resource::TrackedResource, shader::ShaderReloader, upload::UploadRing,
 };
 
 mod descriptor;
 mod pipeline;
+mod profiler;
 mod resource;
+mod shader;
 mod upload;
 
 const FRAME_COUNT: usize = 3;
@@ -54,6 +56,9 @@ pub struct Dx12Renderer {
     render_targets: [Option<TrackedResource>; FRAME_COUNT],
     compute_output: Option<TrackedResource>,
     compute_pipeline: ComputePipeline,
+    gpu_profiler: GpuProfiler,
+    shader_reloader: ShaderReloader,
+    shader_status: String,
     upload_ring: UploadRing,
     frames: Vec<FrameContext>,
     command_list: ID3D12GraphicsCommandList,
@@ -135,6 +140,8 @@ impl Dx12Renderer {
                     .map_err(|error| dx_error("创建 Shader 描述符堆", error))?;
             let compute_pipeline = ComputePipeline::new(&device, STAGE2_SHADER)
                 .map_err(|error| dx_error("创建 Compute Pipeline", error))?;
+            let gpu_profiler = GpuProfiler::new(&device, &command_queue, FRAME_COUNT)
+                .map_err(|error| dx_error("创建 GPU 计时器", error))?;
             let upload_ring = UploadRing::new(&device, FRAME_COUNT)
                 .map_err(|error| dx_error("创建上传环形缓冲", error))?;
 
@@ -164,6 +171,9 @@ impl Dx12Renderer {
                 render_targets: [None, None, None],
                 compute_output: None,
                 compute_pipeline,
+                gpu_profiler,
+                shader_reloader: ShaderReloader::new(),
+                shader_status: "内嵌 DXIL".to_string(),
                 upload_ring,
                 frames,
                 command_list,
@@ -192,8 +202,10 @@ impl Dx12Renderer {
         }
 
         unsafe {
+            self.reload_shader_if_changed()?;
             let frame_index = self.swap_chain.GetCurrentBackBufferIndex() as usize;
             self.wait_for_frame(frame_index)?;
+            self.gpu_profiler.collect(frame_index)?;
             let frame = &self.frames[frame_index];
             frame.allocator.Reset()?;
             self.command_list
@@ -213,6 +225,7 @@ impl Dx12Renderer {
                 constant_buffer,
                 self.shader_heap.gpu_handle(0),
             );
+            self.gpu_profiler.begin(&self.command_list, frame_index);
             let compute_output = self.compute_output.as_mut().unwrap();
             compute_output.transition(&self.command_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             self.command_list
@@ -225,6 +238,7 @@ impl Dx12Renderer {
                 .CopyResource(render_target.resource(), compute_output.resource());
             render_target.transition(&self.command_list, D3D12_RESOURCE_STATE_PRESENT);
             compute_output.transition(&self.command_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            self.gpu_profiler.end(&self.command_list, frame_index);
             self.command_list.Close()?;
 
             let command_list: ID3D12CommandList = self.command_list.cast()?;
@@ -280,6 +294,41 @@ impl Dx12Renderer {
             self.create_compute_output()?;
             Ok(())
         }
+    }
+
+    pub fn gpu_time_ms(&self) -> f64 {
+        self.gpu_profiler.last_time_ms()
+    }
+
+    pub fn shader_status(&self) -> &str {
+        &self.shader_status
+    }
+
+    unsafe fn reload_shader_if_changed(&mut self) -> Result<()> {
+        let Some(result) = self.shader_reloader.poll() else {
+            return Ok(());
+        };
+        match result {
+            Ok(shader) => {
+                unsafe { self.wait_for_gpu()? };
+                match ComputePipeline::new(&self.device, &shader) {
+                    Ok(pipeline) => {
+                        self.compute_pipeline = pipeline;
+                        self.shader_status = "已热重载".to_string();
+                        println!("Shader 热重载成功");
+                    }
+                    Err(error) => {
+                        self.shader_status = "Pipeline 创建失败".to_string();
+                        eprintln!("Shader Pipeline 创建失败：{error}");
+                    }
+                }
+            }
+            Err(error) => {
+                self.shader_status = "编译失败，保留旧版本".to_string();
+                eprintln!("{error}");
+            }
+        }
+        Ok(())
     }
 
     unsafe fn create_render_targets(&mut self) -> Result<()> {
