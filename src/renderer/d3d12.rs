@@ -1,4 +1,4 @@
-use std::ffi::c_void;
+use std::{ffi::c_void, time::Instant};
 
 use windows::{
     Win32::{
@@ -17,13 +17,27 @@ use winit::{
     window::Window,
 };
 
-use self::{descriptor::DescriptorHeap, resource::TrackedResource};
+use self::{
+    descriptor::DescriptorHeap, pipeline::ComputePipeline, resource::TrackedResource,
+    upload::UploadRing,
+};
 
 mod descriptor;
+mod pipeline;
 mod resource;
+mod upload;
 
 const FRAME_COUNT: usize = 3;
-const CLEAR_COLOR: [f32; 4] = [0.035, 0.075, 0.12, 1.0];
+const STAGE2_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage2_gradient.dxil"));
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FrameConstants {
+    elapsed_seconds: f32,
+    output_width: u32,
+    output_height: u32,
+    frame_index: u32,
+}
 
 struct FrameContext {
     allocator: ID3D12CommandAllocator,
@@ -36,7 +50,11 @@ pub struct Dx12Renderer {
     command_queue: ID3D12CommandQueue,
     swap_chain: IDXGISwapChain3,
     rtv_heap: DescriptorHeap,
+    shader_heap: DescriptorHeap,
     render_targets: [Option<TrackedResource>; FRAME_COUNT],
+    compute_output: Option<TrackedResource>,
+    compute_pipeline: ComputePipeline,
+    upload_ring: UploadRing,
     frames: Vec<FrameContext>,
     command_list: ID3D12GraphicsCommandList,
     fence: ID3D12Fence,
@@ -45,6 +63,8 @@ pub struct Dx12Renderer {
     width: u32,
     height: u32,
     minimized: bool,
+    start_time: Instant,
+    frame_number: u32,
 }
 
 impl Dx12Renderer {
@@ -110,6 +130,13 @@ impl Dx12Renderer {
             let rtv_heap =
                 DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, FRAME_COUNT, false)
                     .map_err(|error| dx_error("创建 RTV 描述符堆", error))?;
+            let shader_heap =
+                DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1, true)
+                    .map_err(|error| dx_error("创建 Shader 描述符堆", error))?;
+            let compute_pipeline = ComputePipeline::new(&device, STAGE2_SHADER)
+                .map_err(|error| dx_error("创建 Compute Pipeline", error))?;
+            let upload_ring = UploadRing::new(&device, FRAME_COUNT)
+                .map_err(|error| dx_error("创建上传环形缓冲", error))?;
 
             let mut frames = Vec::with_capacity(FRAME_COUNT);
             for _ in 0..FRAME_COUNT {
@@ -133,7 +160,11 @@ impl Dx12Renderer {
                 command_queue,
                 swap_chain,
                 rtv_heap,
+                shader_heap,
                 render_targets: [None, None, None],
+                compute_output: None,
+                compute_pipeline,
+                upload_ring,
                 frames,
                 command_list,
                 fence,
@@ -142,10 +173,15 @@ impl Dx12Renderer {
                 width,
                 height,
                 minimized: false,
+                start_time: Instant::now(),
+                frame_number: 0,
             };
             renderer
                 .create_render_targets()
                 .map_err(|error| dx_error("创建交换链渲染目标", error))?;
+            renderer
+                .create_compute_output()
+                .map_err(|error| dx_error("创建 Compute 输出", error))?;
             Ok(renderer)
         }
     }
@@ -163,14 +199,32 @@ impl Dx12Renderer {
             self.command_list
                 .Reset(&frame.allocator, None::<&ID3D12PipelineState>)?;
 
-            let rtv = self.rtv_handle(frame_index);
+            let constants = FrameConstants {
+                elapsed_seconds: self.start_time.elapsed().as_secs_f32(),
+                output_width: self.width,
+                output_height: self.height,
+                frame_index: self.frame_number,
+            };
+            let constant_buffer = self.upload_ring.write(frame_index, &constants);
+            self.command_list
+                .SetDescriptorHeaps(&[Some(self.shader_heap.heap().clone())]);
+            self.compute_pipeline.bind(
+                &self.command_list,
+                constant_buffer,
+                self.shader_heap.gpu_handle(0),
+            );
+            let compute_output = self.compute_output.as_mut().unwrap();
+            compute_output.transition(&self.command_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            self.command_list
+                .Dispatch(self.width.div_ceil(8), self.height.div_ceil(8), 1);
+            compute_output.transition(&self.command_list, D3D12_RESOURCE_STATE_COPY_SOURCE);
+
             let render_target = self.render_targets[frame_index].as_mut().unwrap();
-            render_target.transition(&self.command_list, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            render_target.transition(&self.command_list, D3D12_RESOURCE_STATE_COPY_DEST);
             self.command_list
-                .OMSetRenderTargets(1, Some(&rtv), true, None);
-            self.command_list
-                .ClearRenderTargetView(rtv, &CLEAR_COLOR, None);
+                .CopyResource(render_target.resource(), compute_output.resource());
             render_target.transition(&self.command_list, D3D12_RESOURCE_STATE_PRESENT);
+            compute_output.transition(&self.command_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             self.command_list.Close()?;
 
             let command_list: ID3D12CommandList = self.command_list.cast()?;
@@ -182,6 +236,7 @@ impl Dx12Renderer {
             self.next_fence_value += 1;
             self.command_queue.Signal(&self.fence, fence_value)?;
             self.frames[frame_index].fence_value = fence_value;
+            self.frame_number = self.frame_number.wrapping_add(1);
             Ok(())
         }
     }
@@ -206,6 +261,7 @@ impl Dx12Renderer {
                 None::<&ID3D12PipelineState>,
             )?;
             self.command_list.Close()?;
+            self.compute_output = None;
             self.render_targets = [None, None, None];
             self.swap_chain.ResizeBuffers(
                 FRAME_COUNT as u32,
@@ -221,6 +277,7 @@ impl Dx12Renderer {
             self.height = height;
             self.minimized = false;
             self.create_render_targets()?;
+            self.create_compute_output()?;
             Ok(())
         }
     }
@@ -242,8 +299,26 @@ impl Dx12Renderer {
         Ok(())
     }
 
-    fn rtv_handle(&self, index: usize) -> D3D12_CPU_DESCRIPTOR_HANDLE {
-        self.rtv_heap.cpu_handle(index)
+    unsafe fn create_compute_output(&mut self) -> Result<()> {
+        let output = TrackedResource::create_texture_2d(
+            &self.device,
+            self.width,
+            self.height,
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            "阶段 2 Compute 输出",
+        )?;
+        unsafe {
+            self.device.CreateUnorderedAccessView(
+                output.resource(),
+                None,
+                None,
+                self.shader_heap.cpu_handle(0),
+            );
+        }
+        self.compute_output = Some(output);
+        Ok(())
     }
 
     unsafe fn wait_for_frame(&self, frame_index: usize) -> Result<()> {
