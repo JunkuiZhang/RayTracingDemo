@@ -1,4 +1,4 @@
-use rand::prelude::ThreadRng;
+use rand::rngs::StdRng;
 
 use crate::{
     data::HitInfo,
@@ -14,5 +14,5 @@ pub trait Hittable {
 }
 
 pub trait HittableLight: Hittable + Light {
-    fn sample_on_light(&self, rng: &mut ThreadRng) -> (Point, Vector3);
+    fn sample_on_light(&self, rng: &mut StdRng) -> (Point, Vector3);
 }

@@ -1,4 +1,5 @@
 use std::{
+    path::PathBuf,
     sync::{Arc, RwLock},
     time::SystemTime,
     u32,
@@ -11,7 +12,7 @@ use crate::{
     data::{GeometryBuffer, PixelContainer},
     entity::{obj_traits::Hittable, Panel, Rectangle},
     material::{DiffuseLight, DiffuseMat},
-    settings::{FILTER_STEP, SAMPLES_PER_PIXEL, THREAD_NUM, WINDOW_HEIGHT, WINDOW_WIDTH},
+    settings::{FILTER_STEP, THREAD_NUM, WINDOW_HEIGHT, WINDOW_WIDTH},
     some_math::{generate_neighbor_pixel_coordinate, num_inline, Color, Point, Vector3},
     systems::image_process::{is_same_surface, luminance, pixel_filter},
     world::multithread_impl::ThreadPool,
@@ -20,22 +21,28 @@ use crate::{
 use super::World;
 
 impl World {
-    pub fn new() -> Self {
+    pub fn new(output_dir: PathBuf, samples_per_pixel: usize, seed: u64, denoise: bool) -> Self {
         World {
             start_time: SystemTime::now(),
             last_end_time: SystemTime::now(),
             objects: Arc::new(RwLock::new(Vec::new())),
             lights: Arc::new(RwLock::new(Vec::new())),
             camera: Arc::new(Camera::default()),
+            output_dir,
+            samples_per_pixel,
+            seed,
+            denoise,
         }
     }
 
     pub fn run(&mut self) {
         self.start_time = SystemTime::now();
         let (raw_pixel, gbuffer) = self.shade_pixel();
-        let illumination = self.demodulate_image(&raw_pixel, &gbuffer);
-        let clipped_pixel = self.outlier_removal(illumination, &gbuffer, 1);
-        self.atrous_filter(clipped_pixel, &gbuffer);
+        if self.denoise {
+            let illumination = self.demodulate_image(&raw_pixel, &gbuffer);
+            let clipped_pixel = self.outlier_removal(illumination, &gbuffer, 1);
+            self.atrous_filter(clipped_pixel, &gbuffer);
+        }
     }
 
     fn shade_pixel(&mut self) -> (PixelContainer, GeometryBuffer) {
@@ -46,6 +53,8 @@ impl World {
             self.camera.clone(),
             self.objects.clone(),
             self.lights.clone(),
+            self.samples_per_pixel,
+            self.seed,
         );
         for job in 0..WINDOW_HEIGHT {
             thread_pool.work(job);
@@ -268,12 +277,11 @@ impl World {
         )
         .unwrap();
         println!("Saving {} image..", process_label);
-        image_buffer
-            .save(format!(
-                "0{}-{}SPP-{}.png",
-                num, SAMPLES_PER_PIXEL, process_label
-            ))
-            .unwrap();
+        let file_name = format!(
+            "0{}-{}SPP-{}.png",
+            num, self.samples_per_pixel, process_label
+        );
+        image_buffer.save(self.output_dir.join(file_name)).unwrap();
         let t_end = SystemTime::now();
         println!(
             "Image {} time cost: {}, total cost: {}",

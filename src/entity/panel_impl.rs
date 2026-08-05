@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use rand::{prelude::ThreadRng, Rng};
+use rand::{rngs::StdRng, Rng};
 
 use crate::{
     data::HitInfo,
@@ -78,7 +78,7 @@ impl Light for Panel {
 }
 
 impl HittableLight for Panel {
-    fn sample_on_light(&self, rng: &mut ThreadRng) -> (Point, Vector3) {
+    fn sample_on_light(&self, rng: &mut StdRng) -> (Point, Vector3) {
         let axis = self.normal.get_axis();
         let mut data = [0.0; 3];
         data[axis] = self.points[0].data[axis];

@@ -1,6 +1,6 @@
 use std::f64::consts::PI;
 
-use rand::{prelude::ThreadRng, Rng};
+use rand::{rngs::StdRng, Rng};
 
 use crate::some_math::{Matrix3, Vector3};
 
@@ -26,7 +26,7 @@ pub fn rotate_vec_given_normal(vec: &Vector3, normal: &Vector3) -> Vector3 {
 }
 
 #[allow(dead_code)]
-pub fn generate_unit_vec_sphere(rng: &mut ThreadRng) -> Vector3 {
+pub fn generate_unit_vec_sphere(rng: &mut StdRng) -> Vector3 {
     let theta = rng.random_range(0.0..PI);
     let phi = rng.random_range(0.0..(2.0 * PI));
     let trans_rotate_z = matrix_rotate_around_z(theta.sin(), theta.cos());

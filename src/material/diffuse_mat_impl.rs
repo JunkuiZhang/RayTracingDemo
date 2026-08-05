@@ -1,6 +1,6 @@
 use std::f64::consts::PI;
 
-use rand::{prelude::ThreadRng, Rng};
+use rand::{rngs::StdRng, Rng};
 
 use crate::{
     data::ScatterInfo,
@@ -20,7 +20,7 @@ impl DiffuseMat {
 }
 
 impl Material for DiffuseMat {
-    fn scatter(&self, _ray_in: &Ray, hit_normal: &Vector3, rng: &mut ThreadRng) -> ScatterInfo {
+    fn scatter(&self, _ray_in: &Ray, hit_normal: &Vector3, rng: &mut StdRng) -> ScatterInfo {
         // impl cosine-weighted sampling
         let a: f64 = rng.random_range(0.0..1.0);
         let b: f64 = rng.random_range(0.0..1.0);

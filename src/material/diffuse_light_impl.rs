@@ -1,4 +1,4 @@
-use rand::prelude::ThreadRng;
+use rand::rngs::StdRng;
 
 use crate::{
     data::ScatterInfo,
@@ -15,7 +15,7 @@ impl DiffuseLight {
 }
 
 impl Material for DiffuseLight {
-    fn scatter(&self, _ray_in: &Ray, hit_normal: &Vector3, _rng: &mut ThreadRng) -> ScatterInfo {
+    fn scatter(&self, _ray_in: &Ray, hit_normal: &Vector3, _rng: &mut StdRng) -> ScatterInfo {
         ScatterInfo {
             scatter_dir: *hit_normal,
             color: self.color,

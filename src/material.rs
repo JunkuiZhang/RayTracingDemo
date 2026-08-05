@@ -1,4 +1,4 @@
-use rand::prelude::ThreadRng;
+use rand::rngs::StdRng;
 
 use crate::{
     data::ScatterInfo,
@@ -38,7 +38,7 @@ pub struct Glass {
 }
 
 pub trait Material {
-    fn scatter(&self, ray_in: &Ray, hit_normal: &Vector3, rng: &mut ThreadRng) -> ScatterInfo;
+    fn scatter(&self, ray_in: &Ray, hit_normal: &Vector3, rng: &mut StdRng) -> ScatterInfo;
     fn emit(&self) -> Color;
     fn is_light(&self) -> bool;
 

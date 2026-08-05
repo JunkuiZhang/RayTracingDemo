@@ -1,4 +1,5 @@
 use std::{
+    path::PathBuf,
     sync::{Arc, RwLock},
     time::SystemTime,
 };
@@ -18,4 +19,8 @@ pub struct World {
     objects: Arc<RwLock<Vec<Arc<dyn Hittable + Send + Sync>>>>,
     camera: Arc<Camera>,
     lights: Arc<RwLock<Vec<Arc<dyn HittableLight + Send + Sync>>>>,
+    output_dir: PathBuf,
+    samples_per_pixel: usize,
+    seed: u64,
+    denoise: bool,
 }

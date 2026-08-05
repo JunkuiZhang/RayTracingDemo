@@ -1,4 +1,4 @@
-use rand::{prelude::ThreadRng, Rng};
+use rand::{rngs::StdRng, Rng};
 
 use crate::{
     data::ScatterInfo,
@@ -21,7 +21,7 @@ impl Glass {
 }
 
 impl Material for Glass {
-    fn scatter(&self, ray_in: &Ray, hit_normal: &Vector3, rng: &mut ThreadRng) -> ScatterInfo {
+    fn scatter(&self, ray_in: &Ray, hit_normal: &Vector3, rng: &mut StdRng) -> ScatterInfo {
         let reflection_portion = self.fresnel(&ray_in.direction, hit_normal);
         if rng.random_range(0.0..1.0) < reflection_portion {
             let scatter_dir = reflect(&ray_in.direction, hit_normal);

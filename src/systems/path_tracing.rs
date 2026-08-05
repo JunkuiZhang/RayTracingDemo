@@ -1,6 +1,6 @@
 use std::{f64::INFINITY, sync::Arc};
 
-use rand::prelude::ThreadRng;
+use rand::rngs::StdRng;
 
 use crate::{
     data::{GBInfo, HitInfo},
@@ -25,7 +25,7 @@ pub fn shade(
     objects: &Vec<Arc<dyn Hittable + Send + Sync>>,
     lights: &Vec<Arc<dyn HittableLight + Send + Sync>>,
     depth: i32,
-    rng: &mut ThreadRng,
+    rng: &mut StdRng,
     gb_indicator: bool,
     gbuffer_data: &mut GBInfo,
 ) -> Color {
@@ -46,7 +46,7 @@ fn shade_recursive(
     objects: &Vec<Arc<dyn Hittable + Send + Sync>>,
     lights: &Vec<Arc<dyn HittableLight + Send + Sync>>,
     depth: i32,
-    rng: &mut ThreadRng,
+    rng: &mut StdRng,
     gb_indicator: bool,
     gbuffer_data: &mut GBInfo,
     emission_context: Option<EmissionContext>,
@@ -94,7 +94,7 @@ fn shade_point(
     objects: &Vec<Arc<dyn Hittable + Send + Sync>>,
     lights: &Vec<Arc<dyn HittableLight + Send + Sync>>,
     depth: i32,
-    rng: &mut ThreadRng,
+    rng: &mut StdRng,
 ) -> Color {
     let direct_light = estimate_direct_light(info, objects, lights, rng);
     let scatter_info = info.material.scatter(ray_in, &info.normal, rng);
@@ -143,7 +143,7 @@ fn estimate_direct_light(
     info: &HitInfo,
     objects: &Vec<Arc<dyn Hittable + Send + Sync>>,
     lights: &Vec<Arc<dyn HittableLight + Send + Sync>>,
-    rng: &mut ThreadRng,
+    rng: &mut StdRng,
 ) -> Color {
     if info.material.is_delta() {
         return Color::BLACK;

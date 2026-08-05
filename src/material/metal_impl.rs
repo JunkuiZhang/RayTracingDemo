@@ -1,4 +1,4 @@
-use rand::prelude::ThreadRng;
+use rand::rngs::StdRng;
 
 use crate::{
     data::ScatterInfo,
@@ -17,7 +17,7 @@ impl Metal {
 }
 
 impl Material for Metal {
-    fn scatter(&self, ray_in: &Ray, hit_normal: &Vector3, rng: &mut ThreadRng) -> ScatterInfo {
+    fn scatter(&self, ray_in: &Ray, hit_normal: &Vector3, rng: &mut StdRng) -> ScatterInfo {
         let dir = reflect(&ray_in.direction, hit_normal);
         let scatter_dir = dir + 0.7 * self.fuzz * generate_unit_vec_sphere(rng);
         return ScatterInfo {

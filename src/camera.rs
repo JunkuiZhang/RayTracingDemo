@@ -1,8 +1,8 @@
-use rand::{prelude::ThreadRng, Rng};
+use rand::{rngs::StdRng, Rng};
 
 use crate::{
     entity::Ray,
-    settings::{FOV, SAMPLES_PER_PIXEL, WINDOW_HEIGHT, WINDOW_WIDTH},
+    settings::{FOV, WINDOW_HEIGHT, WINDOW_WIDTH},
     some_math::{Point, Vector3},
 };
 
@@ -33,12 +33,13 @@ impl Camera {
         &self,
         col_num: u32,
         row_num: u32,
-        rng: &mut ThreadRng,
-    ) -> [Ray; SAMPLES_PER_PIXEL] {
-        let mut res = [Ray::default(); SAMPLES_PER_PIXEL];
-        for n in 0..SAMPLES_PER_PIXEL {
+        samples_per_pixel: usize,
+        rng: &mut StdRng,
+    ) -> Vec<Ray> {
+        let mut rays = Vec::with_capacity(samples_per_pixel);
+        for sample_index in 0..samples_per_pixel {
             let target;
-            if n == 0 {
+            if sample_index == 0 {
                 target = self.upper_left_point + (col_num as f64 + 0.5) * self.u
                     - (row_num as f64 + 0.5) * self.v;
             } else {
@@ -47,8 +48,8 @@ impl Camera {
                     - (row_num as f64 + rng.random_range(0.0..1.0)) * self.v;
             }
             let ray = Ray::new(self.position, (target - self.position).normalize());
-            res[n] = ray;
+            rays.push(ray);
         }
-        return res;
+        rays
     }
 }
