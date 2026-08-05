@@ -3,6 +3,16 @@ use crate::{
     some_math::{Color, Point, Vector3},
 };
 
+pub fn is_same_surface(gb0: &GBInfo, gb1: &GBInfo) -> bool {
+    if gb0.hit_obj_id != gb1.hit_obj_id || gb0.normal * gb1.normal < 0.9 {
+        return false;
+    }
+
+    // 使用相对深度而非世界空间绝对值，使阈值不随场景尺寸变化。
+    let depth_scale = gb0.distance.abs().max(1.0);
+    (gb0.distance - gb1.distance).abs() / depth_scale < 0.05
+}
+
 pub fn pixel_filter(gb0: &GBInfo, gb1: &GBInfo, c0: Color, c1: Color, sigma: f64) -> f64 {
     if gb0.hit_obj_id != gb1.hit_obj_id {
         return 0.0;

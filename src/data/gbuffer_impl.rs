@@ -16,6 +16,10 @@ impl GeometryBuffer {
         self.data[row_num] = row_data;
     }
 
+    pub fn get_data(&self, col_num: usize, row_num: usize) -> &GBInfo {
+        self.data[row_num].get_data(col_num)
+    }
+
     pub fn get_x_or_y(&self, row_col_num: usize, indicator: FilterType) -> RowColGBuffer {
         match indicator {
             FilterType::Row => RowColGBuffer {

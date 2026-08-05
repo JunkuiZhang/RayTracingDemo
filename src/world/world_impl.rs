@@ -16,7 +16,7 @@ use crate::{
         generate_neighbor_pixel_coordinate, generate_num_sequence, num_inline, sum_vector_list,
         Color, Point, Vector3,
     },
-    systems::image_process::pixel_filter,
+    systems::image_process::{is_same_surface, pixel_filter},
     world::multithread_impl::ThreadPool,
 };
 
@@ -36,13 +36,13 @@ impl World {
     pub fn run(&mut self) {
         self.start_time = SystemTime::now();
         let (raw_pixel, gbuffer) = self.shade_pixel();
-        let proc_pixel_0 = self.outlier_removal(raw_pixel, 1);
+        let proc_pixel_0 = self.outlier_removal(raw_pixel, &gbuffer, 1);
         let proc_pixel_1 = self.row_filter(proc_pixel_0, gbuffer.clone());
         // let proc_pixel_1 = self.col_filter(proc_pixel_0, gbuffer.clone());
-        let proc_pixel_2 = self.outlier_removal(proc_pixel_1, 3);
-        let proc_pixel_3 = self.col_filter(proc_pixel_2, gbuffer);
+        let proc_pixel_2 = self.outlier_removal(proc_pixel_1, &gbuffer, 3);
+        let proc_pixel_3 = self.col_filter(proc_pixel_2, gbuffer.clone());
         // let prec_pixel_3 = self.row_filter(proc_pixel_2, gbuffer);
-        self.outlier_removal(proc_pixel_3, 5);
+        self.outlier_removal(proc_pixel_3, &gbuffer, 5);
     }
 
     fn shade_pixel(&mut self) -> (PixelContainer, GeometryBuffer) {
@@ -90,21 +90,31 @@ impl World {
         return (pixel_res, gbuffer_res);
     }
 
-    fn outlier_removal(&mut self, raw_data: PixelContainer, indicator: usize) -> PixelContainer {
+    fn outlier_removal(
+        &mut self,
+        raw_data: PixelContainer,
+        gbuffer: &GeometryBuffer,
+        indicator: usize,
+    ) -> PixelContainer {
         println!("==> Removing outlier");
         let mut res_vec = PixelContainer::new();
         for row_num in 0..WINDOW_HEIGHT as usize {
             for col_num in 0..WINDOW_WIDTH as usize {
                 let mut colors_vec = Vec::new();
+                let center_gbuffer = gbuffer.get_data(col_num, row_num);
                 for (col, row) in generate_neighbor_pixel_coordinate(col_num, row_num) {
-                    colors_vec.push(raw_data.get_colors(col, row));
+                    if is_same_surface(center_gbuffer, gbuffer.get_data(col, row)) {
+                        colors_vec.push(raw_data.get_colors(col, row));
+                    }
                 }
-                res_vec.set_colors(
-                    col_num,
-                    row_num,
-                    num_inline(&colors_vec, raw_data.get_colors(col_num, row_num)),
-                    FilterType::Row,
-                );
+                let center_color = raw_data.get_colors(col_num, row_num);
+                // 小样本统计不可靠，此时保留原值比跨边界借用颜色更安全。
+                let filtered_color = if colors_vec.len() >= 4 {
+                    num_inline(&colors_vec, center_color)
+                } else {
+                    center_color
+                };
+                res_vec.set_colors(col_num, row_num, filtered_color, FilterType::Row);
             }
         }
 
