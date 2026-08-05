@@ -1,4 +1,4 @@
-use std::{ffi::c_void, mem::ManuallyDrop};
+use std::ffi::c_void;
 
 use windows::{
     Win32::{
@@ -17,6 +17,11 @@ use winit::{
     window::Window,
 };
 
+use self::{descriptor::DescriptorHeap, resource::TrackedResource};
+
+mod descriptor;
+mod resource;
+
 const FRAME_COUNT: usize = 3;
 const CLEAR_COLOR: [f32; 4] = [0.035, 0.075, 0.12, 1.0];
 
@@ -30,9 +35,8 @@ pub struct Dx12Renderer {
     device: ID3D12Device,
     command_queue: ID3D12CommandQueue,
     swap_chain: IDXGISwapChain3,
-    rtv_heap: ID3D12DescriptorHeap,
-    rtv_increment: usize,
-    render_targets: [Option<ID3D12Resource>; FRAME_COUNT],
+    rtv_heap: DescriptorHeap,
+    render_targets: [Option<TrackedResource>; FRAME_COUNT],
     frames: Vec<FrameContext>,
     command_list: ID3D12GraphicsCommandList,
     fence: ID3D12Fence,
@@ -103,17 +107,9 @@ impl Dx12Renderer {
                 .MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER)
                 .map_err(|error| dx_error("设置窗口关联", error))?;
 
-            let rtv_heap_description = D3D12_DESCRIPTOR_HEAP_DESC {
-                Type: D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
-                NumDescriptors: FRAME_COUNT as u32,
-                Flags: D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
-                NodeMask: 0,
-            };
-            let rtv_heap: ID3D12DescriptorHeap = device
-                .CreateDescriptorHeap(&rtv_heap_description)
-                .map_err(|error| dx_error("创建 RTV 描述符堆", error))?;
-            let rtv_increment =
-                device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV) as usize;
+            let rtv_heap =
+                DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, FRAME_COUNT, false)
+                    .map_err(|error| dx_error("创建 RTV 描述符堆", error))?;
 
             let mut frames = Vec::with_capacity(FRAME_COUNT);
             for _ in 0..FRAME_COUNT {
@@ -137,7 +133,6 @@ impl Dx12Renderer {
                 command_queue,
                 swap_chain,
                 rtv_heap,
-                rtv_increment,
                 render_targets: [None, None, None],
                 frames,
                 command_list,
@@ -168,24 +163,14 @@ impl Dx12Renderer {
             self.command_list
                 .Reset(&frame.allocator, None::<&ID3D12PipelineState>)?;
 
-            let render_target = self.render_targets[frame_index].as_ref().unwrap();
-            resource_transition(
-                &self.command_list,
-                render_target,
-                D3D12_RESOURCE_STATE_PRESENT,
-                D3D12_RESOURCE_STATE_RENDER_TARGET,
-            );
             let rtv = self.rtv_handle(frame_index);
+            let render_target = self.render_targets[frame_index].as_mut().unwrap();
+            render_target.transition(&self.command_list, D3D12_RESOURCE_STATE_RENDER_TARGET);
             self.command_list
                 .OMSetRenderTargets(1, Some(&rtv), true, None);
             self.command_list
                 .ClearRenderTargetView(rtv, &CLEAR_COLOR, None);
-            resource_transition(
-                &self.command_list,
-                render_target,
-                D3D12_RESOURCE_STATE_RENDER_TARGET,
-                D3D12_RESOURCE_STATE_PRESENT,
-            );
+            render_target.transition(&self.command_list, D3D12_RESOURCE_STATE_PRESENT);
             self.command_list.Close()?;
 
             let command_list: ID3D12CommandList = self.command_list.cast()?;
@@ -241,23 +226,24 @@ impl Dx12Renderer {
     }
 
     unsafe fn create_render_targets(&mut self) -> Result<()> {
-        let start = unsafe { self.rtv_heap.GetCPUDescriptorHandleForHeapStart() };
         for index in 0..FRAME_COUNT {
             let resource: ID3D12Resource = unsafe { self.swap_chain.GetBuffer(index as u32)? };
-            let handle = D3D12_CPU_DESCRIPTOR_HANDLE {
-                ptr: start.ptr + index * self.rtv_increment,
-            };
+            let handle = self.rtv_heap.cpu_handle(index);
             unsafe { self.device.CreateRenderTargetView(&resource, None, handle) };
-            self.render_targets[index] = Some(resource);
+            self.render_targets[index] = Some(TrackedResource::new(
+                resource,
+                D3D12_RESOURCE_STATE_PRESENT,
+                DXGI_FORMAT_R8G8B8A8_UNORM,
+                self.width,
+                self.height,
+                format!("交换链缓冲 {index}"),
+            ));
         }
         Ok(())
     }
 
     fn rtv_handle(&self, index: usize) -> D3D12_CPU_DESCRIPTOR_HANDLE {
-        let start = unsafe { self.rtv_heap.GetCPUDescriptorHandleForHeapStart() };
-        D3D12_CPU_DESCRIPTOR_HANDLE {
-            ptr: start.ptr + index * self.rtv_increment,
-        }
+        self.rtv_heap.cpu_handle(index)
     }
 
     unsafe fn wait_for_frame(&self, frame_index: usize) -> Result<()> {
@@ -338,39 +324,6 @@ fn window_hwnd(window: &Window) -> Result<HWND> {
             windows::core::HRESULT(0x80004005_u32 as i32),
             "winit 未提供 Win32 HWND",
         )),
-    }
-}
-
-fn transition_barrier(
-    resource: &ID3D12Resource,
-    before: D3D12_RESOURCE_STATES,
-    after: D3D12_RESOURCE_STATES,
-) -> D3D12_RESOURCE_BARRIER {
-    D3D12_RESOURCE_BARRIER {
-        Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
-        Anonymous: D3D12_RESOURCE_BARRIER_0 {
-            Transition: ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
-                pResource: ManuallyDrop::new(Some(resource.clone())),
-                Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                StateBefore: before,
-                StateAfter: after,
-            }),
-        },
-    }
-}
-
-unsafe fn resource_transition(
-    command_list: &ID3D12GraphicsCommandList,
-    resource: &ID3D12Resource,
-    before: D3D12_RESOURCE_STATES,
-    after: D3D12_RESOURCE_STATES,
-) {
-    let mut barrier = transition_barrier(resource, before, after);
-    unsafe {
-        command_list.ResourceBarrier(std::slice::from_ref(&barrier));
-        // 联合体和其中的资源字段都是 ManuallyDrop，提交后显式释放克隆的 COM 引用。
-        ManuallyDrop::drop(&mut (*barrier.Anonymous.Transition).pResource);
     }
 }
 
