@@ -38,7 +38,9 @@ fn normal_filter(weight: f64, n0: Vector3, n1: Vector3) -> f64 {
 
 #[inline]
 fn luminance_filter(weight: f64, c0: Color, c1: Color, sigma: f64) -> f64 {
-    let res = -weight * (c0 - c1).length() / sigma;
+    // 平坦区域的局部方差可能为零；设置下限可避免 0/0 产生 NaN 并污染整幅图像。
+    let safe_sigma = sigma.max(1e-6);
+    let res = -weight * (c0 - c1).length() / safe_sigma;
     // println!("luminance {}", res);
     return res;
 }

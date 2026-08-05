@@ -172,7 +172,8 @@ impl World {
                         color_vec.push(y_axis_pixels.get_color(*temp_sample));
                     }
                     let temp_l = color_vec.len();
-                    let color_mean = sum_vector_list(&color_vec) / temp_l as f64;
+                    // sum_vector_list 已经返回均值，不能再除以样本数。
+                    let color_mean = sum_vector_list(&color_vec);
                     let color_sigma = (color_vec
                         .iter()
                         .map(|c| (*c - color_mean).length_square())
