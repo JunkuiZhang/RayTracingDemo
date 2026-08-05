@@ -1,13 +1,13 @@
 use crate::settings::{WINDOW_HEIGHT, WINDOW_WIDTH};
 
-use super::{FilterType, GBInfo, GeometryBuffer, RowColGBuffer};
+use super::{GBInfo, GeometryBuffer, RowColGBuffer};
 
 impl GeometryBuffer {
     pub fn new() -> Self {
-        // row container by default
+        // G-buffer 与颜色缓冲一致，始终按行存储。
         let mut data = Vec::with_capacity(WINDOW_HEIGHT as usize);
         for _ in 0..WINDOW_HEIGHT {
-            data.push(RowColGBuffer::new_empty(FilterType::Row))
+            data.push(RowColGBuffer::new_empty())
         }
         GeometryBuffer { data }
     }
@@ -19,32 +19,12 @@ impl GeometryBuffer {
     pub fn get_data(&self, col_num: usize, row_num: usize) -> &GBInfo {
         self.data[row_num].get_data(col_num)
     }
-
-    pub fn get_x_or_y(&self, row_col_num: usize, indicator: FilterType) -> RowColGBuffer {
-        match indicator {
-            FilterType::Row => RowColGBuffer {
-                data: self.data[row_col_num].data.clone(),
-            },
-            FilterType::Col => {
-                let mut data = Vec::with_capacity(WINDOW_HEIGHT as usize);
-                for row in self.data.iter() {
-                    data.push(*row.get_data(row_col_num));
-                }
-                return RowColGBuffer { data };
-            }
-        }
-    }
 }
 
 impl RowColGBuffer {
-    pub fn new_empty(filter_type: FilterType) -> Self {
-        match filter_type {
-            FilterType::Row => RowColGBuffer {
-                data: Vec::with_capacity(WINDOW_WIDTH as usize),
-            },
-            FilterType::Col => RowColGBuffer {
-                data: Vec::with_capacity(WINDOW_HEIGHT as usize),
-            },
+    pub fn new_empty() -> Self {
+        RowColGBuffer {
+            data: Vec::with_capacity(WINDOW_WIDTH as usize),
         }
     }
 

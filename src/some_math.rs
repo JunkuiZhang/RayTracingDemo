@@ -1,4 +1,4 @@
-use crate::settings::{FILTER_STEP, WINDOW_HEIGHT, WINDOW_WIDTH};
+use crate::settings::{WINDOW_HEIGHT, WINDOW_WIDTH};
 
 mod matrix_impl;
 mod vector_impl;
@@ -112,22 +112,6 @@ pub fn num_inline(list: &Vec<[f64; 3]>, target: [f64; 3]) -> [f64; 3] {
     res[0] = clamp(target[0], mean_r - 1.5 * sigma_r, mean_r + 1.5 * sigma_r);
     res[1] = clamp(target[1], mean_g - 1.5 * sigma_g, mean_g + 1.5 * sigma_g);
     res[2] = clamp(target[2], mean_b - 1.5 * sigma_b, mean_b + 1.5 * sigma_b);
-    return res;
-}
-
-pub fn generate_num_sequence(base_num: usize, step: usize) -> Vec<usize> {
-    let mut res = Vec::with_capacity(6);
-    let interval = (step as f64).exp2() as i32;
-    for num in 1..FILTER_STEP as i32 {
-        let n0 = base_num as i32 - interval * num;
-        let n1 = base_num as i32 + interval * num;
-        if n0 >= 0 {
-            res.push(n0 as usize);
-        }
-        if n1 < WINDOW_WIDTH as i32 {
-            res.push(n1 as usize);
-        }
-    }
     return res;
 }
 

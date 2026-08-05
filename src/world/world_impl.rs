@@ -8,13 +8,12 @@ use image::{ImageBuffer, Rgb};
 
 use crate::{
     camera::Camera,
-    data::{FilterType, GeometryBuffer, PixelContainer},
+    data::{GeometryBuffer, PixelContainer},
     entity::{obj_traits::Hittable, Panel, Rectangle},
     material::{DiffuseLight, DiffuseMat},
     settings::{FILTER_STEP, SAMPLES_PER_PIXEL, THREAD_NUM, WINDOW_HEIGHT, WINDOW_WIDTH},
     some_math::{
-        generate_neighbor_pixel_coordinate, generate_num_sequence, num_inline, sum_vector_list,
-        Color, Point, Vector3,
+        generate_neighbor_pixel_coordinate, num_inline, sum_vector_list, Color, Point, Vector3,
     },
     systems::image_process::{is_same_surface, pixel_filter},
     world::multithread_impl::ThreadPool,
@@ -36,13 +35,8 @@ impl World {
     pub fn run(&mut self) {
         self.start_time = SystemTime::now();
         let (raw_pixel, gbuffer) = self.shade_pixel();
-        let proc_pixel_0 = self.outlier_removal(raw_pixel, &gbuffer, 1);
-        let proc_pixel_1 = self.row_filter(proc_pixel_0, gbuffer.clone());
-        // let proc_pixel_1 = self.col_filter(proc_pixel_0, gbuffer.clone());
-        let proc_pixel_2 = self.outlier_removal(proc_pixel_1, &gbuffer, 3);
-        let proc_pixel_3 = self.col_filter(proc_pixel_2, gbuffer.clone());
-        // let prec_pixel_3 = self.row_filter(proc_pixel_2, gbuffer);
-        self.outlier_removal(proc_pixel_3, &gbuffer, 5);
+        let clipped_pixel = self.outlier_removal(raw_pixel, &gbuffer, 1);
+        self.atrous_filter(clipped_pixel, &gbuffer);
     }
 
     fn shade_pixel(&mut self) -> (PixelContainer, GeometryBuffer) {
@@ -114,7 +108,7 @@ impl World {
                 } else {
                     center_color
                 };
-                res_vec.set_colors(col_num, row_num, filtered_color, FilterType::Row);
+                res_vec.set_colors(col_num, row_num, filtered_color);
             }
         }
 
@@ -122,90 +116,102 @@ impl World {
         return res_vec;
     }
 
-    fn row_filter(
+    fn atrous_filter(
         &mut self,
-        processed_img: PixelContainer,
-        gbuffer: GeometryBuffer,
+        input_pixels: PixelContainer,
+        gbuffer: &GeometryBuffer,
     ) -> PixelContainer {
-        // row process
-        let res_vec = self.filter_image(&processed_img, &gbuffer, FilterType::Row);
-        self.save_image(&res_vec, "row-filter".to_string(), 2);
-        return res_vec;
+        println!("==> 开始二维 À-Trous 滤波...");
+        let mut current_pixels = input_pixels;
+        for iteration in 0..FILTER_STEP {
+            let step = 1 << iteration;
+            current_pixels = self.atrous_iteration(&current_pixels, gbuffer, step);
+        }
+        self.save_image(&current_pixels, "a-trous-filter".to_string(), 2);
+        current_pixels
     }
 
-    fn col_filter(
-        &mut self,
-        processed_img: PixelContainer,
-        gbuffer: GeometryBuffer,
-    ) -> PixelContainer {
-        let res_vec = self.filter_image(&processed_img, &gbuffer, FilterType::Col);
-        self.save_image(&res_vec, "col-filter".to_string(), 4);
-        return res_vec;
-    }
-
-    fn filter_image(
+    fn atrous_iteration(
         &self,
         input_pixels: &PixelContainer,
-        input_gbuffer: &GeometryBuffer,
-        filter_type: FilterType,
+        gbuffer: &GeometryBuffer,
+        step: usize,
     ) -> PixelContainer {
-        let x_axis_total_num;
-        let y_axis_total_num;
-        let label;
-        match filter_type {
-            FilterType::Row => {
-                x_axis_total_num = WINDOW_WIDTH;
-                y_axis_total_num = WINDOW_HEIGHT;
-                label = "Row-filter".to_string();
-            }
-            FilterType::Col => {
-                x_axis_total_num = WINDOW_HEIGHT;
-                y_axis_total_num = WINDOW_WIDTH;
-                label = "Col-filter".to_string();
-            }
-        }
-        println!("==> {} filtering...", label);
-        let mut res_vec = PixelContainer::new();
-        for y_value in 0..y_axis_total_num as usize {
-            let y_axis_pixels = input_pixels.get_x_or_y(y_value, filter_type);
-            let y_axis_gbuffer = input_gbuffer.get_x_or_y(y_value, filter_type);
-            for x_value in 0..x_axis_total_num as usize {
-                let gb0 = y_axis_gbuffer.get_data(x_value);
-                let c0 = y_axis_pixels.get_color(x_value);
-                let mut weights = 1.0;
-                let mut res_pixel = c0.clone();
-                for step in 0..FILTER_STEP {
-                    let sample_points = generate_num_sequence(x_value, step);
-                    let mut color_vec = Vec::new();
-                    color_vec.push(c0);
-                    for temp_sample in sample_points.iter() {
-                        color_vec.push(y_axis_pixels.get_color(*temp_sample));
-                    }
-                    let temp_l = color_vec.len();
-                    // sum_vector_list 已经返回均值，不能再除以样本数。
-                    let color_mean = sum_vector_list(&color_vec);
-                    let color_sigma = (color_vec
-                        .iter()
-                        .map(|c| (*c - color_mean).length_square())
-                        .sum::<f64>()
-                        / (temp_l - 1) as f64)
-                        .sqrt();
+        // B3 样条核在二维中做外积，既保持旋转对称，也避免横纵分离产生条纹。
+        const KERNEL: [f64; 5] = [1.0, 4.0, 6.0, 4.0, 1.0];
+        let mut result = PixelContainer::new();
 
-                    for sample in sample_points {
-                        let c1 = y_axis_pixels.get_color(sample);
-                        let gb1 = y_axis_gbuffer.get_data(sample);
-                        let w = pixel_filter(gb0, gb1, c0, c1, color_sigma);
-                        weights += w;
-                        res_pixel += w * c1;
+        for row_num in 0..WINDOW_HEIGHT as usize {
+            for col_num in 0..WINDOW_WIDTH as usize {
+                let center_gbuffer = gbuffer.get_data(col_num, row_num);
+                let center_color = Color::new(input_pixels.get_colors(col_num, row_num));
+                let mut samples = Vec::with_capacity(25);
+                let mut sample_colors = Vec::with_capacity(25);
+
+                for row_offset in -2..=2 {
+                    for col_offset in -2..=2 {
+                        let Some(sample_col) =
+                            offset_coordinate(col_num, col_offset, step, WINDOW_WIDTH as usize)
+                        else {
+                            continue;
+                        };
+                        let Some(sample_row) =
+                            offset_coordinate(row_num, row_offset, step, WINDOW_HEIGHT as usize)
+                        else {
+                            continue;
+                        };
+                        let is_center = col_offset == 0 && row_offset == 0;
+                        if !is_center
+                            && !is_same_surface(
+                                center_gbuffer,
+                                gbuffer.get_data(sample_col, sample_row),
+                            )
+                        {
+                            continue;
+                        }
+
+                        let kernel_weight =
+                            KERNEL[(col_offset + 2) as usize] * KERNEL[(row_offset + 2) as usize];
+                        let sample_color =
+                            Color::new(input_pixels.get_colors(sample_col, sample_row));
+                        samples.push((sample_col, sample_row, kernel_weight, sample_color));
+                        sample_colors.push(sample_color);
                     }
                 }
-                if weights > 0.0 {
-                    res_pixel /= weights;
+
+                let color_mean = sum_vector_list(&sample_colors);
+                let variance_divisor = sample_colors.len().saturating_sub(1).max(1) as f64;
+                let color_sigma = (sample_colors
+                    .iter()
+                    .map(|color| (*color - color_mean).length_square())
+                    .sum::<f64>()
+                    / variance_divisor)
+                    .sqrt();
+                let mut total_weight = 0.0;
+                let mut filtered_color = Color::BLACK;
+
+                for (sample_col, sample_row, kernel_weight, sample_color) in samples {
+                    let guide_weight = pixel_filter(
+                        center_gbuffer,
+                        gbuffer.get_data(sample_col, sample_row),
+                        center_color,
+                        sample_color,
+                        color_sigma,
+                    );
+                    let combined_weight = kernel_weight * guide_weight;
+                    total_weight += combined_weight;
+                    filtered_color += combined_weight * sample_color;
                 }
-                res_vec.set_colors(x_value, y_value, res_pixel.data, filter_type);
+
+                if total_weight > 0.0 {
+                    filtered_color /= total_weight;
+                } else {
+                    filtered_color = center_color;
+                }
+                result.set_colors(col_num, row_num, filtered_color.data);
             }
         }
-        return res_vec;
+        result
     }
 
     fn save_image(&mut self, res_vec: &PixelContainer, process_label: String, num: usize) {
@@ -336,5 +342,14 @@ impl World {
             Vector3::new([0.0, 1.0, 0.0]),
         ));
         self.objects = Arc::new(RwLock::new(objs));
+    }
+}
+
+fn offset_coordinate(base: usize, offset: i32, step: usize, upper_bound: usize) -> Option<usize> {
+    let coordinate = base as i32 + offset * step as i32;
+    if coordinate < 0 || coordinate >= upper_bound as i32 {
+        None
+    } else {
+        Some(coordinate as usize)
     }
 }

@@ -4,7 +4,7 @@ use rand::prelude::ThreadRng;
 
 use crate::{
     camera::Camera,
-    data::{FilterType, GBInfo, RowColGBuffer, RowColPixels},
+    data::{GBInfo, RowColGBuffer, RowColPixels},
     entity::obj_traits::{Hittable, HittableLight},
     settings::{RAY_DEPTH, SAMPLES_PER_PIXEL, WINDOW_WIDTH},
     systems::path_tracing::shade,
@@ -17,8 +17,8 @@ pub fn process_job_sequence(
     lights: &Vec<Arc<dyn HittableLight + Send + Sync>>,
     rng: &mut ThreadRng,
 ) -> (u32, RowColPixels, RowColGBuffer) {
-    let mut pixel_res = RowColPixels::new(FilterType::Row);
-    let mut gbuffer_res = RowColGBuffer::new_empty(FilterType::Col);
+    let mut pixel_res = RowColPixels::new();
+    let mut gbuffer_res = RowColGBuffer::new_empty();
     for col_num in 0..WINDOW_WIDTH {
         let ray_list = camera.generate_rays(col_num, content, rng);
         let mut gbuffer_data = GBInfo::default();

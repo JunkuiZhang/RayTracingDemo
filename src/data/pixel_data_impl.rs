@@ -1,16 +1,16 @@
 use crate::{
     settings::{WINDOW_HEIGHT, WINDOW_WIDTH},
-    some_math::{to_u8, Color},
+    some_math::to_u8,
 };
 
-use super::{FilterType, PixelContainer, RowColPixels};
+use super::{PixelContainer, RowColPixels};
 
 impl PixelContainer {
     pub fn new() -> Self {
-        // row container by default
+        // 图像始终按行存储，每行包含完整的 RGB 数据。
         let mut data = Vec::with_capacity(WINDOW_HEIGHT as usize);
         for _ in 0..WINDOW_HEIGHT {
-            data.push(RowColPixels::new(FilterType::Row));
+            data.push(RowColPixels::new());
         }
         return PixelContainer { data };
     }
@@ -23,28 +23,8 @@ impl PixelContainer {
         ]
     }
 
-    pub fn set_colors(&mut self, x: usize, y: usize, colors: [f64; 3], filter_type: FilterType) {
-        match filter_type {
-            FilterType::Row => self.data[y].set_color(x, colors),
-            FilterType::Col => self.data[x].set_color(y, colors),
-        }
-    }
-
-    pub fn get_x_or_y(&self, row_col_num: usize, indicator: FilterType) -> RowColPixels {
-        match indicator {
-            FilterType::Row => RowColPixels {
-                data: self.data[row_col_num].data.clone(),
-            },
-            FilterType::Col => {
-                let mut data = Vec::with_capacity((WINDOW_HEIGHT * 3) as usize);
-                for row in self.data.iter() {
-                    for num in row.get_color(row_col_num).data.iter() {
-                        data.push(*num);
-                    }
-                }
-                return RowColPixels { data };
-            }
-        }
+    pub fn set_colors(&mut self, col_num: usize, row_num: usize, colors: [f64; 3]) {
+        self.data[row_num].set_color(col_num, colors);
     }
 
     pub fn set_row(&mut self, row_num: usize, row_content: RowColPixels) {
@@ -65,23 +45,10 @@ impl PixelContainer {
 }
 
 impl RowColPixels {
-    pub fn new(indicator: FilterType) -> Self {
-        match indicator {
-            FilterType::Row => RowColPixels {
-                data: [0.0; (WINDOW_WIDTH * 3) as usize].to_vec(),
-            },
-            FilterType::Col => RowColPixels {
-                data: [0.0; (WINDOW_HEIGHT * 3) as usize].to_vec(),
-            },
+    pub fn new() -> Self {
+        RowColPixels {
+            data: [0.0; (WINDOW_WIDTH * 3) as usize].to_vec(),
         }
-    }
-
-    pub fn get_color(&self, index: usize) -> Color {
-        Color::new([
-            self.get_value(index * 3),
-            self.get_value(index * 3 + 1),
-            self.get_value(index * 3 + 2),
-        ])
     }
 
     fn get_value(&self, index: usize) -> f64 {

@@ -50,9 +50,3 @@ pub struct ScatterInfo {
     pub color: Color,
     pub pdf: f64,
 }
-
-#[derive(Debug, Clone, Copy)]
-pub enum FilterType {
-    Row,
-    Col,
-}
