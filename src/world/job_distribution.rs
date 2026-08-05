@@ -28,7 +28,6 @@ pub fn process_job_sequence(
             lights,
             RAY_DEPTH,
             rng,
-            false,
             true,
             &mut gbuffer_data,
         );
@@ -41,7 +40,6 @@ pub fn process_job_sequence(
                     lights,
                     RAY_DEPTH,
                     rng,
-                    false,
                     false,
                     &mut GBInfo::default(),
                 );

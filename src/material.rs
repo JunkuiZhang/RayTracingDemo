@@ -40,9 +40,19 @@ pub struct Glass {
 pub trait Material {
     fn scatter(&self, ray_in: &Ray, hit_normal: &Vector3, rng: &mut ThreadRng) -> ScatterInfo;
     fn emit(&self) -> Color;
-    fn get_color(&self) -> Color;
     fn is_light(&self) -> bool;
-    fn get_fresnel(&self, ray_in_dir: &Vector3, hit_normal: &Vector3) -> f64;
+
+    fn evaluate_brdf(&self, _scatter_dir: &Vector3, _hit_normal: &Vector3) -> Color {
+        Color::BLACK
+    }
+
+    fn scattering_pdf(&self, _scatter_dir: &Vector3, _hit_normal: &Vector3) -> f64 {
+        0.0
+    }
+
+    fn is_delta(&self) -> bool {
+        false
+    }
 }
 
 pub trait Light {

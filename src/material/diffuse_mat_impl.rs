@@ -49,16 +49,19 @@ impl Material for DiffuseMat {
         Color::BLACK
     }
 
-    fn get_color(&self) -> Color {
-        self.diffuse_color
-    }
-
     fn is_light(&self) -> bool {
         false
     }
 
-    fn get_fresnel(&self, ray_in_dir: &Vector3, hit_normal: &Vector3) -> f64 {
-        let f0 = 0.45;
-        return f0 + (1.0 - f0) * ((*ray_in_dir) * (*hit_normal)).abs().powi(5);
+    fn evaluate_brdf(&self, scatter_dir: &Vector3, hit_normal: &Vector3) -> Color {
+        if *scatter_dir * *hit_normal > 0.0 {
+            self.diffuse_color / PI
+        } else {
+            Color::BLACK
+        }
+    }
+
+    fn scattering_pdf(&self, scatter_dir: &Vector3, hit_normal: &Vector3) -> f64 {
+        (*scatter_dir * *hit_normal).max(0.0) / PI
     }
 }

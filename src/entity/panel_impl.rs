@@ -54,8 +54,8 @@ impl Hittable for Panel {
         }
     }
 
-    fn is_light(&self) -> bool {
-        self.material.is_light()
+    fn get_id(&self) -> usize {
+        self.id
     }
 }
 

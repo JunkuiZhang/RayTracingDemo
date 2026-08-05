@@ -10,7 +10,7 @@ use super::Ray;
 
 pub trait Hittable {
     fn ray_intersect(&self, ray_in: &Ray) -> Option<HitInfo>;
-    fn is_light(&self) -> bool;
+    fn get_id(&self) -> usize;
 }
 
 pub trait HittableLight: Hittable + Light {

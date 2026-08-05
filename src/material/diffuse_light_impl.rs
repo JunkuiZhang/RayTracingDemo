@@ -27,15 +27,7 @@ impl Material for DiffuseLight {
         self.color
     }
 
-    fn get_color(&self) -> Color {
-        self.color
-    }
-
     fn is_light(&self) -> bool {
         true
-    }
-
-    fn get_fresnel(&self, _ray_in_dir: &Vector3, _hit_normal: &Vector3) -> f64 {
-        1.0
     }
 }
