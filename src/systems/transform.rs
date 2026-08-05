@@ -25,9 +25,10 @@ pub fn rotate_vec_given_normal(vec: &Vector3, normal: &Vector3) -> Vector3 {
     return res;
 }
 
+#[allow(dead_code)]
 pub fn generate_unit_vec_sphere(rng: &mut ThreadRng) -> Vector3 {
-    let theta = rng.gen_range(0.0..PI);
-    let phi = rng.gen_range(0.0..(2.0 * PI));
+    let theta = rng.random_range(0.0..PI);
+    let phi = rng.random_range(0.0..(2.0 * PI));
     let trans_rotate_z = matrix_rotate_around_z(theta.sin(), theta.cos());
     let trans_rotate_y = matrix_rotate_around_y(phi.sin(), phi.cos());
     return trans_rotate_y * (trans_rotate_z * Vector3::new([0.0, 1.0, 0.0]));

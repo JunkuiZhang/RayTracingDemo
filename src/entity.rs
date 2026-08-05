@@ -12,6 +12,7 @@ mod rectangle_impl;
 mod sphere_impl;
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct Sphere {
     pub center: Point,
     pub radius: f64,

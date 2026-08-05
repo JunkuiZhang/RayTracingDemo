@@ -9,8 +9,8 @@ use image::{ImageBuffer, Rgb};
 use crate::{
     camera::Camera,
     data::{FilterType, GeometryBuffer, PixelContainer},
-    entity::{obj_traits::Hittable, Panel, Rectangle, Sphere},
-    material::{DiffuseLight, DiffuseMat, Glass, Metal},
+    entity::{obj_traits::Hittable, Panel, Rectangle},
+    material::{DiffuseLight, DiffuseMat},
     settings::{FILTER_STEP, SAMPLES_PER_PIXEL, THREAD_NUM, WINDOW_HEIGHT, WINDOW_WIDTH},
     some_math::{
         generate_neighbor_pixel_coordinate, generate_num_sequence, num_inline, sum_vector_list,

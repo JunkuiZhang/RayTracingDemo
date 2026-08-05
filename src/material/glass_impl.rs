@@ -8,6 +8,7 @@ use crate::{
 
 use super::{Glass, Material};
 
+#[allow(dead_code)]
 impl Glass {
     pub fn new(color: Color, eta: f64) -> Self {
         Glass { color, eta }
@@ -17,7 +18,7 @@ impl Glass {
 impl Material for Glass {
     fn scatter(&self, ray_in: &Ray, hit_normal: &Vector3, rng: &mut ThreadRng) -> ScatterInfo {
         let reflection_portion = self.get_fresnel(&ray_in.direction, hit_normal);
-        if rng.gen_range(0.0..1.0) < reflection_portion {
+        if rng.random_range(0.0..1.0) < reflection_portion {
             let scatter_dir = reflect(&ray_in.direction, hit_normal);
             return ScatterInfo {
                 scatter_dir,

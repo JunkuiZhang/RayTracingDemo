@@ -9,6 +9,7 @@ use crate::{
 
 use super::{Material, Metal};
 
+#[allow(dead_code)]
 impl Metal {
     pub fn new(color: Color, fuzz: f64) -> Self {
         Metal { color, fuzz }

@@ -22,8 +22,8 @@ impl DiffuseMat {
 impl Material for DiffuseMat {
     fn scatter(&self, _ray_in: &Ray, hit_normal: &Vector3, rng: &mut ThreadRng) -> ScatterInfo {
         // impl cosine-weighted sampling
-        let a: f64 = rng.gen_range(0.0..1.0);
-        let b: f64 = rng.gen_range(0.0..1.0);
+        let a: f64 = rng.random_range(0.0..1.0);
+        let b: f64 = rng.random_range(0.0..1.0);
         let sin_theta = a.sqrt();
         let cos_theta = (1.0 - a).sqrt();
         let sin_phi = (2.0 * PI * b).sin();

@@ -4,6 +4,7 @@ use crate::{data::HitInfo, material::Material, some_math::Point};
 
 use super::{obj_traits::Hittable, Ray, Sphere};
 
+#[allow(dead_code)]
 impl Sphere {
     pub fn new(
         center: Point,

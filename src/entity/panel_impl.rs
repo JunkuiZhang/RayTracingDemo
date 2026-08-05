@@ -86,7 +86,7 @@ impl HittableLight for Panel {
             if i == axis {
                 continue;
             }
-            data[i] = rng.gen_range(self.points[0].data[i]..self.points[1].data[i]);
+            data[i] = rng.random_range(self.points[0].data[i]..self.points[1].data[i]);
         }
         return (Point::new(data), self.normal);
     }

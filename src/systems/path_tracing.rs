@@ -124,7 +124,7 @@ fn shade_point(
     // indirect shading
     let scatter_info = point_material.scatter(ray_in, point_normal, rng);
     let scatter_ray = Ray::new(*point, scatter_info.scatter_dir);
-    shade_color += albedo.naive_mul(shade(
+    shade_color += scatter_info.color.naive_mul(shade(
         &scatter_ray,
         objects,
         lights,

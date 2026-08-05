@@ -23,12 +23,14 @@ pub struct DiffuseLight {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct Metal {
     pub color: Color,
     fuzz: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct Glass {
     color: Color,
     // index of refraction
