@@ -8,6 +8,7 @@ use super::{clamp, Color, Vector3};
 
 impl Vector3 {
     pub const BLACK: Color = Color { data: [0.0; 3] };
+    pub const WHITE: Color = Color { data: [1.0; 3] };
 
     pub fn new(data: [f64; 3]) -> Self {
         Vector3 { data }

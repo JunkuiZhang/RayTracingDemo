@@ -33,6 +33,7 @@ pub struct GBInfo {
     pub normal: Vector3,
     pub hit_point: Point,
     pub hit_obj_id: usize,
+    pub albedo: Color,
 }
 
 #[derive(Clone)]

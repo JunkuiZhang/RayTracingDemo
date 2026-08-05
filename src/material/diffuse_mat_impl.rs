@@ -64,4 +64,8 @@ impl Material for DiffuseMat {
     fn scattering_pdf(&self, scatter_dir: &Vector3, hit_normal: &Vector3) -> f64 {
         (*scatter_dir * *hit_normal).max(0.0) / PI
     }
+
+    fn denoise_albedo(&self) -> Color {
+        self.diffuse_color
+    }
 }

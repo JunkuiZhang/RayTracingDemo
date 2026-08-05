@@ -33,7 +33,8 @@ impl World {
     pub fn run(&mut self) {
         self.start_time = SystemTime::now();
         let (raw_pixel, gbuffer) = self.shade_pixel();
-        let clipped_pixel = self.outlier_removal(raw_pixel, &gbuffer, 1);
+        let illumination = self.demodulate_image(&raw_pixel, &gbuffer);
+        let clipped_pixel = self.outlier_removal(illumination, &gbuffer, 1);
         self.atrous_filter(clipped_pixel, &gbuffer);
     }
 
@@ -110,7 +111,8 @@ impl World {
             }
         }
 
-        self.save_image(&res_vec, "outlier-removal".to_string(), indicator);
+        let preview = self.remodulate_image(&res_vec, gbuffer);
+        self.save_image(&preview, "outlier-removal".to_string(), indicator);
         return res_vec;
     }
 
@@ -125,8 +127,50 @@ impl World {
             let step = 1 << iteration;
             current_pixels = self.atrous_iteration(&current_pixels, gbuffer, step);
         }
-        self.save_image(&current_pixels, "a-trous-filter".to_string(), 2);
+        let final_pixels = self.remodulate_image(&current_pixels, gbuffer);
+        self.save_image(&final_pixels, "a-trous-filter".to_string(), 2);
         current_pixels
+    }
+
+    fn demodulate_image(
+        &self,
+        input_pixels: &PixelContainer,
+        gbuffer: &GeometryBuffer,
+    ) -> PixelContainer {
+        let mut illumination = PixelContainer::new();
+        for row_num in 0..WINDOW_HEIGHT as usize {
+            for col_num in 0..WINDOW_WIDTH as usize {
+                let color = input_pixels.get_colors(col_num, row_num);
+                let albedo = gbuffer.get_data(col_num, row_num).albedo.data;
+                let mut demodulated = [0.0; 3];
+                for channel in 0..3 {
+                    // 极暗反照率会放大噪声，因此只对可靠的通道执行除法。
+                    demodulated[channel] = if albedo[channel] > 1e-3 {
+                        color[channel] / albedo[channel]
+                    } else {
+                        color[channel]
+                    };
+                }
+                illumination.set_colors(col_num, row_num, demodulated);
+            }
+        }
+        illumination
+    }
+
+    fn remodulate_image(
+        &self,
+        illumination: &PixelContainer,
+        gbuffer: &GeometryBuffer,
+    ) -> PixelContainer {
+        let mut result = PixelContainer::new();
+        for row_num in 0..WINDOW_HEIGHT as usize {
+            for col_num in 0..WINDOW_WIDTH as usize {
+                let color = Color::new(illumination.get_colors(col_num, row_num));
+                let albedo = gbuffer.get_data(col_num, row_num).albedo;
+                result.set_colors(col_num, row_num, color.naive_mul(albedo).data);
+            }
+        }
+        result
     }
 
     fn atrous_iteration(

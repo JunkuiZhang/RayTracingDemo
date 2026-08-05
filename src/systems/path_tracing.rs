@@ -64,6 +64,7 @@ fn shade_recursive(
             normal: info.normal,
             hit_point: info.hit_point,
             hit_obj_id: info.obj_id,
+            albedo: info.material.denoise_albedo(),
         };
     }
     if info.material.is_light() {

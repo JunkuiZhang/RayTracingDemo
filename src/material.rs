@@ -53,6 +53,11 @@ pub trait Material {
     fn is_delta(&self) -> bool {
         false
     }
+
+    fn denoise_albedo(&self) -> Color {
+        // 非漫反射材质不适合做反照率解调，默认使用白色保持原始辐射亮度。
+        Color::WHITE
+    }
 }
 
 pub trait Light {
