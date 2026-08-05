@@ -10,10 +10,10 @@ use image::{ImageBuffer, Rgb};
 use crate::{
     camera::Camera,
     data::{GeometryBuffer, PixelContainer},
-    entity::{obj_traits::Hittable, Panel, Rectangle},
+    entity::{Panel, Rectangle, obj_traits::Hittable},
     material::{DiffuseLight, DiffuseMat},
     settings::{FILTER_STEP, THREAD_NUM, WINDOW_HEIGHT, WINDOW_WIDTH},
-    some_math::{generate_neighbor_pixel_coordinate, num_inline, Color, Point, Vector3},
+    some_math::{Color, Point, Vector3, generate_neighbor_pixel_coordinate, num_inline},
     systems::image_process::{is_same_surface, luminance, pixel_filter},
     world::multithread_impl::ThreadPool,
 };

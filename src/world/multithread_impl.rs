@@ -1,7 +1,7 @@
 use std::{
     sync::{
-        mpsc::{self, Receiver, Sender},
         Arc, Mutex, RwLock,
+        mpsc::{self, Receiver, Sender},
     },
     thread,
 };
@@ -84,25 +84,27 @@ impl Worker {
         samples_per_pixel: usize,
         seed: u64,
     ) -> Self {
-        let thread = thread::spawn(move || loop {
-            let o = objects.read().unwrap();
-            let l = lights.read().unwrap();
-            let msg = receiver.lock().unwrap().recv().unwrap();
-            match msg {
-                Message::NewWork(work) => {
-                    let res = Arc::new(process_job_sequence(
-                        work,
-                        camera.clone(),
-                        &o,
-                        &l,
-                        samples_per_pixel,
-                        seed,
-                    ));
-                    res_sender.send(res).unwrap();
-                }
-                Message::Terminate => {
-                    println!("Thread {} was told to shut down..", id);
-                    break;
+        let thread = thread::spawn(move || {
+            loop {
+                let o = objects.read().unwrap();
+                let l = lights.read().unwrap();
+                let msg = receiver.lock().unwrap().recv().unwrap();
+                match msg {
+                    Message::NewWork(work) => {
+                        let res = Arc::new(process_job_sequence(
+                            work,
+                            camera.clone(),
+                            &o,
+                            &l,
+                            samples_per_pixel,
+                            seed,
+                        ));
+                        res_sender.send(res).unwrap();
+                    }
+                    Message::Terminate => {
+                        println!("Thread {} was told to shut down..", id);
+                        break;
+                    }
                 }
             }
         });

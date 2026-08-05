@@ -1,4 +1,4 @@
-use rand::{rngs::StdRng, Rng};
+use rand::{RngExt, rngs::StdRng};
 
 use crate::{
     entity::Ray,

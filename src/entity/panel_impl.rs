@@ -1,16 +1,16 @@
 use std::sync::Arc;
 
-use rand::{rngs::StdRng, Rng};
+use rand::{RngExt, rngs::StdRng};
 
 use crate::{
     data::HitInfo,
     material::{Light, Material},
-    some_math::{point_in_2d, Point, Vector3},
+    some_math::{Point, Vector3, point_in_2d},
 };
 
 use super::{
-    obj_traits::{Hittable, HittableLight},
     Panel, Ray,
+    obj_traits::{Hittable, HittableLight},
 };
 
 impl Panel {

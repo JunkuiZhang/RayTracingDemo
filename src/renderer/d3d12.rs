@@ -1,7 +1,6 @@
 use std::{ffi::c_void, mem::ManuallyDrop};
 
 use windows::{
-    core::{Error as WindowsError, Interface, Result},
     Win32::{
         Foundation::{CloseHandle, HANDLE, HWND},
         Graphics::{
@@ -9,8 +8,9 @@ use windows::{
             Direct3D12::*,
             Dxgi::{Common::*, *},
         },
-        System::Threading::{CreateEventW, WaitForSingleObject, INFINITE},
+        System::Threading::{CreateEventW, INFINITE, WaitForSingleObject},
     },
+    core::{Error as WindowsError, Interface, Result},
 };
 use winit::{
     raw_window_handle::{HasWindowHandle, RawWindowHandle},

@@ -5,8 +5,8 @@ use rand::rngs::StdRng;
 use crate::{
     data::{GBInfo, HitInfo},
     entity::{
-        obj_traits::{Hittable, HittableLight},
         Ray,
+        obj_traits::{Hittable, HittableLight},
     },
     some_math::{Color, Point, Vector3},
 };

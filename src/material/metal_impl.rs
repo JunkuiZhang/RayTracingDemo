@@ -3,7 +3,7 @@ use rand::rngs::StdRng;
 use crate::{
     data::ScatterInfo,
     entity::Ray,
-    some_math::{reflect, Color, Vector3},
+    some_math::{Color, Vector3, reflect},
     systems::transform::generate_unit_vec_sphere,
 };
 

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{data::HitInfo, material::Material, some_math::Point};
 
-use super::{obj_traits::Hittable, Ray, Sphere};
+use super::{Ray, Sphere, obj_traits::Hittable};
 
 #[allow(dead_code)]
 impl Sphere {

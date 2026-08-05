@@ -4,7 +4,7 @@ use std::{
     usize,
 };
 
-use super::{clamp, Color, Vector3};
+use super::{Color, Vector3, clamp};
 
 impl Vector3 {
     pub const BLACK: Color = Color { data: [0.0; 3] };

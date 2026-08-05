@@ -6,11 +6,11 @@ use std::{
 use crate::{
     data::HitInfo,
     material::Material,
-    some_math::{order_numbers, Point, Vector3},
+    some_math::{Point, Vector3, order_numbers},
     systems::transform::rotate_around_y,
 };
 
-use super::{obj_traits::Hittable, Ray, Rectangle};
+use super::{Ray, Rectangle, obj_traits::Hittable};
 
 impl Rectangle {
     pub fn new(

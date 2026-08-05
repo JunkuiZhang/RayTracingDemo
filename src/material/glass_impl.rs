@@ -1,9 +1,9 @@
-use rand::{rngs::StdRng, Rng};
+use rand::{RngExt, rngs::StdRng};
 
 use crate::{
     data::ScatterInfo,
     entity::Ray,
-    some_math::{reflect, refract, Color, Vector3},
+    some_math::{Color, Vector3, reflect, refract},
 };
 
 use super::{Glass, Material};

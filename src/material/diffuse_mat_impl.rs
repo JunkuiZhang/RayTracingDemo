@@ -1,6 +1,6 @@
 use std::f64::consts::PI;
 
-use rand::{rngs::StdRng, Rng};
+use rand::{RngExt, rngs::StdRng};
 
 use crate::{
     data::ScatterInfo,

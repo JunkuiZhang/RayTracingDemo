@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 
 use crate::{
     camera::Camera,
