@@ -10,7 +10,7 @@ use windows::Win32::UI::HiDpi::{
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalSize},
-    event::{ElementState, WindowEvent},
+    event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
@@ -59,7 +59,7 @@ impl ApplicationHandler for RealtimeApplication {
         }
 
         let attributes = Window::default_attributes()
-            .with_title("RayTracingDemo - DX12 阶段 5")
+            .with_title("RayTracingDemo - DX12 阶段 6")
             .with_inner_size(LogicalSize::new(1280, 720))
             .with_min_inner_size(LogicalSize::new(320, 180));
         let window = match event_loop.create_window(attributes) {
@@ -112,7 +112,7 @@ impl ApplicationHandler for RealtimeApplication {
                     if elapsed >= Duration::from_millis(500) {
                         let fps = self.frames_since_stats as f64 / elapsed.as_secs_f64();
                         window.set_title(&format!(
-                            "RayTracingDemo - 阶段 5 | FPS {:.0} | GPU {:.3} ms | SPP {} | {} | Shader {}",
+                            "RayTracingDemo - 阶段 6 | FPS {:.0} | GPU {:.3} ms | SPP {} | {} | Shader {}",
                             fps,
                             renderer.gpu_time_ms(),
                             renderer.sample_count(),
@@ -142,6 +142,15 @@ impl ApplicationHandler for RealtimeApplication {
                         PhysicalKey::Code(KeyCode::ArrowDown) => renderer.rotate_camera(0.0, -0.04),
                         _ => {}
                     }
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left | MouseButton::Right,
+                ..
+            } => {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.reset_history();
                 }
             }
             _ => {}
