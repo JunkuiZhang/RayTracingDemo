@@ -41,6 +41,10 @@ struct CameraConstants {
     yaw: f32,
     pitch: f32,
     padding: [f32; 2],
+    previous_position: [f32; 3],
+    previous_yaw: f32,
+    previous_pitch: f32,
+    previous_padding: [f32; 2],
 }
 
 /// 阶段 1 的最小 DX12 后端：三缓冲交换链、清屏和逐帧 Fence。
@@ -56,6 +60,8 @@ pub struct Dx12Renderer {
     gbuffer_normal: Option<TrackedResource>,
     gbuffer_depth: Option<TrackedResource>,
     accumulation: Option<TrackedResource>,
+    history_moments: Option<TrackedResource>,
+    motion_vectors: Option<TrackedResource>,
     gpu_profiler: GpuProfiler,
     shader_status: String,
     raytracing_status: String,
@@ -74,6 +80,9 @@ pub struct Dx12Renderer {
     camera_position: [f32; 3],
     camera_yaw: f32,
     camera_pitch: f32,
+    previous_camera_position: [f32; 3],
+    previous_camera_yaw: f32,
+    previous_camera_pitch: f32,
 }
 
 impl Dx12Renderer {
@@ -140,7 +149,7 @@ impl Dx12Renderer {
                 DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, FRAME_COUNT, false)
                     .map_err(|error| dx_error("创建 RTV 描述符堆", error))?;
             let shader_heap =
-                DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 10, true)
+                DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 12, true)
                     .map_err(|error| dx_error("创建 Shader 描述符堆", error))?;
             let gpu_profiler = GpuProfiler::new(&device, &command_queue, FRAME_COUNT)
                 .map_err(|error| dx_error("创建 GPU 计时器", error))?;
@@ -230,6 +239,8 @@ impl Dx12Renderer {
                 gbuffer_normal: None,
                 gbuffer_depth: None,
                 accumulation: None,
+                history_moments: None,
+                motion_vectors: None,
                 gpu_profiler,
                 shader_status: format!("内嵌 DXR（{} 字节）", STAGE3_SHADER.len()),
                 raytracing_status,
@@ -248,6 +259,9 @@ impl Dx12Renderer {
                 camera_position: [0.0, 0.45, -3.2],
                 camera_yaw: 0.0,
                 camera_pitch: 0.0,
+                previous_camera_position: [0.0, 0.45, -3.2],
+                previous_camera_yaw: 0.0,
+                previous_camera_pitch: 0.0,
             };
             renderer
                 .create_render_targets()
@@ -261,6 +275,9 @@ impl Dx12Renderer {
             renderer
                 .create_accumulation()
                 .map_err(|error| dx_error("创建渐进累计纹理", error))?;
+            renderer
+                .create_stage6_history()
+                .map_err(|error| dx_error("创建时空降噪历史资源", error))?;
             Ok(renderer)
         }
     }
@@ -290,6 +307,10 @@ impl Dx12Renderer {
                 yaw: self.camera_yaw,
                 pitch: self.camera_pitch,
                 padding: [0.0; 2],
+                previous_position: self.previous_camera_position,
+                previous_yaw: self.previous_camera_yaw,
+                previous_pitch: self.previous_camera_pitch,
+                previous_padding: [0.0; 2],
             };
             command_list4.SetComputeRoot32BitConstants(
                 1,
@@ -361,6 +382,8 @@ impl Dx12Renderer {
             self.gbuffer_normal = None;
             self.gbuffer_depth = None;
             self.accumulation = None;
+            self.history_moments = None;
+            self.motion_vectors = None;
             self.render_targets = [None, None, None];
             self.swap_chain.ResizeBuffers(
                 FRAME_COUNT as u32,
@@ -379,6 +402,7 @@ impl Dx12Renderer {
             self.create_compute_output()?;
             self.create_gbuffer()?;
             self.create_accumulation()?;
+            self.create_stage6_history()?;
             Ok(())
         }
     }
@@ -400,6 +424,9 @@ impl Dx12Renderer {
     }
 
     pub fn move_camera(&mut self, forward: f32, right: f32, vertical: f32) {
+        self.previous_camera_position = self.camera_position;
+        self.previous_camera_yaw = self.camera_yaw;
+        self.previous_camera_pitch = self.camera_pitch;
         let forward_axis = [self.camera_yaw.sin(), 0.0, self.camera_yaw.cos()];
         let right_axis = [forward_axis[2], 0.0, -forward_axis[0]];
         for axis in 0..3 {
@@ -410,6 +437,9 @@ impl Dx12Renderer {
     }
 
     pub fn rotate_camera(&mut self, yaw: f32, pitch: f32) {
+        self.previous_camera_position = self.camera_position;
+        self.previous_camera_yaw = self.camera_yaw;
+        self.previous_camera_pitch = self.camera_pitch;
         self.camera_yaw += yaw;
         self.camera_pitch = (self.camera_pitch + pitch).clamp(-1.5, 1.5);
         self.frame_number = 0;
@@ -527,6 +557,44 @@ impl Dx12Renderer {
             );
         }
         self.accumulation = Some(accumulation);
+        Ok(())
+    }
+
+    unsafe fn create_stage6_history(&mut self) -> Result<()> {
+        let moments = TrackedResource::create_texture_2d(
+            &self.device,
+            self.width,
+            self.height,
+            DXGI_FORMAT_R16G16_FLOAT,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            "时空降噪历史矩",
+        )?;
+        let motion = TrackedResource::create_texture_2d(
+            &self.device,
+            self.width,
+            self.height,
+            DXGI_FORMAT_R16G16_FLOAT,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            "时空降噪运动矢量",
+        )?;
+        unsafe {
+            self.device.CreateUnorderedAccessView(
+                moments.resource(),
+                None,
+                None,
+                self.shader_heap.cpu_handle(10),
+            );
+            self.device.CreateUnorderedAccessView(
+                motion.resource(),
+                None,
+                None,
+                self.shader_heap.cpu_handle(11),
+            );
+        }
+        self.history_moments = Some(moments);
+        self.motion_vectors = Some(motion);
         Ok(())
     }
 

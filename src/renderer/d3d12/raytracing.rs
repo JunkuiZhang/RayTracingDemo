@@ -643,7 +643,7 @@ fn create_raytracing_root_signature(device: &ID3D12Device) -> Result<ID3D12RootS
     let ranges = [
         D3D12_DESCRIPTOR_RANGE {
             RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
-            NumDescriptors: 5,
+            NumDescriptors: 7,
             BaseShaderRegister: 0,
             RegisterSpace: 0,
             OffsetInDescriptorsFromTableStart: 0,
@@ -673,7 +673,7 @@ fn create_raytracing_root_signature(device: &ID3D12Device) -> Result<ID3D12RootS
                 Constants: D3D12_ROOT_CONSTANTS {
                     ShaderRegister: 0,
                     RegisterSpace: 0,
-                    Num32BitValues: 8,
+                    Num32BitValues: 16,
                 },
             },
             ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,

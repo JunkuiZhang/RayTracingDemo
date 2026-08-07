@@ -22,6 +22,8 @@ RWTexture2D<float4> GBufferAlbedo : register(u1);
 RWTexture2D<float4> GBufferNormal : register(u2);
 RWTexture2D<float> GBufferDepth : register(u3);
 RWTexture2D<float4> Accumulation : register(u4);
+RWTexture2D<float2> HistoryMoments : register(u5);
+RWTexture2D<float2> MotionVectors : register(u6);
 
 cbuffer FrameConstants : register(b0)
 {
@@ -30,6 +32,9 @@ cbuffer FrameConstants : register(b0)
     float CameraYaw;
     float CameraPitch;
     float2 CameraPadding;
+    float3 PreviousCameraPosition;
+    float PreviousCameraYaw;
+    float PreviousCameraPitch;
 };
 
 struct Payload
@@ -104,7 +109,35 @@ void RayGen()
     float4 history = FrameIndex == 0 ? sample : Accumulation[pixel];
     float4 accumulated = (history * FrameIndex + sample) / (FrameIndex + 1.0);
     Accumulation[pixel] = accumulated;
-    Output[pixel] = accumulated;
+    MotionVectors[pixel] = float2(CameraPosition.x - PreviousCameraPosition.x, CameraPosition.z - PreviousCameraPosition.z);
+
+    float3 filtered = accumulated.xyz;
+    if (FrameIndex > 0)
+    {
+        float3 neighborhoodMin = accumulated.xyz;
+        float3 neighborhoodMax = accumulated.xyz;
+        [unroll]
+        for (int y = -1; y <= 1; ++y)
+        {
+            [unroll]
+            for (int x = -1; x <= 1; ++x)
+            {
+                int2 neighbor = clamp(int2(pixel) + int2(x, y), int2(0, 0), int2(size) - 1);
+                float3 neighborColor = Accumulation[neighbor].xyz;
+                neighborhoodMin = min(neighborhoodMin, neighborColor);
+                neighborhoodMax = max(neighborhoodMax, neighborColor);
+            }
+        }
+        filtered = clamp(accumulated.xyz, neighborhoodMin, neighborhoodMax);
+        filtered = lerp(accumulated.xyz, filtered, 0.35);
+    }
+    float luminance = dot(filtered, float3(0.2126, 0.7152, 0.0722));
+    float previousLuminance = FrameIndex == 0 ? luminance : HistoryMoments[pixel].x;
+    float previousSecondMoment = FrameIndex == 0 ? luminance * luminance : HistoryMoments[pixel].y;
+    float secondMoment = (previousSecondMoment * FrameIndex + luminance * luminance) / (FrameIndex + 1.0);
+    float meanMoment = (previousLuminance * FrameIndex + luminance) / (FrameIndex + 1.0);
+    HistoryMoments[pixel] = float2(meanMoment, secondMoment);
+    Output[pixel] = float4(filtered, 1.0);
 }
 
 [shader("miss")]
