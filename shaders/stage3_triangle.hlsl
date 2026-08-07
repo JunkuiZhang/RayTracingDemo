@@ -26,6 +26,7 @@ RWTexture2D<float2> HistoryMoments : register(u5);
 RWTexture2D<float2> MotionVectors : register(u6);
 RWTexture2D<float4> PreviousNormal : register(u7);
 RWTexture2D<float> PreviousDepth : register(u8);
+RWTexture2D<float4> PreviousAccumulation : register(u9);
 
 cbuffer FrameConstants : register(b0)
 {
@@ -108,7 +109,13 @@ void RayGen()
     GBufferDepth[pixel] = 0;
     TraceRay(Scene, RAY_FLAG_NONE, 0xFF, 0, 1, 0, ray, payload);
     float4 sample = float4(payload.radiance, 1.0);
-    float4 history = FrameIndex == 0 ? sample : Accumulation[pixel];
+    float2 camera_delta = float2(CameraPosition.x - PreviousCameraPosition.x, CameraPosition.z - PreviousCameraPosition.z);
+    camera_delta.x += (CameraYaw - PreviousCameraYaw) * 0.5;
+    camera_delta.y += (CameraPitch - PreviousCameraPitch) * 0.5;
+    int2 reprojection_offset = int2(camera_delta * float2(size) * 0.08);
+    int2 history_pixel = clamp(int2(pixel) + reprojection_offset, int2(0, 0), int2(size) - 1);
+    float4 history_sample = PreviousAccumulation[history_pixel];
+    float4 history = FrameIndex == 0 ? sample : history_sample;
     float4 accumulated = (history * FrameIndex + sample) / (FrameIndex + 1.0);
     Accumulation[pixel] = accumulated;
     MotionVectors[pixel] = float2(CameraPosition.x - PreviousCameraPosition.x, CameraPosition.z - PreviousCameraPosition.z);

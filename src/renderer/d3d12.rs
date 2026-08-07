@@ -60,6 +60,7 @@ pub struct Dx12Renderer {
     gbuffer_normal: Option<TrackedResource>,
     gbuffer_depth: Option<TrackedResource>,
     accumulation: Option<TrackedResource>,
+    previous_accumulation: Option<TrackedResource>,
     history_moments: Option<TrackedResource>,
     motion_vectors: Option<TrackedResource>,
     previous_normal: Option<TrackedResource>,
@@ -151,7 +152,7 @@ impl Dx12Renderer {
                 DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, FRAME_COUNT, false)
                     .map_err(|error| dx_error("创建 RTV 描述符堆", error))?;
             let shader_heap =
-                DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 14, true)
+                DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 15, true)
                     .map_err(|error| dx_error("创建 Shader 描述符堆", error))?;
             let gpu_profiler = GpuProfiler::new(&device, &command_queue, FRAME_COUNT)
                 .map_err(|error| dx_error("创建 GPU 计时器", error))?;
@@ -241,6 +242,7 @@ impl Dx12Renderer {
                 gbuffer_normal: None,
                 gbuffer_depth: None,
                 accumulation: None,
+                previous_accumulation: None,
                 history_moments: None,
                 motion_vectors: None,
                 previous_normal: None,
@@ -336,6 +338,15 @@ impl Dx12Renderer {
                 Depth: 1,
             };
             command_list4.DispatchRays(&dispatch);
+            let accumulation = self.accumulation.as_mut().unwrap();
+            let previous_accumulation = self.previous_accumulation.as_mut().unwrap();
+            accumulation.transition(&self.command_list, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            previous_accumulation.transition(&self.command_list, D3D12_RESOURCE_STATE_COPY_DEST);
+            self.command_list
+                .CopyResource(previous_accumulation.resource(), accumulation.resource());
+            accumulation.transition(&self.command_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            previous_accumulation
+                .transition(&self.command_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             let gbuffer_normal = self.gbuffer_normal.as_mut().unwrap();
             let gbuffer_depth = self.gbuffer_depth.as_mut().unwrap();
             let previous_normal = self.previous_normal.as_mut().unwrap();
@@ -402,6 +413,7 @@ impl Dx12Renderer {
             self.gbuffer_normal = None;
             self.gbuffer_depth = None;
             self.accumulation = None;
+            self.previous_accumulation = None;
             self.history_moments = None;
             self.motion_vectors = None;
             self.previous_normal = None;
@@ -579,6 +591,24 @@ impl Dx12Renderer {
             );
         }
         self.accumulation = Some(accumulation);
+        let previous = TrackedResource::create_texture_2d(
+            &self.device,
+            self.width,
+            self.height,
+            DXGI_FORMAT_R32G32B32A32_FLOAT,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            "上一帧渐进累计",
+        )?;
+        unsafe {
+            self.device.CreateUnorderedAccessView(
+                previous.resource(),
+                None,
+                None,
+                self.shader_heap.cpu_handle(14),
+            );
+        }
+        self.previous_accumulation = Some(previous);
         Ok(())
     }
 
