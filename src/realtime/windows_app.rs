@@ -10,7 +10,7 @@ use windows::Win32::UI::HiDpi::{
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalSize},
-    event::{ElementState, MouseButton, WindowEvent},
+    event::{ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
@@ -142,15 +142,6 @@ impl ApplicationHandler for RealtimeApplication {
                         PhysicalKey::Code(KeyCode::ArrowDown) => renderer.rotate_camera(0.0, -0.04),
                         _ => {}
                     }
-                }
-            }
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: MouseButton::Left | MouseButton::Right,
-                ..
-            } => {
-                if let Some(renderer) = self.renderer.as_mut() {
-                    renderer.reset_history();
                 }
             }
             _ => {}

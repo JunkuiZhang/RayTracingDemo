@@ -457,14 +457,6 @@ impl Dx12Renderer {
         self.frame_number.saturating_add(1)
     }
 
-    /// 鼠标交互可能改变焦点或视图状态，显式丢弃旧的时空历史。
-    pub fn reset_history(&mut self) {
-        self.previous_camera_position = self.camera_position;
-        self.previous_camera_yaw = self.camera_yaw;
-        self.previous_camera_pitch = self.camera_pitch;
-        self.frame_number = 0;
-    }
-
     pub fn move_camera(&mut self, forward: f32, right: f32, vertical: f32) {
         let forward_axis = [self.camera_yaw.sin(), 0.0, self.camera_yaw.cos()];
         let right_axis = [forward_axis[2], 0.0, -forward_axis[0]];
