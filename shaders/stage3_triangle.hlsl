@@ -120,6 +120,10 @@ void RayGen()
     Accumulation[pixel] = accumulated;
     MotionVectors[pixel] = float2(CameraPosition.x - PreviousCameraPosition.x, CameraPosition.z - PreviousCameraPosition.z);
 
+    // 使用历史矩估计当前像素的亮度方差，方差越大时越谨慎地融合邻域。
+    float center_luminance = dot(accumulated.xyz, float3(0.2126, 0.7152, 0.0722));
+    float history_mean = HistoryMoments[pixel].x;
+    float history_variance = max(0.0001, HistoryMoments[pixel].y - history_mean * history_mean);
     float3 filtered = accumulated.xyz;
     float currentDepth = GBufferDepth[pixel];
     float3 currentNormal = GBufferNormal[pixel].xyz * 2.0 - 1.0;
@@ -130,22 +134,35 @@ void RayGen()
         && dot(currentNormal, previousNormal) > 0.85;
     if (historyValid)
     {
-        float3 neighborhoodMin = accumulated.xyz;
-        float3 neighborhoodMax = accumulated.xyz;
+        float3 spatial_sum = accumulated.xyz;
+        float spatial_weight = 1.0;
         [unroll]
-        for (int y = -1; y <= 1; ++y)
+        for (int pass = 0; pass < 2; ++pass)
         {
+            int step = 1 << pass;
             [unroll]
-            for (int x = -1; x <= 1; ++x)
+            for (int y = -1; y <= 1; ++y)
             {
-                int2 neighbor = clamp(int2(pixel) + int2(x, y), int2(0, 0), int2(size) - 1);
-                float3 neighborColor = Accumulation[neighbor].xyz;
-                neighborhoodMin = min(neighborhoodMin, neighborColor);
-                neighborhoodMax = max(neighborhoodMax, neighborColor);
+                [unroll]
+                for (int x = -1; x <= 1; ++x)
+                {
+                    if (x == 0 && y == 0)
+                        continue;
+                    int2 neighbor = clamp(int2(pixel) + int2(x * step, y * step), int2(0, 0), int2(size) - 1);
+                    float3 neighborColor = Accumulation[neighbor].xyz;
+                    float neighborDepth = GBufferDepth[neighbor];
+                    float3 neighborNormal = GBufferNormal[neighbor].xyz * 2.0 - 1.0;
+                    float depth_weight = exp(-abs(neighborDepth - currentDepth) / max(0.01, currentDepth * 0.05));
+                    float normal_weight = pow(saturate(dot(currentNormal, neighborNormal)), 8.0);
+                    float neighbor_luminance = dot(neighborColor, float3(0.2126, 0.7152, 0.0722));
+                    float color_weight = exp(-abs(neighbor_luminance - center_luminance) / (0.25 + history_variance * 4.0));
+                    float weight = depth_weight * normal_weight * color_weight;
+                    spatial_sum += neighborColor * weight;
+                    spatial_weight += weight;
+                }
             }
         }
-        filtered = clamp(accumulated.xyz, neighborhoodMin, neighborhoodMax);
-        filtered = lerp(accumulated.xyz, filtered, 0.35);
+        filtered = spatial_sum / spatial_weight;
     }
     float luminance = dot(filtered, float3(0.2126, 0.7152, 0.0722));
     float previousLuminance = historyValid ? HistoryMoments[pixel].x : luminance;
