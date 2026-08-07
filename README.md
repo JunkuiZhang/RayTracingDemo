@@ -73,6 +73,19 @@ RayTracingDemo - 阶段 2 | FPS 240 | GPU 0.422 ms | Shader 内嵌 DXIL
 - GPU Timestamp Query 和 Readback Buffer。
 - `output/shader-cache` 下的开发期 Shader 编译缓存。
 
+## 阶段 3：第一个硬件光追三角形
+
+默认实时窗口现在使用真正的 DXR 管线，而不是 Compute Shader 模拟光线追踪。启动时会依次完成：
+
+- 检测 `D3D12_OPTIONS5` 并在标题显示 DXR Tier；
+- 上传单三角形顶点与索引；
+- 构建三角形 BLAS 和单实例 TLAS；
+- 创建包含 `RayGen`、`Miss`、`ClosestHit` 的 DXR State Object；
+- 创建 Shader Table 并逐帧调用 `DispatchRays`；
+- 将命中法线颜色或深蓝背景复制到交换链。
+
+阶段 3 Shader 位于 [`shaders/stage3_triangle.hlsl`](shaders/stage3_triangle.hlsl)，由构建脚本以 `lib_6_3` 目标编译。运行后应看到蓝色法线三角形和深蓝背景，窗口标题显示 `阶段 3`、FPS、GPU 时间与实际 DXR Tier。
+
 ## 检查项目
 
 ```powershell

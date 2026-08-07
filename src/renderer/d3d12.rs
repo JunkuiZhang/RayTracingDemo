@@ -1,4 +1,4 @@
-use std::{ffi::c_void, time::Instant};
+use std::ffi::c_void;
 
 use windows::{
     Win32::{
@@ -17,32 +17,16 @@ use winit::{
     window::Window,
 };
 
-use self::{
-    descriptor::DescriptorHeap, pipeline::ComputePipeline, profiler::GpuProfiler,
-    resource::TrackedResource, shader::ShaderReloader, upload::UploadRing,
-};
-use raytracing::{AccelerationStructures, TriangleGeometry};
+use self::{descriptor::DescriptorHeap, profiler::GpuProfiler, resource::TrackedResource};
+use raytracing::{AccelerationStructures, RaytracingPipeline, TriangleGeometry};
 
 mod descriptor;
-mod pipeline;
 mod profiler;
 mod raytracing;
 mod resource;
-mod shader;
-mod upload;
 
 const FRAME_COUNT: usize = 3;
-const STAGE2_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage2_gradient.dxil"));
 const STAGE3_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage3_triangle.dxil"));
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct FrameConstants {
-    elapsed_seconds: f32,
-    output_width: u32,
-    output_height: u32,
-    frame_index: u32,
-}
 
 struct FrameContext {
     allocator: ID3D12CommandAllocator,
@@ -58,14 +42,12 @@ pub struct Dx12Renderer {
     shader_heap: DescriptorHeap,
     render_targets: [Option<TrackedResource>; FRAME_COUNT],
     compute_output: Option<TrackedResource>,
-    compute_pipeline: ComputePipeline,
     gpu_profiler: GpuProfiler,
-    shader_reloader: ShaderReloader,
     shader_status: String,
     raytracing_status: String,
     _triangle_geometry: TriangleGeometry,
     _acceleration_structures: AccelerationStructures,
-    upload_ring: UploadRing,
+    raytracing_pipeline: RaytracingPipeline,
     frames: Vec<FrameContext>,
     command_list: ID3D12GraphicsCommandList,
     fence: ID3D12Fence,
@@ -74,8 +56,6 @@ pub struct Dx12Renderer {
     width: u32,
     height: u32,
     minimized: bool,
-    start_time: Instant,
-    frame_number: u32,
 }
 
 impl Dx12Renderer {
@@ -142,14 +122,10 @@ impl Dx12Renderer {
                 DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, FRAME_COUNT, false)
                     .map_err(|error| dx_error("创建 RTV 描述符堆", error))?;
             let shader_heap =
-                DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1, true)
+                DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 2, true)
                     .map_err(|error| dx_error("创建 Shader 描述符堆", error))?;
-            let compute_pipeline = ComputePipeline::new(&device, STAGE2_SHADER)
-                .map_err(|error| dx_error("创建 Compute Pipeline", error))?;
             let gpu_profiler = GpuProfiler::new(&device, &command_queue, FRAME_COUNT)
                 .map_err(|error| dx_error("创建 GPU 计时器", error))?;
-            let upload_ring = UploadRing::new(&device, FRAME_COUNT)
-                .map_err(|error| dx_error("创建上传环形缓冲", error))?;
             let raytracing_status = raytracing_status(&device);
             let triangle_geometry = TriangleGeometry::new(&device)
                 .map_err(|error| dx_error("创建 DXR 三角形几何", error))?;
@@ -170,6 +146,19 @@ impl Dx12Renderer {
             let acceleration_structures =
                 AccelerationStructures::build(&device, &command_list, &triangle_geometry)
                     .map_err(|error| dx_error("构建 DXR 加速结构", error))?;
+            let tlas_view = D3D12_SHADER_RESOURCE_VIEW_DESC {
+                Format: DXGI_FORMAT_UNKNOWN,
+                ViewDimension: D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE,
+                Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                    RaytracingAccelerationStructure: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_SRV {
+                        Location: acceleration_structures.tlas.GetGPUVirtualAddress(),
+                    },
+                },
+            };
+            device.CreateShaderResourceView(None, Some(&tlas_view), shader_heap.cpu_handle(0));
+            let raytracing_pipeline = RaytracingPipeline::new(&device, STAGE3_SHADER)
+                .map_err(|error| dx_error("创建 DXR State Object", error))?;
             command_list.Close()?;
 
             let fence: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_NONE)?;
@@ -187,14 +176,12 @@ impl Dx12Renderer {
                 shader_heap,
                 render_targets: [None, None, None],
                 compute_output: None,
-                compute_pipeline,
                 gpu_profiler,
-                shader_reloader: ShaderReloader::new(),
-                shader_status: format!("内嵌 DXIL（阶段 3 Shader {} 字节）", STAGE3_SHADER.len()),
+                shader_status: format!("内嵌 DXR（{} 字节）", STAGE3_SHADER.len()),
                 raytracing_status,
                 _triangle_geometry: triangle_geometry,
                 _acceleration_structures: acceleration_structures,
-                upload_ring,
+                raytracing_pipeline,
                 frames,
                 command_list,
                 fence,
@@ -203,8 +190,6 @@ impl Dx12Renderer {
                 width,
                 height,
                 minimized: false,
-                start_time: Instant::now(),
-                frame_number: 0,
             };
             renderer
                 .create_render_targets()
@@ -222,7 +207,6 @@ impl Dx12Renderer {
         }
 
         unsafe {
-            self.reload_shader_if_changed()?;
             let frame_index = self.swap_chain.GetCurrentBackBufferIndex() as usize;
             self.wait_for_frame(frame_index)?;
             self.gpu_profiler.collect(frame_index)?;
@@ -231,25 +215,25 @@ impl Dx12Renderer {
             self.command_list
                 .Reset(&frame.allocator, None::<&ID3D12PipelineState>)?;
 
-            let constants = FrameConstants {
-                elapsed_seconds: self.start_time.elapsed().as_secs_f32(),
-                output_width: self.width,
-                output_height: self.height,
-                frame_index: self.frame_number,
-            };
-            let constant_buffer = self.upload_ring.write(frame_index, &constants);
             self.command_list
                 .SetDescriptorHeaps(&[Some(self.shader_heap.heap().clone())]);
-            self.compute_pipeline.bind(
-                &self.command_list,
-                constant_buffer,
-                self.shader_heap.gpu_handle(0),
-            );
+            let command_list4: ID3D12GraphicsCommandList4 = self.command_list.cast()?;
+            command_list4.SetComputeRootSignature(&self.raytracing_pipeline.root_signature);
+            command_list4.SetComputeRootDescriptorTable(0, self.shader_heap.gpu_handle(0));
+            command_list4.SetPipelineState1(&self.raytracing_pipeline.state_object);
             self.gpu_profiler.begin(&self.command_list, frame_index);
             let compute_output = self.compute_output.as_mut().unwrap();
             compute_output.transition(&self.command_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            self.command_list
-                .Dispatch(self.width.div_ceil(8), self.height.div_ceil(8), 1);
+            let dispatch = D3D12_DISPATCH_RAYS_DESC {
+                RayGenerationShaderRecord: self.raytracing_pipeline.raygen,
+                MissShaderTable: self.raytracing_pipeline.miss,
+                HitGroupTable: self.raytracing_pipeline.hit_group,
+                CallableShaderTable: D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE::default(),
+                Width: self.width,
+                Height: self.height,
+                Depth: 1,
+            };
+            command_list4.DispatchRays(&dispatch);
             compute_output.transition(&self.command_list, D3D12_RESOURCE_STATE_COPY_SOURCE);
 
             let render_target = self.render_targets[frame_index].as_mut().unwrap();
@@ -270,7 +254,6 @@ impl Dx12Renderer {
             self.next_fence_value += 1;
             self.command_queue.Signal(&self.fence, fence_value)?;
             self.frames[frame_index].fence_value = fence_value;
-            self.frame_number = self.frame_number.wrapping_add(1);
             Ok(())
         }
     }
@@ -328,33 +311,6 @@ impl Dx12Renderer {
         &self.raytracing_status
     }
 
-    unsafe fn reload_shader_if_changed(&mut self) -> Result<()> {
-        let Some(result) = self.shader_reloader.poll() else {
-            return Ok(());
-        };
-        match result {
-            Ok(shader) => {
-                unsafe { self.wait_for_gpu()? };
-                match ComputePipeline::new(&self.device, &shader) {
-                    Ok(pipeline) => {
-                        self.compute_pipeline = pipeline;
-                        self.shader_status = "已热重载".to_string();
-                        println!("Shader 热重载成功");
-                    }
-                    Err(error) => {
-                        self.shader_status = "Pipeline 创建失败".to_string();
-                        eprintln!("Shader Pipeline 创建失败：{error}");
-                    }
-                }
-            }
-            Err(error) => {
-                self.shader_status = "编译失败，保留旧版本".to_string();
-                eprintln!("{error}");
-            }
-        }
-        Ok(())
-    }
-
     unsafe fn create_render_targets(&mut self) -> Result<()> {
         for index in 0..FRAME_COUNT {
             let resource: ID3D12Resource = unsafe { self.swap_chain.GetBuffer(index as u32)? };
@@ -387,7 +343,7 @@ impl Dx12Renderer {
                 output.resource(),
                 None,
                 None,
-                self.shader_heap.cpu_handle(0),
+                self.shader_heap.cpu_handle(1),
             );
         }
         self.compute_output = Some(output);

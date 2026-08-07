@@ -51,7 +51,7 @@ impl ApplicationHandler for RealtimeApplication {
         }
 
         let attributes = Window::default_attributes()
-            .with_title("RayTracingDemo - DX12 阶段 2")
+            .with_title("RayTracingDemo - DX12 阶段 3")
             .with_inner_size(LogicalSize::new(1280, 720))
             .with_min_inner_size(LogicalSize::new(320, 180));
         let window = match event_loop.create_window(attributes) {

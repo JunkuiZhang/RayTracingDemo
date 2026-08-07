@@ -5,8 +5,8 @@ use std::{
 };
 
 use windows::{
-    Win32::Graphics::{Direct3D12::*, Dxgi::Common::*},
-    core::{Interface, Result},
+    Win32::Graphics::{Direct3D::ID3DBlob, Direct3D12::*, Dxgi::Common::*},
+    core::{Interface, PCWSTR, Result},
 };
 
 /// 阶段 3 的单三角形几何资源，顶点和索引暂存于上传堆。
@@ -17,7 +17,7 @@ pub struct TriangleGeometry {
 
 /// 保持 BLAS、TLAS 及其构建依赖资源存活。
 pub struct AccelerationStructures {
-    _tlas: ID3D12Resource,
+    pub tlas: ID3D12Resource,
     _blas: ID3D12Resource,
     _scratch: ID3D12Resource,
     _instance_buffer: ID3D12Resource,
@@ -149,7 +149,7 @@ impl AccelerationStructures {
         }
         uav_barrier(command_list, &tlas);
         Ok(Self {
-            _tlas: tlas,
+            tlas,
             _blas: blas,
             _scratch: scratch,
             _instance_buffer: instance_buffer,
@@ -268,4 +268,174 @@ fn create_upload_buffer<T: Copy>(
         resource.SetName(windows::core::PCWSTR(wide.as_ptr()))?;
     }
     Ok(resource)
+}
+
+/// DXR 状态对象、全局根签名和三条 Shader Table 记录。
+pub struct RaytracingPipeline {
+    pub state_object: ID3D12StateObject,
+    pub root_signature: ID3D12RootSignature,
+    _shader_table: ID3D12Resource,
+    pub raygen: D3D12_GPU_VIRTUAL_ADDRESS_RANGE,
+    pub miss: D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE,
+    pub hit_group: D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE,
+}
+
+impl RaytracingPipeline {
+    pub fn new(device: &ID3D12Device, shader: &[u8]) -> Result<Self> {
+        let device5: ID3D12Device5 = device.cast()?;
+        let root_signature = create_raytracing_root_signature(device)?;
+        let library = D3D12_DXIL_LIBRARY_DESC {
+            DXILLibrary: D3D12_SHADER_BYTECODE {
+                pShaderBytecode: shader.as_ptr().cast(),
+                BytecodeLength: shader.len(),
+            },
+            NumExports: 0,
+            pExports: std::ptr::null(),
+        };
+        let hit_group_name = wide("HitGroup");
+        let closest_hit_name = wide("ClosestHit");
+        let hit_group = D3D12_HIT_GROUP_DESC {
+            HitGroupExport: PCWSTR(hit_group_name.as_ptr()),
+            Type: D3D12_HIT_GROUP_TYPE_TRIANGLES,
+            AnyHitShaderImport: PCWSTR::null(),
+            ClosestHitShaderImport: PCWSTR(closest_hit_name.as_ptr()),
+            IntersectionShaderImport: PCWSTR::null(),
+        };
+        let shader_config = D3D12_RAYTRACING_SHADER_CONFIG {
+            MaxPayloadSizeInBytes: 16,
+            MaxAttributeSizeInBytes: 8,
+        };
+        let global_root = D3D12_GLOBAL_ROOT_SIGNATURE {
+            pGlobalRootSignature: ManuallyDrop::new(Some(root_signature.clone())),
+        };
+        let pipeline_config = D3D12_RAYTRACING_PIPELINE_CONFIG {
+            MaxTraceRecursionDepth: 1,
+        };
+        let subobjects = [
+            D3D12_STATE_SUBOBJECT {
+                Type: D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY,
+                pDesc: (&library as *const D3D12_DXIL_LIBRARY_DESC).cast(),
+            },
+            D3D12_STATE_SUBOBJECT {
+                Type: D3D12_STATE_SUBOBJECT_TYPE_HIT_GROUP,
+                pDesc: (&hit_group as *const D3D12_HIT_GROUP_DESC).cast(),
+            },
+            D3D12_STATE_SUBOBJECT {
+                Type: D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_SHADER_CONFIG,
+                pDesc: (&shader_config as *const D3D12_RAYTRACING_SHADER_CONFIG).cast(),
+            },
+            D3D12_STATE_SUBOBJECT {
+                Type: D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE,
+                pDesc: (&global_root as *const D3D12_GLOBAL_ROOT_SIGNATURE).cast(),
+            },
+            D3D12_STATE_SUBOBJECT {
+                Type: D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG,
+                pDesc: (&pipeline_config as *const D3D12_RAYTRACING_PIPELINE_CONFIG).cast(),
+            },
+        ];
+        let description = D3D12_STATE_OBJECT_DESC {
+            Type: D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE,
+            NumSubobjects: subobjects.len() as u32,
+            pSubobjects: subobjects.as_ptr(),
+        };
+        let state_object: ID3D12StateObject = unsafe { device5.CreateStateObject(&description)? };
+        let properties: ID3D12StateObjectProperties = state_object.cast()?;
+        let raygen_name = wide("RayGen");
+        let miss_name = wide("Miss");
+        let identifiers = [
+            unsafe { properties.GetShaderIdentifier(PCWSTR(raygen_name.as_ptr())) },
+            unsafe { properties.GetShaderIdentifier(PCWSTR(miss_name.as_ptr())) },
+            unsafe { properties.GetShaderIdentifier(PCWSTR(hit_group_name.as_ptr())) },
+        ];
+        let record_size = D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT as usize;
+        let mut table_bytes = vec![0_u8; record_size * identifiers.len()];
+        for (index, identifier) in identifiers.into_iter().enumerate() {
+            assert!(!identifier.is_null(), "DXR Shader 导出标识不存在");
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    identifier.cast::<u8>(),
+                    table_bytes.as_mut_ptr().add(index * record_size),
+                    D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES as usize,
+                );
+            }
+        }
+        let shader_table = create_upload_buffer(device, &table_bytes, "DXR Shader Table")?;
+        let address = unsafe { shader_table.GetGPUVirtualAddress() };
+        Ok(Self {
+            state_object,
+            root_signature,
+            _shader_table: shader_table,
+            raygen: D3D12_GPU_VIRTUAL_ADDRESS_RANGE {
+                StartAddress: address,
+                SizeInBytes: record_size as u64,
+            },
+            miss: D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE {
+                StartAddress: address + record_size as u64,
+                SizeInBytes: record_size as u64,
+                StrideInBytes: record_size as u64,
+            },
+            hit_group: D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE {
+                StartAddress: address + (record_size * 2) as u64,
+                SizeInBytes: record_size as u64,
+                StrideInBytes: record_size as u64,
+            },
+        })
+    }
+}
+
+fn create_raytracing_root_signature(device: &ID3D12Device) -> Result<ID3D12RootSignature> {
+    let ranges = [
+        D3D12_DESCRIPTOR_RANGE {
+            RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
+            NumDescriptors: 1,
+            BaseShaderRegister: 0,
+            RegisterSpace: 0,
+            OffsetInDescriptorsFromTableStart: 0,
+        },
+        D3D12_DESCRIPTOR_RANGE {
+            RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
+            NumDescriptors: 1,
+            BaseShaderRegister: 0,
+            RegisterSpace: 0,
+            OffsetInDescriptorsFromTableStart: 1,
+        },
+    ];
+    let parameter = D3D12_ROOT_PARAMETER {
+        ParameterType: D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
+        Anonymous: D3D12_ROOT_PARAMETER_0 {
+            DescriptorTable: D3D12_ROOT_DESCRIPTOR_TABLE {
+                NumDescriptorRanges: ranges.len() as u32,
+                pDescriptorRanges: ranges.as_ptr(),
+            },
+        },
+        ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+    };
+    let description = D3D12_ROOT_SIGNATURE_DESC {
+        NumParameters: 1,
+        pParameters: &parameter,
+        NumStaticSamplers: 0,
+        pStaticSamplers: std::ptr::null(),
+        Flags: D3D12_ROOT_SIGNATURE_FLAG_NONE,
+    };
+    let mut serialized: Option<ID3DBlob> = None;
+    unsafe {
+        D3D12SerializeRootSignature(
+            &description,
+            D3D_ROOT_SIGNATURE_VERSION_1,
+            &mut serialized,
+            None,
+        )?;
+    }
+    let serialized = serialized.unwrap();
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            serialized.GetBufferPointer().cast::<u8>(),
+            serialized.GetBufferSize(),
+        )
+    };
+    unsafe { device.CreateRootSignature(0, bytes) }
+}
+
+fn wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(Some(0)).collect()
 }
