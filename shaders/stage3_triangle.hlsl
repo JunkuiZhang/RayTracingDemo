@@ -24,6 +24,8 @@ RWTexture2D<float> GBufferDepth : register(u3);
 RWTexture2D<float4> Accumulation : register(u4);
 RWTexture2D<float2> HistoryMoments : register(u5);
 RWTexture2D<float2> MotionVectors : register(u6);
+RWTexture2D<float4> PreviousNormal : register(u7);
+RWTexture2D<float> PreviousDepth : register(u8);
 
 cbuffer FrameConstants : register(b0)
 {
@@ -112,7 +114,14 @@ void RayGen()
     MotionVectors[pixel] = float2(CameraPosition.x - PreviousCameraPosition.x, CameraPosition.z - PreviousCameraPosition.z);
 
     float3 filtered = accumulated.xyz;
-    if (FrameIndex > 0)
+    float currentDepth = GBufferDepth[pixel];
+    float3 currentNormal = GBufferNormal[pixel].xyz * 2.0 - 1.0;
+    float previousDepth = PreviousDepth[pixel];
+    float3 previousNormal = PreviousNormal[pixel].xyz * 2.0 - 1.0;
+    bool historyValid = FrameIndex > 0 && previousDepth > 0.0
+        && abs(currentDepth - previousDepth) < max(0.02, currentDepth * 0.05)
+        && dot(currentNormal, previousNormal) > 0.85;
+    if (historyValid)
     {
         float3 neighborhoodMin = accumulated.xyz;
         float3 neighborhoodMax = accumulated.xyz;
@@ -132,8 +141,8 @@ void RayGen()
         filtered = lerp(accumulated.xyz, filtered, 0.35);
     }
     float luminance = dot(filtered, float3(0.2126, 0.7152, 0.0722));
-    float previousLuminance = FrameIndex == 0 ? luminance : HistoryMoments[pixel].x;
-    float previousSecondMoment = FrameIndex == 0 ? luminance * luminance : HistoryMoments[pixel].y;
+    float previousLuminance = historyValid ? HistoryMoments[pixel].x : luminance;
+    float previousSecondMoment = historyValid ? HistoryMoments[pixel].y : luminance * luminance;
     float secondMoment = (previousSecondMoment * FrameIndex + luminance * luminance) / (FrameIndex + 1.0);
     float meanMoment = (previousLuminance * FrameIndex + luminance) / (FrameIndex + 1.0);
     HistoryMoments[pixel] = float2(meanMoment, secondMoment);

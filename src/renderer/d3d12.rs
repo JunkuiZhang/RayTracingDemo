@@ -62,6 +62,8 @@ pub struct Dx12Renderer {
     accumulation: Option<TrackedResource>,
     history_moments: Option<TrackedResource>,
     motion_vectors: Option<TrackedResource>,
+    previous_normal: Option<TrackedResource>,
+    previous_depth: Option<TrackedResource>,
     gpu_profiler: GpuProfiler,
     shader_status: String,
     raytracing_status: String,
@@ -149,7 +151,7 @@ impl Dx12Renderer {
                 DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, FRAME_COUNT, false)
                     .map_err(|error| dx_error("创建 RTV 描述符堆", error))?;
             let shader_heap =
-                DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 12, true)
+                DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 14, true)
                     .map_err(|error| dx_error("创建 Shader 描述符堆", error))?;
             let gpu_profiler = GpuProfiler::new(&device, &command_queue, FRAME_COUNT)
                 .map_err(|error| dx_error("创建 GPU 计时器", error))?;
@@ -241,6 +243,8 @@ impl Dx12Renderer {
                 accumulation: None,
                 history_moments: None,
                 motion_vectors: None,
+                previous_normal: None,
+                previous_depth: None,
                 gpu_profiler,
                 shader_status: format!("内嵌 DXR（{} 字节）", STAGE3_SHADER.len()),
                 raytracing_status,
@@ -332,6 +336,22 @@ impl Dx12Renderer {
                 Depth: 1,
             };
             command_list4.DispatchRays(&dispatch);
+            let gbuffer_normal = self.gbuffer_normal.as_mut().unwrap();
+            let gbuffer_depth = self.gbuffer_depth.as_mut().unwrap();
+            let previous_normal = self.previous_normal.as_mut().unwrap();
+            let previous_depth = self.previous_depth.as_mut().unwrap();
+            gbuffer_normal.transition(&self.command_list, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            gbuffer_depth.transition(&self.command_list, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            previous_normal.transition(&self.command_list, D3D12_RESOURCE_STATE_COPY_DEST);
+            previous_depth.transition(&self.command_list, D3D12_RESOURCE_STATE_COPY_DEST);
+            self.command_list
+                .CopyResource(previous_normal.resource(), gbuffer_normal.resource());
+            self.command_list
+                .CopyResource(previous_depth.resource(), gbuffer_depth.resource());
+            gbuffer_normal.transition(&self.command_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            gbuffer_depth.transition(&self.command_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            previous_normal.transition(&self.command_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            previous_depth.transition(&self.command_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             compute_output.transition(&self.command_list, D3D12_RESOURCE_STATE_COPY_SOURCE);
 
             let render_target = self.render_targets[frame_index].as_mut().unwrap();
@@ -384,6 +404,8 @@ impl Dx12Renderer {
             self.accumulation = None;
             self.history_moments = None;
             self.motion_vectors = None;
+            self.previous_normal = None;
+            self.previous_depth = None;
             self.render_targets = [None, None, None];
             self.swap_chain.ResizeBuffers(
                 FRAME_COUNT as u32,
@@ -579,6 +601,24 @@ impl Dx12Renderer {
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             "时空降噪运动矢量",
         )?;
+        let previous_normal = TrackedResource::create_texture_2d(
+            &self.device,
+            self.width,
+            self.height,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            "上一帧世界法线",
+        )?;
+        let previous_depth = TrackedResource::create_texture_2d(
+            &self.device,
+            self.width,
+            self.height,
+            DXGI_FORMAT_R32_FLOAT,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            "上一帧线性深度",
+        )?;
         unsafe {
             self.device.CreateUnorderedAccessView(
                 moments.resource(),
@@ -592,9 +632,23 @@ impl Dx12Renderer {
                 None,
                 self.shader_heap.cpu_handle(11),
             );
+            self.device.CreateUnorderedAccessView(
+                previous_normal.resource(),
+                None,
+                None,
+                self.shader_heap.cpu_handle(12),
+            );
+            self.device.CreateUnorderedAccessView(
+                previous_depth.resource(),
+                None,
+                None,
+                self.shader_heap.cpu_handle(13),
+            );
         }
         self.history_moments = Some(moments);
         self.motion_vectors = Some(motion);
+        self.previous_normal = Some(previous_normal);
+        self.previous_depth = Some(previous_depth);
         Ok(())
     }
 
