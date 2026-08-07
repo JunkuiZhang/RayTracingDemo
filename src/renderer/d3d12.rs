@@ -21,10 +21,12 @@ use self::{
     descriptor::DescriptorHeap, pipeline::ComputePipeline, profiler::GpuProfiler,
     resource::TrackedResource, shader::ShaderReloader, upload::UploadRing,
 };
+use raytracing::TriangleGeometry;
 
 mod descriptor;
 mod pipeline;
 mod profiler;
+mod raytracing;
 mod resource;
 mod shader;
 mod upload;
@@ -61,6 +63,7 @@ pub struct Dx12Renderer {
     shader_reloader: ShaderReloader,
     shader_status: String,
     raytracing_status: String,
+    _triangle_geometry: TriangleGeometry,
     upload_ring: UploadRing,
     frames: Vec<FrameContext>,
     command_list: ID3D12GraphicsCommandList,
@@ -147,6 +150,9 @@ impl Dx12Renderer {
             let upload_ring = UploadRing::new(&device, FRAME_COUNT)
                 .map_err(|error| dx_error("创建上传环形缓冲", error))?;
             let raytracing_status = raytracing_status(&device);
+            let triangle_geometry = TriangleGeometry::new(&device)
+                .map_err(|error| dx_error("创建 DXR 三角形几何", error))?;
+            let _geometry_desc = triangle_geometry.geometry_desc();
 
             let mut frames = Vec::with_capacity(FRAME_COUNT);
             for _ in 0..FRAME_COUNT {
@@ -178,6 +184,7 @@ impl Dx12Renderer {
                 shader_reloader: ShaderReloader::new(),
                 shader_status: format!("内嵌 DXIL（阶段 3 Shader {} 字节）", STAGE3_SHADER.len()),
                 raytracing_status,
+                _triangle_geometry: triangle_geometry,
                 upload_ring,
                 frames,
                 command_list,
