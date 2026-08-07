@@ -29,6 +29,7 @@ struct Payload
     float3 radiance;
     uint seed;
     uint depth;
+    float lastPdf;
 };
 
 uint RandomUint(inout uint state)
@@ -83,6 +84,7 @@ void RayGen()
     payload.radiance = 0;
     payload.seed = seed;
     payload.depth = 0;
+    payload.lastPdf = 0;
     TraceRay(Scene, RAY_FLAG_NONE, 0xFF, 0, 1, 0, ray, payload);
     Output[pixel] = float4(payload.radiance, 1.0);
 }
@@ -91,6 +93,12 @@ void RayGen()
 void Miss(inout Payload payload)
 {
     payload.radiance = float3(0.003, 0.005, 0.012);
+}
+
+[shader("miss")]
+void ShadowMiss(inout Payload payload)
+{
+    payload.radiance = 1.0;
 }
 
 [shader("closesthit")]
@@ -106,7 +114,15 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     Material material = Materials[MaterialIndices[primitive]];
     if (material.emissionAndKind.w > 2.5)
     {
-        payload.radiance = material.emissionAndKind.xyz;
+        float weight = 1.0;
+        if (payload.depth > 0 && payload.lastPdf > 0.0)
+        {
+            const float lightArea = 0.42;
+            float lightPdf = RayTCurrent() * RayTCurrent() / max(0.0001, abs(dot(normal, -WorldRayDirection())) * lightArea);
+            float bsdfSquared = payload.lastPdf * payload.lastPdf;
+            weight = bsdfSquared / (bsdfSquared + lightPdf * lightPdf);
+        }
+        payload.radiance = material.emissionAndKind.xyz * weight;
         return;
     }
     if (payload.depth >= 3)
@@ -115,6 +131,8 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         return;
     }
 
+    float3 hitPosition = WorldRayOrigin() + RayTCurrent() * WorldRayDirection();
+    float3 directLighting = 0;
     float3 direction;
     uint kind = uint(material.emissionAndKind.w + 0.5);
     if (kind == 1)
@@ -132,11 +150,39 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     }
     else
     {
+        float2 lightRandom = float2(RandomFloat(payload.seed), RandomFloat(payload.seed));
+        float3 lightPoint = float3(-0.35 + lightRandom.x * 0.7, 1.98, 0.75 + lightRandom.y * 0.6);
+        float3 toLight = lightPoint - hitPosition;
+        float lightDistance = length(toLight);
+        float3 lightDirection = toLight / lightDistance;
+        float surfaceCosine = max(0.0, dot(normal, lightDirection));
+        float lightCosine = max(0.0, dot(float3(0, -1, 0), -lightDirection));
+        if (surfaceCosine > 0.0 && lightCosine > 0.0)
+        {
+            Payload shadow;
+            shadow.radiance = 0;
+            shadow.seed = payload.seed;
+            shadow.depth = payload.depth;
+            shadow.lastPdf = 0;
+            RayDesc shadowRay;
+            shadowRay.Origin = hitPosition + normal * 0.002;
+            shadowRay.Direction = lightDirection;
+            shadowRay.TMin = 0.001;
+            shadowRay.TMax = lightDistance - 0.004;
+            TraceRay(Scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, 0xFF, 0, 1, 1, shadowRay, shadow);
+            const float lightArea = 0.42;
+            float lightPdf = lightDistance * lightDistance / (lightCosine * lightArea);
+            float bsdfPdf = surfaceCosine / 3.14159265;
+            float lightSquared = lightPdf * lightPdf;
+            float misWeight = lightSquared / (lightSquared + bsdfPdf * bsdfPdf);
+            directLighting = shadow.radiance * material.albedo.xyz * float3(14.0, 12.0, 9.0)
+                * (surfaceCosine / 3.14159265) * misWeight / lightPdf;
+        }
         direction = SampleHemisphere(normal, payload.seed);
     }
 
     RayDesc bounce;
-    bounce.Origin = WorldRayOrigin() + RayTCurrent() * WorldRayDirection() + direction * 0.002;
+    bounce.Origin = hitPosition + direction * 0.002;
     bounce.Direction = normalize(direction);
     bounce.TMin = 0.001;
     bounce.TMax = 1000.0;
@@ -144,7 +190,8 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     child.radiance = 0;
     child.seed = payload.seed;
     child.depth = payload.depth + 1;
+    child.lastPdf = kind == 0 ? max(0.0, dot(normal, bounce.Direction)) / 3.14159265 : 0.0;
     TraceRay(Scene, RAY_FLAG_NONE, 0xFF, 0, 1, 0, bounce, child);
     payload.seed = child.seed;
-    payload.radiance = material.albedo.xyz * child.radiance;
+    payload.radiance = directLighting + material.albedo.xyz * child.radiance;
 }

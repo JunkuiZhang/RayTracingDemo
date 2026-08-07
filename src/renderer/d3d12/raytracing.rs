@@ -596,9 +596,11 @@ impl RaytracingPipeline {
         let properties: ID3D12StateObjectProperties = state_object.cast()?;
         let raygen_name = wide("RayGen");
         let miss_name = wide("Miss");
+        let shadow_miss_name = wide("ShadowMiss");
         let identifiers = [
             unsafe { properties.GetShaderIdentifier(PCWSTR(raygen_name.as_ptr())) },
             unsafe { properties.GetShaderIdentifier(PCWSTR(miss_name.as_ptr())) },
+            unsafe { properties.GetShaderIdentifier(PCWSTR(shadow_miss_name.as_ptr())) },
             unsafe { properties.GetShaderIdentifier(PCWSTR(hit_group_name.as_ptr())) },
         ];
         let record_size = D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT as usize;
@@ -625,11 +627,11 @@ impl RaytracingPipeline {
             },
             miss: D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE {
                 StartAddress: address + record_size as u64,
-                SizeInBytes: record_size as u64,
+                SizeInBytes: (record_size * 2) as u64,
                 StrideInBytes: record_size as u64,
             },
             hit_group: D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE {
-                StartAddress: address + (record_size * 2) as u64,
+                StartAddress: address + (record_size * 3) as u64,
                 SizeInBytes: record_size as u64,
                 StrideInBytes: record_size as u64,
             },
