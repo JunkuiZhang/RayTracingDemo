@@ -7,8 +7,9 @@ use std::{
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalSize},
-    event::WindowEvent,
+    event::{ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
 
@@ -115,6 +116,25 @@ impl ApplicationHandler for RealtimeApplication {
                     }
                 }
                 window.request_redraw();
+            }
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    match event.physical_key {
+                        PhysicalKey::Code(KeyCode::KeyW) => renderer.move_camera(0.08, 0.0, 0.0),
+                        PhysicalKey::Code(KeyCode::KeyS) => renderer.move_camera(-0.08, 0.0, 0.0),
+                        PhysicalKey::Code(KeyCode::KeyA) => renderer.move_camera(0.0, -0.08, 0.0),
+                        PhysicalKey::Code(KeyCode::KeyD) => renderer.move_camera(0.0, 0.08, 0.0),
+                        PhysicalKey::Code(KeyCode::Space) => renderer.move_camera(0.0, 0.0, 0.08),
+                        PhysicalKey::Code(KeyCode::ShiftLeft) => {
+                            renderer.move_camera(0.0, 0.0, -0.08)
+                        }
+                        PhysicalKey::Code(KeyCode::ArrowLeft) => renderer.rotate_camera(-0.04, 0.0),
+                        PhysicalKey::Code(KeyCode::ArrowRight) => renderer.rotate_camera(0.04, 0.0),
+                        PhysicalKey::Code(KeyCode::ArrowUp) => renderer.rotate_camera(0.0, 0.04),
+                        PhysicalKey::Code(KeyCode::ArrowDown) => renderer.rotate_camera(0.0, -0.04),
+                        _ => {}
+                    }
+                }
             }
             _ => {}
         }

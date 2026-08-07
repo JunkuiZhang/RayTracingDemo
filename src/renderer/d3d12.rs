@@ -33,6 +33,16 @@ struct FrameContext {
     fence_value: u64,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CameraConstants {
+    frame_index: u32,
+    position: [f32; 3],
+    yaw: f32,
+    pitch: f32,
+    padding: [f32; 2],
+}
+
 /// 阶段 1 的最小 DX12 后端：三缓冲交换链、清屏和逐帧 Fence。
 pub struct Dx12Renderer {
     device: ID3D12Device,
@@ -42,6 +52,9 @@ pub struct Dx12Renderer {
     shader_heap: DescriptorHeap,
     render_targets: [Option<TrackedResource>; FRAME_COUNT],
     compute_output: Option<TrackedResource>,
+    gbuffer_albedo: Option<TrackedResource>,
+    gbuffer_normal: Option<TrackedResource>,
+    gbuffer_depth: Option<TrackedResource>,
     gpu_profiler: GpuProfiler,
     shader_status: String,
     raytracing_status: String,
@@ -57,6 +70,9 @@ pub struct Dx12Renderer {
     height: u32,
     minimized: bool,
     frame_number: u32,
+    camera_position: [f32; 3],
+    camera_yaw: f32,
+    camera_pitch: f32,
 }
 
 impl Dx12Renderer {
@@ -123,7 +139,7 @@ impl Dx12Renderer {
                 DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, FRAME_COUNT, false)
                     .map_err(|error| dx_error("创建 RTV 描述符堆", error))?;
             let shader_heap =
-                DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 6, true)
+                DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 9, true)
                     .map_err(|error| dx_error("创建 Shader 描述符堆", error))?;
             let gpu_profiler = GpuProfiler::new(&device, &command_queue, FRAME_COUNT)
                 .map_err(|error| dx_error("创建 GPU 计时器", error))?;
@@ -209,6 +225,9 @@ impl Dx12Renderer {
                 shader_heap,
                 render_targets: [None, None, None],
                 compute_output: None,
+                gbuffer_albedo: None,
+                gbuffer_normal: None,
+                gbuffer_depth: None,
                 gpu_profiler,
                 shader_status: format!("内嵌 DXR（{} 字节）", STAGE3_SHADER.len()),
                 raytracing_status,
@@ -224,6 +243,9 @@ impl Dx12Renderer {
                 height,
                 minimized: false,
                 frame_number: 0,
+                camera_position: [0.0, 0.45, -3.2],
+                camera_yaw: 0.0,
+                camera_pitch: 0.0,
             };
             renderer
                 .create_render_targets()
@@ -231,6 +253,9 @@ impl Dx12Renderer {
             renderer
                 .create_compute_output()
                 .map_err(|error| dx_error("创建 Compute 输出", error))?;
+            renderer
+                .create_gbuffer()
+                .map_err(|error| dx_error("创建第一交点 G-buffer", error))?;
             Ok(renderer)
         }
     }
@@ -254,7 +279,19 @@ impl Dx12Renderer {
             let command_list4: ID3D12GraphicsCommandList4 = self.command_list.cast()?;
             command_list4.SetComputeRootSignature(&self.raytracing_pipeline.root_signature);
             command_list4.SetComputeRootDescriptorTable(0, self.shader_heap.gpu_handle(0));
-            command_list4.SetComputeRoot32BitConstant(1, self.frame_number, 0);
+            let camera = CameraConstants {
+                frame_index: self.frame_number,
+                position: self.camera_position,
+                yaw: self.camera_yaw,
+                pitch: self.camera_pitch,
+                padding: [0.0; 2],
+            };
+            command_list4.SetComputeRoot32BitConstants(
+                1,
+                8,
+                (&camera as *const CameraConstants).cast(),
+                0,
+            );
             command_list4.SetPipelineState1(&self.raytracing_pipeline.state_object);
             self.gpu_profiler.begin(&self.command_list, frame_index);
             let compute_output = self.compute_output.as_mut().unwrap();
@@ -315,6 +352,9 @@ impl Dx12Renderer {
             )?;
             self.command_list.Close()?;
             self.compute_output = None;
+            self.gbuffer_albedo = None;
+            self.gbuffer_normal = None;
+            self.gbuffer_depth = None;
             self.render_targets = [None, None, None];
             self.swap_chain.ResizeBuffers(
                 FRAME_COUNT as u32,
@@ -331,6 +371,7 @@ impl Dx12Renderer {
             self.minimized = false;
             self.create_render_targets()?;
             self.create_compute_output()?;
+            self.create_gbuffer()?;
             Ok(())
         }
     }
@@ -345,6 +386,22 @@ impl Dx12Renderer {
 
     pub fn raytracing_status(&self) -> &str {
         &self.raytracing_status
+    }
+
+    pub fn move_camera(&mut self, forward: f32, right: f32, vertical: f32) {
+        let forward_axis = [self.camera_yaw.sin(), 0.0, self.camera_yaw.cos()];
+        let right_axis = [forward_axis[2], 0.0, -forward_axis[0]];
+        for axis in 0..3 {
+            self.camera_position[axis] += forward_axis[axis] * forward + right_axis[axis] * right;
+        }
+        self.camera_position[1] += vertical;
+        self.frame_number = 0;
+    }
+
+    pub fn rotate_camera(&mut self, yaw: f32, pitch: f32) {
+        self.camera_yaw += yaw;
+        self.camera_pitch = (self.camera_pitch + pitch).clamp(-1.5, 1.5);
+        self.frame_number = 0;
     }
 
     unsafe fn create_render_targets(&mut self) -> Result<()> {
@@ -383,6 +440,60 @@ impl Dx12Renderer {
             );
         }
         self.compute_output = Some(output);
+        Ok(())
+    }
+
+    unsafe fn create_gbuffer(&mut self) -> Result<()> {
+        let albedo = TrackedResource::create_texture_2d(
+            &self.device,
+            self.width,
+            self.height,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            "第一交点反照率",
+        )?;
+        let normal = TrackedResource::create_texture_2d(
+            &self.device,
+            self.width,
+            self.height,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            "第一交点世界法线",
+        )?;
+        let depth = TrackedResource::create_texture_2d(
+            &self.device,
+            self.width,
+            self.height,
+            DXGI_FORMAT_R32_FLOAT,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            "第一交点线性距离",
+        )?;
+        unsafe {
+            self.device.CreateUnorderedAccessView(
+                albedo.resource(),
+                None,
+                None,
+                self.shader_heap.cpu_handle(6),
+            );
+            self.device.CreateUnorderedAccessView(
+                normal.resource(),
+                None,
+                None,
+                self.shader_heap.cpu_handle(7),
+            );
+            self.device.CreateUnorderedAccessView(
+                depth.resource(),
+                None,
+                None,
+                self.shader_heap.cpu_handle(8),
+            );
+        }
+        self.gbuffer_albedo = Some(albedo);
+        self.gbuffer_normal = Some(normal);
+        self.gbuffer_depth = Some(depth);
         Ok(())
     }
 

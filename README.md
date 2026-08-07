@@ -86,6 +86,18 @@ RayTracingDemo - 阶段 2 | FPS 240 | GPU 0.422 ms | Shader 内嵌 DXIL
 
 阶段 3 Shader 位于 [`shaders/stage3_triangle.hlsl`](shaders/stage3_triangle.hlsl)，由构建脚本以 `lib_6_3` 目标编译。运行后应看到蓝色法线三角形和深蓝背景，窗口标题显示 `阶段 3`、FPS、GPU 时间与实际 DXR Tier。
 
+## 阶段 4：Cornell Box GPU 路径追踪
+
+实时窗口已切换为 Cornell Box 1 SPP 路径追踪，包含白色、红色、绿色漫反射墙面、面积光源、金属盒和玻璃盒。Shader 最多递归四层，并使用面积光源 NEE、独立阴影射线和幂启发式 MIS 降低直接光噪声。
+
+相机控制：
+
+- `W`、`A`、`S`、`D`：水平移动；
+- `Space`、左 `Shift`：升高和降低；
+- 方向键：旋转视角。
+
+每帧使用不同随机种子。RayGen 同时输出第一交点反照率、世界法线和线性距离 G-buffer，供后续渐进积累、历史重投影和降噪使用。阶段 4 尚不保留历史帧，因此当前画面会呈现实时 1 SPP 噪声；阶段 5 将加入渐进积累。
+
 ## 检查项目
 
 ```powershell

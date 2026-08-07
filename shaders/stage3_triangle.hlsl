@@ -18,10 +18,17 @@ StructuredBuffer<uint> Indices : register(t2);
 StructuredBuffer<uint> MaterialIndices : register(t3);
 StructuredBuffer<Material> Materials : register(t4);
 RWTexture2D<float4> Output : register(u0);
+RWTexture2D<float4> GBufferAlbedo : register(u1);
+RWTexture2D<float4> GBufferNormal : register(u2);
+RWTexture2D<float> GBufferDepth : register(u3);
 
 cbuffer FrameConstants : register(b0)
 {
     uint FrameIndex;
+    float3 CameraPosition;
+    float CameraYaw;
+    float CameraPitch;
+    float2 CameraPadding;
 };
 
 struct Payload
@@ -75,8 +82,11 @@ void RayGen()
     screen.x *= float(size.x) / float(size.y);
 
     RayDesc ray;
-    ray.Origin = float3(0.0, 0.45, -3.2);
-    ray.Direction = normalize(float3(screen.x, -screen.y * 0.9, 1.65));
+    float3 forward = normalize(float3(sin(CameraYaw) * cos(CameraPitch), sin(CameraPitch), cos(CameraYaw) * cos(CameraPitch)));
+    float3 right = normalize(cross(float3(0, 1, 0), forward));
+    float3 up = cross(forward, right);
+    ray.Origin = CameraPosition;
+    ray.Direction = normalize(forward * 1.65 + right * screen.x - up * screen.y * 0.9);
     ray.TMin = 0.001;
     ray.TMax = 1000.0;
 
@@ -85,6 +95,9 @@ void RayGen()
     payload.seed = seed;
     payload.depth = 0;
     payload.lastPdf = 0;
+    GBufferAlbedo[pixel] = 0;
+    GBufferNormal[pixel] = 0;
+    GBufferDepth[pixel] = 0;
     TraceRay(Scene, RAY_FLAG_NONE, 0xFF, 0, 1, 0, ray, payload);
     Output[pixel] = float4(payload.radiance, 1.0);
 }
@@ -112,6 +125,13 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         normal = -normal;
 
     Material material = Materials[MaterialIndices[primitive]];
+    if (payload.depth == 0)
+    {
+        uint2 pixel = DispatchRaysIndex().xy;
+        GBufferAlbedo[pixel] = float4(material.albedo.xyz, 1.0);
+        GBufferNormal[pixel] = float4(normal * 0.5 + 0.5, 1.0);
+        GBufferDepth[pixel] = RayTCurrent();
+    }
     if (material.emissionAndKind.w > 2.5)
     {
         float weight = 1.0;
