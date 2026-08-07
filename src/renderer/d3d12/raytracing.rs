@@ -9,10 +9,28 @@ use windows::{
     core::{Interface, PCWSTR, Result},
 };
 
-/// 阶段 3 的单三角形几何资源，顶点和索引暂存于上传堆。
-pub struct TriangleGeometry {
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Vertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Material {
+    albedo: [f32; 4],
+    emission_and_kind: [f32; 4],
+}
+
+/// Cornell Box 的网格资源，包含逐顶点法线和逐三角形材质索引。
+pub struct SceneGeometry {
     vertex_buffer: ID3D12Resource,
     index_buffer: ID3D12Resource,
+    material_index_buffer: ID3D12Resource,
+    material_buffer: ID3D12Resource,
+    vertex_count: u32,
+    index_count: u32,
 }
 
 /// 保持 BLAS、TLAS 及其构建依赖资源存活。
@@ -23,13 +41,21 @@ pub struct AccelerationStructures {
     _instance_buffer: ID3D12Resource,
 }
 
-impl TriangleGeometry {
+impl SceneGeometry {
     pub fn new(device: &ID3D12Device) -> Result<Self> {
-        let vertices: [[f32; 3]; 3] = [[-0.8, -0.7, 0.0], [0.0, 0.8, 0.0], [0.8, -0.7, 0.0]];
-        let indices: [u32; 3] = [0, 1, 2];
+        let (vertices, indices, material_indices) = create_cornell_box();
+        let materials = create_materials();
         Ok(Self {
-            vertex_buffer: create_upload_buffer(device, &vertices, "DXR 三角形顶点")?,
-            index_buffer: create_upload_buffer(device, &indices, "DXR 三角形索引")?,
+            vertex_buffer: create_upload_buffer(device, &vertices, "Cornell Box 顶点")?,
+            index_buffer: create_upload_buffer(device, &indices, "Cornell Box 索引")?,
+            material_index_buffer: create_upload_buffer(
+                device,
+                &material_indices,
+                "Cornell Box 材质索引",
+            )?,
+            material_buffer: create_upload_buffer(device, &materials, "Cornell Box 材质")?,
+            vertex_count: vertices.len() as u32,
+            index_count: indices.len() as u32,
         })
     }
 
@@ -49,24 +75,252 @@ impl TriangleGeometry {
                     Transform3x4: 0,
                     IndexFormat: DXGI_FORMAT_R32_UINT,
                     VertexFormat: DXGI_FORMAT_R32G32B32_FLOAT,
-                    IndexCount: 3,
-                    VertexCount: 3,
+                    IndexCount: self.index_count,
+                    VertexCount: self.vertex_count,
                     IndexBuffer: index_buffer,
                     VertexBuffer: D3D12_GPU_VIRTUAL_ADDRESS_AND_STRIDE {
                         StartAddress: vertex_buffer,
-                        StrideInBytes: (3 * size_of::<f32>()) as u64,
+                        StrideInBytes: size_of::<Vertex>() as u64,
                     },
                 },
             },
         }
     }
+
+    pub fn vertex_buffer(&self) -> &ID3D12Resource {
+        &self.vertex_buffer
+    }
+
+    pub fn index_buffer(&self) -> &ID3D12Resource {
+        &self.index_buffer
+    }
+
+    pub fn material_index_buffer(&self) -> &ID3D12Resource {
+        &self.material_index_buffer
+    }
+
+    pub fn material_buffer(&self) -> &ID3D12Resource {
+        &self.material_buffer
+    }
+
+    pub fn vertex_count(&self) -> u32 {
+        self.vertex_count
+    }
+
+    pub fn index_count(&self) -> u32 {
+        self.index_count
+    }
+}
+
+fn create_materials() -> [Material; 6] {
+    [
+        Material {
+            albedo: [0.73, 0.73, 0.73, 1.0],
+            emission_and_kind: [0.0, 0.0, 0.0, 0.0],
+        },
+        Material {
+            albedo: [0.65, 0.05, 0.05, 1.0],
+            emission_and_kind: [0.0, 0.0, 0.0, 0.0],
+        },
+        Material {
+            albedo: [0.12, 0.45, 0.15, 1.0],
+            emission_and_kind: [0.0, 0.0, 0.0, 0.0],
+        },
+        Material {
+            albedo: [1.0, 1.0, 1.0, 1.0],
+            emission_and_kind: [14.0, 12.0, 9.0, 3.0],
+        },
+        Material {
+            albedo: [0.82, 0.85, 0.9, 1.0],
+            emission_and_kind: [0.0, 0.0, 0.0, 1.0],
+        },
+        Material {
+            albedo: [0.98, 0.98, 0.98, 1.0],
+            emission_and_kind: [0.0, 0.0, 0.0, 2.0],
+        },
+    ]
+}
+
+fn create_cornell_box() -> (Vec<Vertex>, Vec<u32>, Vec<u32>) {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let mut materials = Vec::new();
+    add_quad(
+        &mut vertices,
+        &mut indices,
+        &mut materials,
+        [
+            [-1.0, -1.0, 0.0],
+            [1.0, -1.0, 0.0],
+            [1.0, -1.0, 2.0],
+            [-1.0, -1.0, 2.0],
+        ],
+        [0.0, 1.0, 0.0],
+        0,
+    );
+    add_quad(
+        &mut vertices,
+        &mut indices,
+        &mut materials,
+        [
+            [-1.0, 2.0, 2.0],
+            [1.0, 2.0, 2.0],
+            [1.0, 2.0, 0.0],
+            [-1.0, 2.0, 0.0],
+        ],
+        [0.0, -1.0, 0.0],
+        0,
+    );
+    add_quad(
+        &mut vertices,
+        &mut indices,
+        &mut materials,
+        [
+            [-1.0, -1.0, 2.0],
+            [1.0, -1.0, 2.0],
+            [1.0, 2.0, 2.0],
+            [-1.0, 2.0, 2.0],
+        ],
+        [0.0, 0.0, -1.0],
+        0,
+    );
+    add_quad(
+        &mut vertices,
+        &mut indices,
+        &mut materials,
+        [
+            [-1.0, -1.0, 0.0],
+            [-1.0, -1.0, 2.0],
+            [-1.0, 2.0, 2.0],
+            [-1.0, 2.0, 0.0],
+        ],
+        [1.0, 0.0, 0.0],
+        1,
+    );
+    add_quad(
+        &mut vertices,
+        &mut indices,
+        &mut materials,
+        [
+            [1.0, -1.0, 2.0],
+            [1.0, -1.0, 0.0],
+            [1.0, 2.0, 0.0],
+            [1.0, 2.0, 2.0],
+        ],
+        [-1.0, 0.0, 0.0],
+        2,
+    );
+    add_quad(
+        &mut vertices,
+        &mut indices,
+        &mut materials,
+        [
+            [-0.35, 1.98, 0.75],
+            [0.35, 1.98, 0.75],
+            [0.35, 1.98, 1.35],
+            [-0.35, 1.98, 1.35],
+        ],
+        [0.0, -1.0, 0.0],
+        3,
+    );
+    add_box(
+        &mut vertices,
+        &mut indices,
+        &mut materials,
+        [-0.75, -1.0, 0.55],
+        [-0.1, 0.1, 1.2],
+        4,
+    );
+    add_box(
+        &mut vertices,
+        &mut indices,
+        &mut materials,
+        [0.15, -1.0, 1.0],
+        [0.75, 0.65, 1.65],
+        5,
+    );
+    (vertices, indices, materials)
+}
+
+fn add_box(
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    materials: &mut Vec<u32>,
+    min: [f32; 3],
+    max: [f32; 3],
+    material: u32,
+) {
+    let [x0, y0, z0] = min;
+    let [x1, y1, z1] = max;
+    add_quad(
+        vertices,
+        indices,
+        materials,
+        [[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0]],
+        [0.0, 0.0, -1.0],
+        material,
+    );
+    add_quad(
+        vertices,
+        indices,
+        materials,
+        [[x1, y0, z1], [x0, y0, z1], [x0, y1, z1], [x1, y1, z1]],
+        [0.0, 0.0, 1.0],
+        material,
+    );
+    add_quad(
+        vertices,
+        indices,
+        materials,
+        [[x0, y0, z1], [x0, y0, z0], [x0, y1, z0], [x0, y1, z1]],
+        [-1.0, 0.0, 0.0],
+        material,
+    );
+    add_quad(
+        vertices,
+        indices,
+        materials,
+        [[x1, y0, z0], [x1, y0, z1], [x1, y1, z1], [x1, y1, z0]],
+        [1.0, 0.0, 0.0],
+        material,
+    );
+    add_quad(
+        vertices,
+        indices,
+        materials,
+        [[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]],
+        [0.0, 1.0, 0.0],
+        material,
+    );
+    add_quad(
+        vertices,
+        indices,
+        materials,
+        [[x0, y0, z1], [x1, y0, z1], [x1, y0, z0], [x0, y0, z0]],
+        [0.0, -1.0, 0.0],
+        material,
+    );
+}
+
+fn add_quad(
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    materials: &mut Vec<u32>,
+    positions: [[f32; 3]; 4],
+    normal: [f32; 3],
+    material: u32,
+) {
+    let base = vertices.len() as u32;
+    vertices.extend(positions.map(|position| Vertex { position, normal }));
+    indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    materials.extend([material, material]);
 }
 
 impl AccelerationStructures {
     pub fn build(
         device: &ID3D12Device,
         command_list: &ID3D12GraphicsCommandList,
-        geometry: &TriangleGeometry,
+        geometry: &SceneGeometry,
     ) -> Result<Self> {
         let device5: ID3D12Device5 = device.cast()?;
         let command_list4: ID3D12GraphicsCommandList4 = command_list.cast()?;
@@ -302,14 +556,14 @@ impl RaytracingPipeline {
             IntersectionShaderImport: PCWSTR::null(),
         };
         let shader_config = D3D12_RAYTRACING_SHADER_CONFIG {
-            MaxPayloadSizeInBytes: 16,
+            MaxPayloadSizeInBytes: 32,
             MaxAttributeSizeInBytes: 8,
         };
         let global_root = D3D12_GLOBAL_ROOT_SIGNATURE {
             pGlobalRootSignature: ManuallyDrop::new(Some(root_signature.clone())),
         };
         let pipeline_config = D3D12_RAYTRACING_PIPELINE_CONFIG {
-            MaxTraceRecursionDepth: 1,
+            MaxTraceRecursionDepth: 4,
         };
         let subobjects = [
             D3D12_STATE_SUBOBJECT {
@@ -387,7 +641,7 @@ fn create_raytracing_root_signature(device: &ID3D12Device) -> Result<ID3D12RootS
     let ranges = [
         D3D12_DESCRIPTOR_RANGE {
             RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
-            NumDescriptors: 1,
+            NumDescriptors: 5,
             BaseShaderRegister: 0,
             RegisterSpace: 0,
             OffsetInDescriptorsFromTableStart: 0,
@@ -397,22 +651,35 @@ fn create_raytracing_root_signature(device: &ID3D12Device) -> Result<ID3D12RootS
             NumDescriptors: 1,
             BaseShaderRegister: 0,
             RegisterSpace: 0,
-            OffsetInDescriptorsFromTableStart: 1,
+            OffsetInDescriptorsFromTableStart: 5,
         },
     ];
-    let parameter = D3D12_ROOT_PARAMETER {
-        ParameterType: D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
-        Anonymous: D3D12_ROOT_PARAMETER_0 {
-            DescriptorTable: D3D12_ROOT_DESCRIPTOR_TABLE {
-                NumDescriptorRanges: ranges.len() as u32,
-                pDescriptorRanges: ranges.as_ptr(),
+    let parameters = [
+        D3D12_ROOT_PARAMETER {
+            ParameterType: D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
+            Anonymous: D3D12_ROOT_PARAMETER_0 {
+                DescriptorTable: D3D12_ROOT_DESCRIPTOR_TABLE {
+                    NumDescriptorRanges: ranges.len() as u32,
+                    pDescriptorRanges: ranges.as_ptr(),
+                },
             },
+            ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
         },
-        ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
-    };
+        D3D12_ROOT_PARAMETER {
+            ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
+            Anonymous: D3D12_ROOT_PARAMETER_0 {
+                Constants: D3D12_ROOT_CONSTANTS {
+                    ShaderRegister: 0,
+                    RegisterSpace: 0,
+                    Num32BitValues: 1,
+                },
+            },
+            ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+        },
+    ];
     let description = D3D12_ROOT_SIGNATURE_DESC {
-        NumParameters: 1,
-        pParameters: &parameter,
+        NumParameters: parameters.len() as u32,
+        pParameters: parameters.as_ptr(),
         NumStaticSamplers: 0,
         pStaticSamplers: std::ptr::null(),
         Flags: D3D12_ROOT_SIGNATURE_FLAG_NONE,

@@ -51,7 +51,7 @@ impl ApplicationHandler for RealtimeApplication {
         }
 
         let attributes = Window::default_attributes()
-            .with_title("RayTracingDemo - DX12 阶段 3")
+            .with_title("RayTracingDemo - DX12 阶段 4")
             .with_inner_size(LogicalSize::new(1280, 720))
             .with_min_inner_size(LogicalSize::new(320, 180));
         let window = match event_loop.create_window(attributes) {
@@ -104,7 +104,7 @@ impl ApplicationHandler for RealtimeApplication {
                     if elapsed >= Duration::from_millis(500) {
                         let fps = self.frames_since_stats as f64 / elapsed.as_secs_f64();
                         window.set_title(&format!(
-                            "RayTracingDemo - 阶段 3 | FPS {:.0} | GPU {:.3} ms | {} | Shader {}",
+                            "RayTracingDemo - 阶段 4 | FPS {:.0} | GPU {:.3} ms | {} | Shader {}",
                             fps,
                             renderer.gpu_time_ms(),
                             renderer.raytracing_status(),
