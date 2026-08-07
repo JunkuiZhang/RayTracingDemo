@@ -314,7 +314,7 @@ impl Dx12Renderer {
             };
             command_list4.SetComputeRoot32BitConstants(
                 1,
-                8,
+                16,
                 (&camera as *const CameraConstants).cast(),
                 0,
             );
