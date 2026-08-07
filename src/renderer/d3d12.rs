@@ -55,6 +55,7 @@ pub struct Dx12Renderer {
     gbuffer_albedo: Option<TrackedResource>,
     gbuffer_normal: Option<TrackedResource>,
     gbuffer_depth: Option<TrackedResource>,
+    accumulation: Option<TrackedResource>,
     gpu_profiler: GpuProfiler,
     shader_status: String,
     raytracing_status: String,
@@ -139,7 +140,7 @@ impl Dx12Renderer {
                 DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, FRAME_COUNT, false)
                     .map_err(|error| dx_error("创建 RTV 描述符堆", error))?;
             let shader_heap =
-                DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 9, true)
+                DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 10, true)
                     .map_err(|error| dx_error("创建 Shader 描述符堆", error))?;
             let gpu_profiler = GpuProfiler::new(&device, &command_queue, FRAME_COUNT)
                 .map_err(|error| dx_error("创建 GPU 计时器", error))?;
@@ -228,6 +229,7 @@ impl Dx12Renderer {
                 gbuffer_albedo: None,
                 gbuffer_normal: None,
                 gbuffer_depth: None,
+                accumulation: None,
                 gpu_profiler,
                 shader_status: format!("内嵌 DXR（{} 字节）", STAGE3_SHADER.len()),
                 raytracing_status,
@@ -256,6 +258,9 @@ impl Dx12Renderer {
             renderer
                 .create_gbuffer()
                 .map_err(|error| dx_error("创建第一交点 G-buffer", error))?;
+            renderer
+                .create_accumulation()
+                .map_err(|error| dx_error("创建渐进累计纹理", error))?;
             Ok(renderer)
         }
     }
@@ -355,6 +360,7 @@ impl Dx12Renderer {
             self.gbuffer_albedo = None;
             self.gbuffer_normal = None;
             self.gbuffer_depth = None;
+            self.accumulation = None;
             self.render_targets = [None, None, None];
             self.swap_chain.ResizeBuffers(
                 FRAME_COUNT as u32,
@@ -372,6 +378,7 @@ impl Dx12Renderer {
             self.create_render_targets()?;
             self.create_compute_output()?;
             self.create_gbuffer()?;
+            self.create_accumulation()?;
             Ok(())
         }
     }
@@ -386,6 +393,10 @@ impl Dx12Renderer {
 
     pub fn raytracing_status(&self) -> &str {
         &self.raytracing_status
+    }
+
+    pub fn sample_count(&self) -> u32 {
+        self.frame_number.saturating_add(1)
     }
 
     pub fn move_camera(&mut self, forward: f32, right: f32, vertical: f32) {
@@ -494,6 +505,28 @@ impl Dx12Renderer {
         self.gbuffer_albedo = Some(albedo);
         self.gbuffer_normal = Some(normal);
         self.gbuffer_depth = Some(depth);
+        Ok(())
+    }
+
+    unsafe fn create_accumulation(&mut self) -> Result<()> {
+        let accumulation = TrackedResource::create_texture_2d(
+            &self.device,
+            self.width,
+            self.height,
+            DXGI_FORMAT_R32G32B32A32_FLOAT,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            "渐进累计历史",
+        )?;
+        unsafe {
+            self.device.CreateUnorderedAccessView(
+                accumulation.resource(),
+                None,
+                None,
+                self.shader_heap.cpu_handle(9),
+            );
+        }
+        self.accumulation = Some(accumulation);
         Ok(())
     }
 

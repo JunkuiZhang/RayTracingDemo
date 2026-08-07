@@ -4,6 +4,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use windows::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+};
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalSize},
@@ -16,6 +19,10 @@ use winit::{
 use crate::renderer::d3d12::Dx12Renderer;
 
 pub fn run() -> Result<(), Box<dyn Error>> {
+    // 让窗口、截图工具和 GPU 输出统一使用物理像素，避免 200% 缩放时只截到左上角四分之一。
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
     let event_loop = EventLoop::new()
         .map_err(|error| io::Error::other(format!("创建 winit 事件循环：{error}")))?;
     let mut application = RealtimeApplication::default();
@@ -52,7 +59,7 @@ impl ApplicationHandler for RealtimeApplication {
         }
 
         let attributes = Window::default_attributes()
-            .with_title("RayTracingDemo - DX12 阶段 4")
+            .with_title("RayTracingDemo - DX12 阶段 5")
             .with_inner_size(LogicalSize::new(1280, 720))
             .with_min_inner_size(LogicalSize::new(320, 180));
         let window = match event_loop.create_window(attributes) {
@@ -105,9 +112,10 @@ impl ApplicationHandler for RealtimeApplication {
                     if elapsed >= Duration::from_millis(500) {
                         let fps = self.frames_since_stats as f64 / elapsed.as_secs_f64();
                         window.set_title(&format!(
-                            "RayTracingDemo - 阶段 4 | FPS {:.0} | GPU {:.3} ms | {} | Shader {}",
+                            "RayTracingDemo - 阶段 5 | FPS {:.0} | GPU {:.3} ms | SPP {} | {} | Shader {}",
                             fps,
                             renderer.gpu_time_ms(),
+                            renderer.sample_count(),
                             renderer.raytracing_status(),
                             renderer.shader_status()
                         ));

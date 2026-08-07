@@ -21,6 +21,7 @@ RWTexture2D<float4> Output : register(u0);
 RWTexture2D<float4> GBufferAlbedo : register(u1);
 RWTexture2D<float4> GBufferNormal : register(u2);
 RWTexture2D<float> GBufferDepth : register(u3);
+RWTexture2D<float4> Accumulation : register(u4);
 
 cbuffer FrameConstants : register(b0)
 {
@@ -99,7 +100,11 @@ void RayGen()
     GBufferNormal[pixel] = 0;
     GBufferDepth[pixel] = 0;
     TraceRay(Scene, RAY_FLAG_NONE, 0xFF, 0, 1, 0, ray, payload);
-    Output[pixel] = float4(payload.radiance, 1.0);
+    float4 sample = float4(payload.radiance, 1.0);
+    float4 history = FrameIndex == 0 ? sample : Accumulation[pixel];
+    float4 accumulated = (history * FrameIndex + sample) / (FrameIndex + 1.0);
+    Accumulation[pixel] = accumulated;
+    Output[pixel] = accumulated;
 }
 
 [shader("miss")]
