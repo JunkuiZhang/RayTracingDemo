@@ -466,24 +466,26 @@ impl Dx12Renderer {
     }
 
     pub fn move_camera(&mut self, forward: f32, right: f32, vertical: f32) {
-        self.previous_camera_position = self.camera_position;
-        self.previous_camera_yaw = self.camera_yaw;
-        self.previous_camera_pitch = self.camera_pitch;
         let forward_axis = [self.camera_yaw.sin(), 0.0, self.camera_yaw.cos()];
         let right_axis = [forward_axis[2], 0.0, -forward_axis[0]];
         for axis in 0..3 {
             self.camera_position[axis] += forward_axis[axis] * forward + right_axis[axis] * right;
         }
         self.camera_position[1] += vertical;
+        // 移动后立即同步历史相机，避免重置累计后仍按旧位姿持续重投影。
+        self.previous_camera_position = self.camera_position;
+        self.previous_camera_yaw = self.camera_yaw;
+        self.previous_camera_pitch = self.camera_pitch;
         self.frame_number = 0;
     }
 
     pub fn rotate_camera(&mut self, yaw: f32, pitch: f32) {
+        self.camera_yaw += yaw;
+        self.camera_pitch = (self.camera_pitch + pitch).clamp(-1.5, 1.5);
+        // 旋转后立即同步历史相机，避免旧角度造成整幅画面横向滑动。
         self.previous_camera_position = self.camera_position;
         self.previous_camera_yaw = self.camera_yaw;
         self.previous_camera_pitch = self.camera_pitch;
-        self.camera_yaw += yaw;
-        self.camera_pitch = (self.camera_pitch + pitch).clamp(-1.5, 1.5);
         self.frame_number = 0;
     }
 
