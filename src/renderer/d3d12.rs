@@ -21,7 +21,7 @@ use self::{
     descriptor::DescriptorHeap, pipeline::ComputePipeline, profiler::GpuProfiler,
     resource::TrackedResource, shader::ShaderReloader, upload::UploadRing,
 };
-use raytracing::TriangleGeometry;
+use raytracing::{AccelerationStructures, TriangleGeometry};
 
 mod descriptor;
 mod pipeline;
@@ -64,6 +64,7 @@ pub struct Dx12Renderer {
     shader_status: String,
     raytracing_status: String,
     _triangle_geometry: TriangleGeometry,
+    _acceleration_structures: AccelerationStructures,
     upload_ring: UploadRing,
     frames: Vec<FrameContext>,
     command_list: ID3D12GraphicsCommandList,
@@ -152,7 +153,6 @@ impl Dx12Renderer {
             let raytracing_status = raytracing_status(&device);
             let triangle_geometry = TriangleGeometry::new(&device)
                 .map_err(|error| dx_error("创建 DXR 三角形几何", error))?;
-            let _geometry_desc = triangle_geometry.geometry_desc();
 
             let mut frames = Vec::with_capacity(FRAME_COUNT);
             for _ in 0..FRAME_COUNT {
@@ -167,10 +167,18 @@ impl Dx12Renderer {
                 &frames[0].allocator,
                 None::<&ID3D12PipelineState>,
             )?;
+            let acceleration_structures =
+                AccelerationStructures::build(&device, &command_list, &triangle_geometry)
+                    .map_err(|error| dx_error("构建 DXR 加速结构", error))?;
             command_list.Close()?;
 
             let fence: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_NONE)?;
             let fence_event = CreateEventW(None, false, false, None)?;
+            let initialization_list: ID3D12CommandList = command_list.cast()?;
+            command_queue.ExecuteCommandLists(&[Some(initialization_list)]);
+            command_queue.Signal(&fence, 1)?;
+            fence.SetEventOnCompletion(1, fence_event)?;
+            WaitForSingleObject(fence_event, INFINITE);
             let mut renderer = Self {
                 device,
                 command_queue,
@@ -185,11 +193,12 @@ impl Dx12Renderer {
                 shader_status: format!("内嵌 DXIL（阶段 3 Shader {} 字节）", STAGE3_SHADER.len()),
                 raytracing_status,
                 _triangle_geometry: triangle_geometry,
+                _acceleration_structures: acceleration_structures,
                 upload_ring,
                 frames,
                 command_list,
                 fence,
-                next_fence_value: 1,
+                next_fence_value: 2,
                 fence_event,
                 width,
                 height,
