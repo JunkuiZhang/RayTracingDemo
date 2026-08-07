@@ -31,6 +31,7 @@ mod upload;
 
 const FRAME_COUNT: usize = 3;
 const STAGE2_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage2_gradient.dxil"));
+const STAGE3_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage3_triangle.dxil"));
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -59,6 +60,7 @@ pub struct Dx12Renderer {
     gpu_profiler: GpuProfiler,
     shader_reloader: ShaderReloader,
     shader_status: String,
+    raytracing_status: String,
     upload_ring: UploadRing,
     frames: Vec<FrameContext>,
     command_list: ID3D12GraphicsCommandList,
@@ -144,6 +146,7 @@ impl Dx12Renderer {
                 .map_err(|error| dx_error("创建 GPU 计时器", error))?;
             let upload_ring = UploadRing::new(&device, FRAME_COUNT)
                 .map_err(|error| dx_error("创建上传环形缓冲", error))?;
+            let raytracing_status = raytracing_status(&device);
 
             let mut frames = Vec::with_capacity(FRAME_COUNT);
             for _ in 0..FRAME_COUNT {
@@ -173,7 +176,8 @@ impl Dx12Renderer {
                 compute_pipeline,
                 gpu_profiler,
                 shader_reloader: ShaderReloader::new(),
-                shader_status: "内嵌 DXIL".to_string(),
+                shader_status: format!("内嵌 DXIL（阶段 3 Shader {} 字节）", STAGE3_SHADER.len()),
+                raytracing_status,
                 upload_ring,
                 frames,
                 command_list,
@@ -304,6 +308,10 @@ impl Dx12Renderer {
         &self.shader_status
     }
 
+    pub fn raytracing_status(&self) -> &str {
+        &self.raytracing_status
+    }
+
     unsafe fn reload_shader_if_changed(&mut self) -> Result<()> {
         let Some(result) = self.shader_reloader.poll() else {
             return Ok(());
@@ -392,6 +400,22 @@ impl Dx12Renderer {
             WaitForSingleObject(self.fence_event, INFINITE);
         }
         Ok(())
+    }
+}
+
+fn raytracing_status(device: &ID3D12Device) -> String {
+    let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS5::default();
+    let result = unsafe {
+        device.CheckFeatureSupport(
+            D3D12_FEATURE_D3D12_OPTIONS5,
+            (&mut options as *mut D3D12_FEATURE_DATA_D3D12_OPTIONS5).cast(),
+            std::mem::size_of::<D3D12_FEATURE_DATA_D3D12_OPTIONS5>() as u32,
+        )
+    };
+    if result.is_err() || options.RaytracingTier == D3D12_RAYTRACING_TIER_NOT_SUPPORTED {
+        "DXR 不可用".to_string()
+    } else {
+        format!("DXR Tier {}", options.RaytracingTier.0 as f32 / 10.0)
     }
 }
 

@@ -104,9 +104,10 @@ impl ApplicationHandler for RealtimeApplication {
                     if elapsed >= Duration::from_millis(500) {
                         let fps = self.frames_since_stats as f64 / elapsed.as_secs_f64();
                         window.set_title(&format!(
-                            "RayTracingDemo - 阶段 2 | FPS {:.0} | GPU {:.3} ms | Shader {}",
+                            "RayTracingDemo - 阶段 3 | FPS {:.0} | GPU {:.3} ms | {} | Shader {}",
                             fps,
                             renderer.gpu_time_ms(),
+                            renderer.raytracing_status(),
                             renderer.shader_status()
                         ));
                         self.stats_started = Some(now);
