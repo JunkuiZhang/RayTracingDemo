@@ -4,6 +4,7 @@ use std::{error::Error, path::PathBuf};
 pub struct RealtimeConfig {
     pub model_path: Option<PathBuf>,
     pub animate_model: bool,
+    pub benchmark_seconds: Option<u32>,
 }
 
 #[cfg(target_os = "windows")]

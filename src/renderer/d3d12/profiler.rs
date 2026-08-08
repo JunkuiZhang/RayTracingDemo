@@ -1,11 +1,11 @@
-use std::ffi::c_void;
+use std::{cmp::Ordering, ffi::c_void};
 
 use windows::{
     Win32::Graphics::{Direct3D12::*, Dxgi::Common::*},
     core::Result,
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(usize)]
 pub enum GpuPass {
     Total = 0,
@@ -13,20 +13,133 @@ pub enum GpuPass {
     PathTrace = 2,
     Temporal = 3,
     Atrous = 4,
-    ToneMap = 5,
+    Atrous0 = 5,
+    Atrous1 = 6,
+    Atrous2 = 7,
+    Atrous3 = 8,
+    ToneMap = 9,
 }
 
-const PASS_COUNT: usize = 6;
+pub const PASS_COUNT: usize = 10;
+pub const TIMING_WINDOW_CAPACITY: usize = 240;
 const TIMESTAMPS_PER_FRAME: usize = PASS_COUNT * 2;
 
-/// Timestamp profiler with an independent begin/end pair for every GPU pass.
-/// Results are read only after the owning frame context fence has completed.
+/// One completed GPU timestamp sample. `valid` is false for warm-up or a
+/// malformed/incomplete timestamp pair and such samples never enter the
+/// rolling statistics.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GpuTimingSample {
+    pub acceleration_structure_ms: f64,
+    pub path_trace_ms: f64,
+    pub temporal_ms: f64,
+    pub atrous_ms: f64,
+    pub atrous_iterations_ms: [f64; 4],
+    pub tone_map_ms: f64,
+    pub total_ms: f64,
+    pub valid: bool,
+}
+
+impl GpuTimingSample {
+    fn value(self, pass: GpuPass) -> f64 {
+        match pass {
+            GpuPass::Total => self.total_ms,
+            GpuPass::AccelerationStructure => self.acceleration_structure_ms,
+            GpuPass::PathTrace => self.path_trace_ms,
+            GpuPass::Temporal => self.temporal_ms,
+            GpuPass::Atrous => self.atrous_ms,
+            GpuPass::Atrous0 => self.atrous_iterations_ms[0],
+            GpuPass::Atrous1 => self.atrous_iterations_ms[1],
+            GpuPass::Atrous2 => self.atrous_iterations_ms[2],
+            GpuPass::Atrous3 => self.atrous_iterations_ms[3],
+            GpuPass::ToneMap => self.tone_map_ms,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GpuTimingStats {
+    pub p50_ms: Option<f64>,
+    pub p95_ms: Option<f64>,
+    pub valid_samples: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GpuTimingReport {
+    pub passes: [GpuTimingStats; PASS_COUNT],
+}
+
+impl GpuTimingReport {
+    pub fn pass(&self, pass: GpuPass) -> GpuTimingStats {
+        self.passes[pass as usize]
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RollingStats {
+    values: [f64; TIMING_WINDOW_CAPACITY],
+    next: usize,
+    len: usize,
+}
+
+impl Default for RollingStats {
+    fn default() -> Self {
+        Self {
+            values: [0.0; TIMING_WINDOW_CAPACITY],
+            next: 0,
+            len: 0,
+        }
+    }
+}
+
+impl RollingStats {
+    fn clear(&mut self) {
+        self.next = 0;
+        self.len = 0;
+    }
+
+    fn push(&mut self, value: f64) {
+        if !value.is_finite() || value < 0.0 {
+            return;
+        }
+        self.values[self.next] = value;
+        self.next = (self.next + 1) % TIMING_WINDOW_CAPACITY;
+        self.len = (self.len + 1).min(TIMING_WINDOW_CAPACITY);
+    }
+
+    fn snapshot(&self) -> GpuTimingStats {
+        if self.len == 0 {
+            return GpuTimingStats::default();
+        }
+
+        // This copy and sort happen only when a low-frequency report asks for
+        // statistics. Frame recording only writes one fixed-size ring slot.
+        let mut sorted = self.values;
+        sorted[..self.len]
+            .sort_unstable_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+        GpuTimingStats {
+            p50_ms: Some(sorted[percentile_index(self.len, 0.50)]),
+            p95_ms: Some(sorted[percentile_index(self.len, 0.95)]),
+            valid_samples: self.len,
+        }
+    }
+}
+
+fn percentile_index(length: usize, percentile: f64) -> usize {
+    let rank = (length as f64 * percentile).ceil() as usize;
+    rank.saturating_sub(1).min(length.saturating_sub(1))
+}
+
+/// Timestamp profiler with per-frame query storage protected by the owning
+/// Frame Context fence. The readback resource is never read until the caller
+/// has waited for that frame's fence to complete.
 pub struct GpuProfiler {
     query_heap: ID3D12QueryHeap,
     readback: ID3D12Resource,
     timestamp_frequency: u64,
     frame_count: usize,
-    last_times_ms: [f64; PASS_COUNT],
+    last_sample: Option<GpuTimingSample>,
+    windows: [RollingStats; PASS_COUNT],
+    valid_sample_serial: u64,
 }
 
 impl GpuProfiler {
@@ -77,7 +190,9 @@ impl GpuProfiler {
             readback: readback.unwrap(),
             timestamp_frequency: unsafe { command_queue.GetTimestampFrequency()? },
             frame_count,
-            last_times_ms: [0.0; PASS_COUNT],
+            last_sample: None,
+            windows: [RollingStats::default(); PASS_COUNT],
+            valid_sample_serial: 0,
         })
     }
 
@@ -92,6 +207,30 @@ impl GpuProfiler {
 
     pub fn end(&self, command_list: &ID3D12GraphicsCommandList, frame_index: usize, pass: GpuPass) {
         self.write_timestamp(command_list, frame_index, pass, 1);
+    }
+
+    /// Add a named GPU capture region. The payload is static and does not
+    /// allocate; PIX consumes it while the command list is recorded.
+    pub fn begin_event(&self, command_list: &ID3D12GraphicsCommandList, pass: GpuPass) {
+        let label = match pass {
+            GpuPass::AccelerationStructure => b"Stage8 AS".as_slice(),
+            GpuPass::PathTrace => b"Stage8 Path Trace".as_slice(),
+            GpuPass::Temporal => b"Stage8 Temporal".as_slice(),
+            GpuPass::Atrous => b"Stage8 A-Trous aggregate".as_slice(),
+            GpuPass::Atrous0 => b"Stage8 A-Trous 0".as_slice(),
+            GpuPass::Atrous1 => b"Stage8 A-Trous 1".as_slice(),
+            GpuPass::Atrous2 => b"Stage8 A-Trous 2".as_slice(),
+            GpuPass::Atrous3 => b"Stage8 A-Trous 3".as_slice(),
+            GpuPass::ToneMap => b"Stage8 ToneMap".as_slice(),
+            GpuPass::Total => b"Stage8 Total".as_slice(),
+        };
+        unsafe {
+            command_list.BeginEvent(0, Some(label.as_ptr().cast::<c_void>()), label.len() as u32);
+        }
+    }
+
+    pub fn end_event(&self, command_list: &ID3D12GraphicsCommandList) {
+        unsafe { command_list.EndEvent() };
     }
 
     fn write_timestamp(
@@ -122,35 +261,157 @@ impl GpuProfiler {
         }
     }
 
-    pub fn collect(&mut self, frame_index: usize) -> Result<()> {
+    /// `fence_completed` must be true only after the frame context fence has
+    /// completed. This explicit gate prevents accidentally reading a query
+    /// slot that the GPU still owns.
+    pub fn collect(
+        &mut self,
+        frame_index: usize,
+        fence_completed: bool,
+        sample_valid: bool,
+    ) -> Result<bool> {
+        if !fence_completed {
+            return Ok(false);
+        }
+
         let timestamp_start = frame_index * TIMESTAMPS_PER_FRAME;
         let byte_start = timestamp_start * size_of::<u64>();
         let read_range = D3D12_RANGE {
             Begin: byte_start,
             End: byte_start + TIMESTAMPS_PER_FRAME * size_of::<u64>(),
         };
-        let mut mapped = std::ptr::null_mut::<c_void>();
+        let mut timestamps = [0_u64; TIMESTAMPS_PER_FRAME];
         unsafe {
+            let mut mapped = std::ptr::null_mut::<c_void>();
             self.readback.Map(0, Some(&read_range), Some(&mut mapped))?;
-            let timestamps = std::slice::from_raw_parts(
+            timestamps.copy_from_slice(std::slice::from_raw_parts(
                 mapped.cast::<u64>().add(timestamp_start),
                 TIMESTAMPS_PER_FRAME,
-            );
-            for pass in 0..PASS_COUNT {
-                let begin = timestamps[pass * 2];
-                let end = timestamps[pass * 2 + 1];
-                if end >= begin && begin != 0 {
-                    self.last_times_ms[pass] =
-                        (end - begin) as f64 * 1000.0 / self.timestamp_frequency as f64;
-                }
-            }
+            ));
             self.readback
                 .Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }));
         }
-        Ok(())
+
+        let mut values = [0.0_f64; PASS_COUNT];
+        let mut valid = sample_valid && self.timestamp_frequency != 0;
+        for (pass, value) in values.iter_mut().enumerate() {
+            let begin = timestamps[pass * 2];
+            let end = timestamps[pass * 2 + 1];
+            if begin == 0 || end < begin {
+                valid = false;
+                continue;
+            }
+            *value = (end - begin) as f64 * 1000.0 / self.timestamp_frequency as f64;
+            if !value.is_finite() || *value < 0.0 {
+                valid = false;
+            }
+        }
+
+        if !valid {
+            return Ok(false);
+        }
+        let sample = GpuTimingSample {
+            acceleration_structure_ms: values[GpuPass::AccelerationStructure as usize],
+            path_trace_ms: values[GpuPass::PathTrace as usize],
+            temporal_ms: values[GpuPass::Temporal as usize],
+            atrous_ms: values[GpuPass::Atrous as usize],
+            atrous_iterations_ms: [
+                values[GpuPass::Atrous0 as usize],
+                values[GpuPass::Atrous1 as usize],
+                values[GpuPass::Atrous2 as usize],
+                values[GpuPass::Atrous3 as usize],
+            ],
+            tone_map_ms: values[GpuPass::ToneMap as usize],
+            total_ms: values[GpuPass::Total as usize],
+            valid: true,
+        };
+        self.last_sample = Some(sample);
+        for (window, value) in self.windows.iter_mut().zip(values) {
+            window.push(value);
+        }
+        self.valid_sample_serial = self.valid_sample_serial.wrapping_add(1);
+        Ok(true)
+    }
+
+    pub fn invalidate(&mut self) {
+        self.last_sample = None;
+        self.clear_statistics();
+    }
+
+    pub fn clear_statistics(&mut self) {
+        for window in &mut self.windows {
+            window.clear();
+        }
     }
 
     pub fn time_ms(&self, pass: GpuPass) -> f64 {
-        self.last_times_ms[pass as usize]
+        self.last_sample
+            .map(|sample| sample.value(pass))
+            .unwrap_or(0.0)
+    }
+
+    pub fn statistics(&self) -> GpuTimingReport {
+        GpuTimingReport {
+            passes: self.windows.map(|window| window.snapshot()),
+        }
+    }
+
+    pub fn valid_sample_serial(&self) -> u64 {
+        self.valid_sample_serial
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_window_has_no_percentiles() {
+        let stats = RollingStats::default().snapshot();
+        assert_eq!(stats, GpuTimingStats::default());
+    }
+
+    #[test]
+    fn invalid_values_do_not_enter_the_window() {
+        let mut window = RollingStats::default();
+        window.push(f64::NAN);
+        window.push(f64::INFINITY);
+        window.push(-1.0);
+        assert_eq!(window.snapshot(), GpuTimingStats::default());
+    }
+
+    #[test]
+    fn percentiles_use_the_fixed_capacity_tail() {
+        let mut window = RollingStats::default();
+        for value in 1..=300 {
+            window.push(value as f64);
+        }
+        let stats = window.snapshot();
+        assert_eq!(stats.valid_samples, TIMING_WINDOW_CAPACITY);
+        assert_eq!(stats.p50_ms, Some(180.0));
+        assert_eq!(stats.p95_ms, Some(288.0));
+    }
+
+    #[test]
+    fn pass_report_preserves_atrous_children_and_aggregate_slots() {
+        let sample = GpuTimingSample {
+            acceleration_structure_ms: 1.0,
+            path_trace_ms: 2.0,
+            temporal_ms: 3.0,
+            atrous_ms: 10.0,
+            atrous_iterations_ms: [1.0, 2.0, 3.0, 4.0],
+            tone_map_ms: 5.0,
+            total_ms: 30.0,
+            valid: true,
+        };
+        assert_eq!(sample.value(GpuPass::Atrous), 10.0);
+        assert_eq!(sample.value(GpuPass::Atrous2), 3.0);
+    }
+
+    #[test]
+    fn percentile_index_handles_single_and_small_windows() {
+        assert_eq!(percentile_index(1, 0.50), 0);
+        assert_eq!(percentile_index(2, 0.95), 1);
+        assert_eq!(percentile_index(4, 0.50), 1);
     }
 }

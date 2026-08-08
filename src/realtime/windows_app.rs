@@ -39,6 +39,9 @@ pub fn run(config: RealtimeConfig) -> Result<(), Box<dyn Error>> {
     event_loop
         .run_app(&mut application)
         .map_err(|error| io::Error::other(format!("运行 winit 事件循环：{error}")))?;
+    if let Some(report) = application.benchmark_result {
+        println!("{report}");
+    }
     if let Some(message) = application.failure {
         return Err(io::Error::other(message).into());
     }
@@ -53,6 +56,26 @@ struct RealtimeApplication {
     failure: Option<String>,
     stats_started: Option<Instant>,
     frames_since_stats: u32,
+    benchmark: Option<BenchmarkState>,
+    benchmark_result: Option<String>,
+}
+
+struct BenchmarkState {
+    duration: Duration,
+    warmup_valid_samples: u32,
+    sampling_started: Option<Instant>,
+    last_serial: u64,
+}
+
+impl BenchmarkState {
+    fn new(seconds: u32) -> Self {
+        Self {
+            duration: Duration::from_secs(seconds as u64),
+            warmup_valid_samples: 0,
+            sampling_started: None,
+            last_serial: 0,
+        }
+    }
 }
 
 impl RealtimeApplication {
@@ -70,7 +93,7 @@ impl ApplicationHandler for RealtimeApplication {
         }
 
         let attributes = Window::default_attributes()
-            .with_title("RayTracingDemo - DX12 阶段 7")
+            .with_title("RayTracingDemo - DX12 阶段 8")
             // 这里故意使用物理像素。若使用 LogicalSize，200% DPI 会把默认
             // DX12 工作尺寸隐式放大为 2560x1440，Debug Validation 成本也随之变成约 4 倍。
             .with_inner_size(PhysicalSize::new(1280, 720))
@@ -95,6 +118,7 @@ impl ApplicationHandler for RealtimeApplication {
                 Err(error) => return self.fail(event_loop, format!("创建 DX12 后端：{error}")),
             };
         self.renderer = Some(renderer);
+        self.benchmark = self.config.benchmark_seconds.map(BenchmarkState::new);
         self.window = Some(window);
     }
 
@@ -124,9 +148,33 @@ impl ApplicationHandler for RealtimeApplication {
                 }
             }
             WindowEvent::RedrawRequested => {
+                let mut benchmark_report = None;
                 if let Some(renderer) = self.renderer.as_mut() {
                     if let Err(error) = renderer.render() {
                         return self.fail(event_loop, format!("提交 DX12 帧：{error}"));
+                    }
+                    if let Some(benchmark) = self.benchmark.as_mut() {
+                        let serial = renderer.valid_timing_sample_serial();
+                        let new_samples = serial.saturating_sub(benchmark.last_serial);
+                        benchmark.last_serial = serial;
+                        if benchmark.sampling_started.is_none() {
+                            benchmark.warmup_valid_samples = benchmark
+                                .warmup_valid_samples
+                                .saturating_add(new_samples.min(u32::MAX as u64) as u32);
+                            if benchmark.warmup_valid_samples >= 120 {
+                                renderer.clear_gpu_statistics();
+                                benchmark.sampling_started = Some(Instant::now());
+                            }
+                        } else if benchmark
+                            .sampling_started
+                            .is_some_and(|started| started.elapsed() >= benchmark.duration)
+                        {
+                            renderer.refresh_memory_telemetry();
+                            benchmark_report = Some(renderer.benchmark_json(
+                                benchmark.duration.as_secs(),
+                                benchmark.warmup_valid_samples,
+                            ));
+                        }
                     }
                     self.frames_since_stats += 1;
                     let now = Instant::now();
@@ -135,9 +183,12 @@ impl ApplicationHandler for RealtimeApplication {
                     if elapsed >= Duration::from_millis(500) {
                         let fps = self.frames_since_stats as f64 / elapsed.as_secs_f64();
                         window.set_title(&format!(
-                            "RayTracingDemo - 阶段 7 | FPS {:.0} | GPU {:.2} ms (AS {:.2} PT {:.2} T {:.2} A {:.2}) | SPP {} | 视图 {} | {} | {}",
+                            "RayTracingDemo - 阶段 8 | FPS {:.0} | GPU {:.2} ms | 输出 {}x{} | VRAM {} | AS {:.2} PT {:.2} T {:.2} A {:.2} | SPP {} | 视图 {} | {} | {}",
                             fps,
                             renderer.gpu_time_ms(),
+                            renderer.output_width(),
+                            renderer.output_height(),
+                            renderer.video_memory_title(),
                             renderer.gpu_pass_time_ms(GpuPass::AccelerationStructure),
                             renderer.gpu_pass_time_ms(GpuPass::PathTrace),
                             renderer.gpu_pass_time_ms(GpuPass::Temporal),
@@ -150,6 +201,12 @@ impl ApplicationHandler for RealtimeApplication {
                         self.stats_started = Some(now);
                         self.frames_since_stats = 0;
                     }
+                }
+                if let Some(report) = benchmark_report {
+                    self.benchmark_result = Some(report);
+                    self.renderer = None;
+                    event_loop.exit();
+                    return;
                 }
                 window.request_redraw();
             }

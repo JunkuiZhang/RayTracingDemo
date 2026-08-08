@@ -1,4 +1,4 @@
-use std::{ffi::c_void, mem::size_of, time::Instant};
+use std::{ffi::c_void, fmt::Write as _, mem::size_of, time::Instant};
 
 use windows::{
     Win32::{
@@ -24,6 +24,7 @@ use crate::{
 
 use self::{
     descriptor::DescriptorHeap,
+    memory::{VideoMemorySnapshot, VideoMemoryStatus, VideoMemoryTelemetry},
     pipeline::ComputePipeline,
     profiler::{GpuPass, GpuProfiler},
     resource::TrackedResource,
@@ -33,6 +34,7 @@ use self::{
 use raytracing::{AccelerationStructures, RaytracingPipeline, SceneGeometry};
 
 mod descriptor;
+mod memory;
 mod pipeline;
 pub(crate) mod profiler;
 mod raytracing;
@@ -57,6 +59,7 @@ const TONEMAP_TABLE_BASES: [usize; 2] = [280, 296];
 struct FrameContext {
     allocator: ID3D12CommandAllocator,
     fence_value: u64,
+    timing_valid: bool,
 }
 
 #[repr(C)]
@@ -107,6 +110,8 @@ impl DenoiseHistory {
 /// 阶段 1 的最小 DX12 后端：三缓冲交换链、清屏和逐帧 Fence。
 pub struct Dx12Renderer {
     device: ID3D12Device,
+    _adapter: IDXGIAdapter1,
+    gpu_name: String,
     command_queue: ID3D12CommandQueue,
     swap_chain: IDXGISwapChain3,
     rtv_heap: DescriptorHeap,
@@ -129,6 +134,7 @@ pub struct Dx12Renderer {
     filter_specular_pong: Option<TrackedResource>,
     rejection_mask: Option<TrackedResource>,
     gpu_profiler: GpuProfiler,
+    memory_telemetry: VideoMemoryTelemetry,
     shader_status: String,
     raytracing_status: String,
     _textures: TextureSet,
@@ -182,8 +188,9 @@ impl Dx12Renderer {
                 }
                 Err(error) => return Err(dx_error("创建 DXGI Factory", error)),
             };
-            let device =
+            let (device, adapter, gpu_name) =
                 create_hardware_device(&factory).map_err(|error| dx_error("创建设备", error))?;
+            let memory_telemetry = VideoMemoryTelemetry::new(&adapter);
             configure_info_queue(&device);
 
             let queue_description = D3D12_COMMAND_QUEUE_DESC {
@@ -248,6 +255,7 @@ impl Dx12Renderer {
                 frames.push(FrameContext {
                     allocator: device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)?,
                     fence_value: 0,
+                    timing_valid: false,
                 });
             }
             let command_list: ID3D12GraphicsCommandList = device.CreateCommandList(
@@ -350,6 +358,8 @@ impl Dx12Renderer {
             acceleration_structures.release_build_resources();
             let mut renderer = Self {
                 device,
+                _adapter: adapter,
+                gpu_name,
                 command_queue,
                 swap_chain,
                 rtv_heap,
@@ -372,6 +382,7 @@ impl Dx12Renderer {
                 filter_specular_pong: None,
                 rejection_mask: None,
                 gpu_profiler,
+                memory_telemetry,
                 shader_status: format!(
                     "DXR/Temporal/À-Trous（{} KiB）",
                     (STAGE3_SHADER.len()
@@ -431,21 +442,33 @@ impl Dx12Renderer {
         if self.minimized || self.width == 0 || self.height == 0 {
             return Ok(());
         }
+        self.memory_telemetry.poll(false);
 
         unsafe {
             let frame_index = self.swap_chain.GetCurrentBackBufferIndex() as usize;
+            let previous_fence_value = self.frames[frame_index].fence_value;
+            let previous_timing_valid = self.frames[frame_index].timing_valid;
             self.wait_for_frame(frame_index)?;
-            self.gpu_profiler.collect(frame_index)?;
+            let fence_completed =
+                previous_fence_value != 0 && self.fence.GetCompletedValue() >= previous_fence_value;
+            self.gpu_profiler
+                .collect(frame_index, fence_completed, previous_timing_valid)?;
             let frame = &self.frames[frame_index];
             frame.allocator.Reset()?;
             self.command_list
                 .Reset(&frame.allocator, None::<&ID3D12PipelineState>)?;
 
+            self.gpu_profiler
+                .begin(&self.command_list, frame_index, GpuPass::Total);
+            self.gpu_profiler
+                .begin_event(&self.command_list, GpuPass::Total);
             self.gpu_profiler.begin(
                 &self.command_list,
                 frame_index,
                 GpuPass::AccelerationStructure,
             );
+            self.gpu_profiler
+                .begin_event(&self.command_list, GpuPass::AccelerationStructure);
             let acceleration_dirty = self
                 ._scene_geometry
                 .prepare_animation(self.animation_start.elapsed(), self.animate_model);
@@ -461,6 +484,7 @@ impl Dx12Renderer {
                 frame_index,
                 GpuPass::AccelerationStructure,
             );
+            self.gpu_profiler.end_event(&self.command_list);
 
             self.command_list.SetDescriptorHeaps(&[
                 Some(self.shader_heap.heap().clone()),
@@ -468,9 +492,9 @@ impl Dx12Renderer {
             ]);
             let command_list4: ID3D12GraphicsCommandList4 = self.command_list.cast()?;
             self.gpu_profiler
-                .begin(&self.command_list, frame_index, GpuPass::Total);
-            self.gpu_profiler
                 .begin(&self.command_list, frame_index, GpuPass::PathTrace);
+            self.gpu_profiler
+                .begin_event(&self.command_list, GpuPass::PathTrace);
             self.transition_frame_inputs(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             command_list4.SetComputeRootSignature(&self.raytracing_pipeline.root_signature);
             command_list4
@@ -513,6 +537,7 @@ impl Dx12Renderer {
             command_list4.DispatchRays(&dispatch);
             self.gpu_profiler
                 .end(&self.command_list, frame_index, GpuPass::PathTrace);
+            self.gpu_profiler.end_event(&self.command_list);
 
             self.transition_frame_inputs(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             let current_history = self.history_index;
@@ -537,6 +562,8 @@ impl Dx12Renderer {
             let groups_y = self.height.div_ceil(8);
             self.gpu_profiler
                 .begin(&self.command_list, frame_index, GpuPass::Temporal);
+            self.gpu_profiler
+                .begin_event(&self.command_list, GpuPass::Temporal);
             self.temporal_pipeline.bind(
                 &self.command_list,
                 self.shader_heap
@@ -546,6 +573,7 @@ impl Dx12Renderer {
             self.command_list.Dispatch(groups_x, groups_y, 1);
             self.gpu_profiler
                 .end(&self.command_list, frame_index, GpuPass::Temporal);
+            self.gpu_profiler.end_event(&self.command_list);
             self.histories[current_history]
                 .as_mut()
                 .unwrap()
@@ -560,6 +588,8 @@ impl Dx12Renderer {
 
             self.gpu_profiler
                 .begin(&self.command_list, frame_index, GpuPass::Atrous);
+            self.gpu_profiler
+                .begin_event(&self.command_list, GpuPass::Atrous);
             self.filter_diffuse_ping
                 .as_mut()
                 .unwrap()
@@ -574,7 +604,14 @@ impl Dx12Renderer {
                     .gpu_handle(ATROUS_HISTORY_TABLE_BASES[current_history]),
                 &[1, 0],
             );
+            self.gpu_profiler
+                .begin(&self.command_list, frame_index, GpuPass::Atrous0);
+            self.gpu_profiler
+                .begin_event(&self.command_list, GpuPass::Atrous0);
             self.command_list.Dispatch(groups_x, groups_y, 1);
+            self.gpu_profiler
+                .end(&self.command_list, frame_index, GpuPass::Atrous0);
+            self.gpu_profiler.end_event(&self.command_list);
             self.filter_diffuse_ping.as_mut().unwrap().transition(
                 &self.command_list,
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -598,7 +635,14 @@ impl Dx12Renderer {
                     .gpu_handle(ATROUS_PING_TO_PONG_BASES[current_history]),
                 &[2, 1],
             );
+            self.gpu_profiler
+                .begin(&self.command_list, frame_index, GpuPass::Atrous1);
+            self.gpu_profiler
+                .begin_event(&self.command_list, GpuPass::Atrous1);
             self.command_list.Dispatch(groups_x, groups_y, 1);
+            self.gpu_profiler
+                .end(&self.command_list, frame_index, GpuPass::Atrous1);
+            self.gpu_profiler.end_event(&self.command_list);
             self.filter_diffuse_pong.as_mut().unwrap().transition(
                 &self.command_list,
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -622,7 +666,14 @@ impl Dx12Renderer {
                     .gpu_handle(ATROUS_PONG_TO_PING_BASES[current_history]),
                 &[4, 2],
             );
+            self.gpu_profiler
+                .begin(&self.command_list, frame_index, GpuPass::Atrous2);
+            self.gpu_profiler
+                .begin_event(&self.command_list, GpuPass::Atrous2);
             self.command_list.Dispatch(groups_x, groups_y, 1);
+            self.gpu_profiler
+                .end(&self.command_list, frame_index, GpuPass::Atrous2);
+            self.gpu_profiler.end_event(&self.command_list);
             self.filter_diffuse_ping.as_mut().unwrap().transition(
                 &self.command_list,
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -646,7 +697,14 @@ impl Dx12Renderer {
                     .gpu_handle(ATROUS_PING_TO_PONG_BASES[current_history]),
                 &[8, 3],
             );
+            self.gpu_profiler
+                .begin(&self.command_list, frame_index, GpuPass::Atrous3);
+            self.gpu_profiler
+                .begin_event(&self.command_list, GpuPass::Atrous3);
             self.command_list.Dispatch(groups_x, groups_y, 1);
+            self.gpu_profiler
+                .end(&self.command_list, frame_index, GpuPass::Atrous3);
+            self.gpu_profiler.end_event(&self.command_list);
             self.filter_diffuse_pong.as_mut().unwrap().transition(
                 &self.command_list,
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -657,9 +715,12 @@ impl Dx12Renderer {
             );
             self.gpu_profiler
                 .end(&self.command_list, frame_index, GpuPass::Atrous);
+            self.gpu_profiler.end_event(&self.command_list);
 
             self.gpu_profiler
                 .begin(&self.command_list, frame_index, GpuPass::ToneMap);
+            self.gpu_profiler
+                .begin_event(&self.command_list, GpuPass::ToneMap);
             let display_output = self.display_output.as_mut().unwrap();
             display_output.transition(&self.command_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             self.tonemap_pipeline.bind(
@@ -671,7 +732,12 @@ impl Dx12Renderer {
             self.command_list.Dispatch(groups_x, groups_y, 1);
             self.gpu_profiler
                 .end(&self.command_list, frame_index, GpuPass::ToneMap);
+            self.gpu_profiler.end_event(&self.command_list);
             display_output.transition(&self.command_list, D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+            self.gpu_profiler
+                .end(&self.command_list, frame_index, GpuPass::Total);
+            self.gpu_profiler.end_event(&self.command_list);
 
             let render_target = self.render_targets[frame_index].as_mut().unwrap();
             render_target.transition(&self.command_list, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -679,8 +745,6 @@ impl Dx12Renderer {
                 .CopyResource(render_target.resource(), display_output.resource());
             render_target.transition(&self.command_list, D3D12_RESOURCE_STATE_PRESENT);
             display_output.transition(&self.command_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            self.gpu_profiler
-                .end(&self.command_list, frame_index, GpuPass::Total);
             self.gpu_profiler
                 .resolve_frame(&self.command_list, frame_index);
             self.command_list.Close()?;
@@ -696,6 +760,7 @@ impl Dx12Renderer {
             self.next_fence_value += 1;
             self.command_queue.Signal(&self.fence, fence_value)?;
             self.frames[frame_index].fence_value = fence_value;
+            self.frames[frame_index].timing_valid = !self.reset_history;
             self._scene_geometry.commit_animation(self.animate_model);
             self.frame_number = self.frame_number.wrapping_add(1);
             self.accumulated_frames = self.accumulated_frames.saturating_add(1);
@@ -719,6 +784,7 @@ impl Dx12Renderer {
 
         unsafe {
             self.wait_for_gpu()?;
+            self.gpu_profiler.invalidate();
             // 命令列表会持有上一帧 Back Buffer 的引用；重置后再释放资源，
             // 否则 ResizeBuffers 会因仍有外部引用而返回 DXGI_ERROR_INVALID_CALL。
             let frame_index = self.swap_chain.GetCurrentBackBufferIndex() as usize;
@@ -754,6 +820,7 @@ impl Dx12Renderer {
             )?;
             for frame in &mut self.frames {
                 frame.fence_value = 0;
+                frame.timing_valid = false;
             }
             self.width = width;
             self.height = height;
@@ -780,6 +847,112 @@ impl Dx12Renderer {
         self.gpu_profiler.time_ms(pass)
     }
 
+    pub fn valid_timing_sample_serial(&self) -> u64 {
+        self.gpu_profiler.valid_sample_serial()
+    }
+
+    pub fn clear_gpu_statistics(&mut self) {
+        self.gpu_profiler.invalidate();
+    }
+
+    pub fn refresh_memory_telemetry(&mut self) {
+        self.memory_telemetry.poll(true);
+    }
+
+    pub fn video_memory_snapshot(&self) -> VideoMemorySnapshot {
+        self.memory_telemetry.snapshot()
+    }
+
+    pub fn video_memory_title(&self) -> String {
+        let memory = self.video_memory_snapshot();
+        match (memory.usage_bytes, memory.budget_bytes, memory.usage_ratio) {
+            (Some(usage), Some(budget), Some(ratio)) => format!(
+                "{:.0}/{:.0} MiB ({:.1}%)",
+                usage as f64 / (1024.0 * 1024.0),
+                budget as f64 / (1024.0 * 1024.0),
+                ratio * 100.0
+            ),
+            _ => "N/A".to_string(),
+        }
+    }
+
+    pub fn output_width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn output_height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn benchmark_json(&self, duration_seconds: u64, warmup_valid_frames: u32) -> String {
+        benchmark_json_line(
+            &self.gpu_name,
+            self.width,
+            self.height,
+            duration_seconds,
+            warmup_valid_frames,
+            self.gpu_profiler.statistics(),
+            self.video_memory_snapshot(),
+        )
+    }
+}
+
+fn benchmark_json_line(
+    gpu_name: &str,
+    width: u32,
+    height: u32,
+    duration_seconds: u64,
+    warmup_valid_frames: u32,
+    report: profiler::GpuTimingReport,
+    memory: VideoMemorySnapshot,
+) -> String {
+    let mut json = String::new();
+    let _ = write!(
+        json,
+        "{{\"schema_version\":1,\"gpu_name\":{:?},\"output_width\":{},\"output_height\":{},\"render_width\":{},\"render_height\":{},\"benchmark_seconds\":{},\"warmup_valid_frames\":{},\"valid_samples\":{},\"passes\":{{",
+        gpu_name,
+        width,
+        height,
+        width,
+        height,
+        duration_seconds,
+        warmup_valid_frames,
+        report.pass(GpuPass::Total).valid_samples,
+    );
+    append_json_pass(&mut json, "total", report.pass(GpuPass::Total), true);
+    append_json_pass(
+        &mut json,
+        "acceleration_structure",
+        report.pass(GpuPass::AccelerationStructure),
+        false,
+    );
+    append_json_pass(
+        &mut json,
+        "path_trace",
+        report.pass(GpuPass::PathTrace),
+        false,
+    );
+    append_json_pass(&mut json, "temporal", report.pass(GpuPass::Temporal), false);
+    append_json_pass(&mut json, "atrous", report.pass(GpuPass::Atrous), false);
+    append_json_pass(&mut json, "atrous_0", report.pass(GpuPass::Atrous0), false);
+    append_json_pass(&mut json, "atrous_1", report.pass(GpuPass::Atrous1), false);
+    append_json_pass(&mut json, "atrous_2", report.pass(GpuPass::Atrous2), false);
+    append_json_pass(&mut json, "atrous_3", report.pass(GpuPass::Atrous3), false);
+    append_json_pass(&mut json, "tone_map", report.pass(GpuPass::ToneMap), false);
+    json.push_str("},\"memory\":{");
+    append_json_optional_u64(&mut json, "usage_bytes", memory.usage_bytes, true);
+    append_json_optional_u64(&mut json, "budget_bytes", memory.budget_bytes, false);
+    append_json_optional_f64(&mut json, "usage_ratio", memory.usage_ratio, false);
+    let status = match memory.status {
+        VideoMemoryStatus::Available => "available",
+        VideoMemoryStatus::Adapter3Unavailable => "adapter3_unavailable",
+        VideoMemoryStatus::QueryFailed => "query_failed",
+    };
+    let _ = write!(json, ",\"status\":{:?}}}}}", status);
+    json
+}
+
+impl Dx12Renderer {
     pub fn shader_status(&self) -> &str {
         &self.shader_status
     }
@@ -1151,6 +1324,10 @@ impl Dx12Renderer {
 
     fn rebuild_shader_pipelines(&mut self, shaders: ReloadedShaders) -> Result<()> {
         unsafe { self.wait_for_gpu()? };
+        self.gpu_profiler.invalidate();
+        for frame in &mut self.frames {
+            frame.timing_valid = false;
+        }
         let raytracing = RaytracingPipeline::new(&self.device, &shaders.raytracing)?;
         let temporal = ComputePipeline::new(
             &self.device,
@@ -1301,7 +1478,9 @@ impl Drop for Dx12Renderer {
     }
 }
 
-unsafe fn create_hardware_device(factory: &IDXGIFactory6) -> Result<ID3D12Device> {
+unsafe fn create_hardware_device(
+    factory: &IDXGIFactory6,
+) -> Result<(ID3D12Device, IDXGIAdapter1, String)> {
     let mut adapter_index = 0;
     loop {
         let adapter = match unsafe {
@@ -1337,11 +1516,9 @@ unsafe fn create_hardware_device(factory: &IDXGIFactory6) -> Result<ID3D12Device
                 .iter()
                 .position(|character| *character == 0)
                 .unwrap_or(description.Description.len());
-            println!(
-                "DX12 适配器：{}",
-                String::from_utf16_lossy(&description.Description[..name_end])
-            );
-            return Ok(device);
+            let gpu_name = String::from_utf16_lossy(&description.Description[..name_end]);
+            eprintln!("DX12 适配器：{}", gpu_name);
+            return Ok((device, adapter, gpu_name));
         }
     }
 }
@@ -1364,6 +1541,44 @@ fn window_hwnd(window: &Window) -> Result<HWND> {
 
 fn dx_error(stage: &str, error: WindowsError) -> WindowsError {
     WindowsError::new(error.code(), format!("{stage}：{error}"))
+}
+
+fn append_json_pass(json: &mut String, name: &str, stats: profiler::GpuTimingStats, first: bool) {
+    if !first {
+        json.push(',');
+    }
+    let _ = write!(json, "{:?}:{{", name);
+    append_json_optional_f64(json, "p50_ms", stats.p50_ms, true);
+    append_json_optional_f64(json, "p95_ms", stats.p95_ms, false);
+    let _ = write!(json, ",\"valid_samples\":{}}}", stats.valid_samples);
+}
+
+fn append_json_optional_u64(json: &mut String, name: &str, value: Option<u64>, first: bool) {
+    if !first {
+        json.push(',');
+    }
+    match value {
+        Some(value) => {
+            let _ = write!(json, "{:?}:{}", name, value);
+        }
+        None => {
+            let _ = write!(json, "{:?}:null", name);
+        }
+    }
+}
+
+fn append_json_optional_f64(json: &mut String, name: &str, value: Option<f64>, first: bool) {
+    if !first {
+        json.push(',');
+    }
+    match value {
+        Some(value) if value.is_finite() => {
+            let _ = write!(json, "{:?}:{value:.6}", name);
+        }
+        _ => {
+            let _ = write!(json, "{:?}:null", name);
+        }
+    }
 }
 
 fn device_removed_error(device: &ID3D12Device, present_error: WindowsError) -> WindowsError {
@@ -1462,5 +1677,32 @@ mod tests {
             assert!(pair[0].1 <= pair[1].0, "descriptor tables overlap");
         }
         assert!(ranges.last().unwrap().1 <= SHADER_DESCRIPTOR_COUNT);
+    }
+
+    #[test]
+    fn benchmark_json_is_single_line_and_has_stable_pass_and_memory_fields() {
+        let report = profiler::GpuTimingReport {
+            passes: [profiler::GpuTimingStats {
+                p50_ms: Some(1.25),
+                p95_ms: Some(2.5),
+                valid_samples: 240,
+            }; profiler::PASS_COUNT],
+        };
+        let memory = VideoMemorySnapshot {
+            usage_bytes: Some(512),
+            budget_bytes: Some(1_024),
+            usage_ratio: Some(0.5),
+            status: VideoMemoryStatus::Available,
+        };
+        let json = benchmark_json_line("RTX 4060 \"Laptop\"", 1280, 720, 30, 120, report, memory);
+        assert!(!json.contains(['\r', '\n']));
+        assert!(json.starts_with("{\"schema_version\":1,"));
+        assert!(json.ends_with("}}"));
+        assert!(json.contains("\"gpu_name\":\"RTX 4060 \\\"Laptop\\\"\""));
+        assert!(json.contains("\"atrous_0\":{\"p50_ms\":1.250000"));
+        assert!(json.contains("\"tone_map\":{\"p50_ms\":1.250000"));
+        assert!(
+            json.contains("\"usage_bytes\":512,\"budget_bytes\":1024,\"usage_ratio\":0.500000")
+        );
     }
 }

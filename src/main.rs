@@ -63,11 +63,17 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
     let cpu_reference_requested = arguments
         .iter()
         .any(|argument| argument == "--cpu-reference");
-    let realtime_requested = arguments
-        .iter()
-        .any(|argument| matches!(argument.as_str(), "--model" | "--animate-model"));
+    let realtime_requested = arguments.iter().any(|argument| {
+        matches!(
+            argument.as_str(),
+            "--model" | "--animate-model" | "--benchmark-seconds"
+        )
+    });
     if cpu_reference_requested && realtime_requested {
-        return Err("--cpu-reference 不能与 --model 或 --animate-model 同时使用".to_string());
+        return Err(
+            "--cpu-reference 不能与实时渲染选项（--model、--animate-model、--benchmark-seconds）同时使用"
+                .to_string(),
+        );
     }
 
     if !cpu_reference_requested {
@@ -84,6 +90,10 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                     config.model_path = Some(path);
                 }
                 "--animate-model" => config.animate_model = true,
+                "--benchmark-seconds" => {
+                    let value = arguments.next().ok_or("--benchmark-seconds 缺少数值")?;
+                    config.benchmark_seconds = Some(parse_benchmark_seconds(&value)?);
+                }
                 _ => return Err(format!("未知参数：{argument}")),
             }
         }
@@ -131,18 +141,34 @@ fn parse_seed(value: &str) -> Result<u64, String> {
     parsed.map_err(|_| format!("无效的随机种子：{value}"))
 }
 
+const MAX_BENCHMARK_SECONDS: u32 = 3600;
+
+fn parse_benchmark_seconds(value: &str) -> Result<u32, String> {
+    let seconds = value
+        .parse::<u32>()
+        .map_err(|_| format!("无效的 benchmark 时长：{value}"))?;
+    if seconds == 0 {
+        return Err("benchmark 时长必须大于零".to_string());
+    }
+    if seconds > MAX_BENCHMARK_SECONDS {
+        return Err(format!("benchmark 时长不能超过 {MAX_BENCHMARK_SECONDS} 秒"));
+    }
+    Ok(seconds)
+}
+
 fn print_help() {
     println!(
         "RayTracingDemo\n\n\
          用法：\n  \
          cargo run --release                 启动实时 DX12 窗口\n  \
-         cargo run --release -- --model <路径> [--animate-model]\n  \
+         cargo run --release -- --model <路径> [--animate-model] [--benchmark-seconds <秒>]\n  \
          cargo run --release -- --cpu-reference [选项]\n\n\
          选项：\n  \
          --samples <数量>       每像素采样数，默认 1\n  \
          --seed <整数或十六进制> 固定随机种子\n  \
          --output-dir <目录>    输出目录，默认 output/cpu-reference\n  \
          --skip-denoise         只保存原始路径追踪结果\n  \
+         --benchmark-seconds <秒> 预热后输出固定格式 GPU JSON 报告（1..3600）\n  \
          --help, -h             显示帮助"
     );
 }
@@ -150,6 +176,7 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::realtime::RealtimeConfig;
 
     #[test]
     fn parses_decimal_and_hexadecimal_seeds() {
@@ -186,6 +213,32 @@ mod tests {
     fn rejects_realtime_options_with_cpu_reference() {
         let result =
             parse_arguments(["--cpu-reference".to_string(), "--animate-model".to_string()]);
+        assert!(matches!(result, Err(message) if message.contains("不能与")));
+    }
+
+    #[test]
+    fn parses_and_bounds_benchmark_duration() {
+        let command =
+            parse_arguments(["--benchmark-seconds".to_string(), "30".to_string()]).unwrap();
+        assert!(matches!(
+            command,
+            Command::Realtime(RealtimeConfig {
+                benchmark_seconds: Some(30),
+                ..
+            })
+        ));
+        assert!(parse_benchmark_seconds("0").is_err());
+        assert!(parse_benchmark_seconds("3601").is_err());
+        assert!(parse_benchmark_seconds("abc").is_err());
+    }
+
+    #[test]
+    fn benchmark_option_is_not_allowed_with_cpu_reference() {
+        let result = parse_arguments([
+            "--cpu-reference".to_string(),
+            "--benchmark-seconds".to_string(),
+            "30".to_string(),
+        ]);
         assert!(matches!(result, Err(message) if message.contains("不能与")));
     }
 }
