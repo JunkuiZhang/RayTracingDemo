@@ -290,18 +290,27 @@ impl SceneGeometry {
         &self.instance_data
     }
 
-    pub fn prepare_animation(&mut self, elapsed: Duration, animate_model: bool) {
+    pub fn prepare_animation(&mut self, elapsed: Duration, animate_model: bool) -> bool {
         if !animate_model || self.animated_instance_indices.is_empty() {
-            return;
+            return false;
         }
-        let rotation = glam::Mat4::from_rotation_y(elapsed.as_secs_f32() * 0.35);
+        let rotation = animation_rotation(elapsed);
+        let dirty = animation_dirty(
+            &self.current_transforms,
+            &self.base_transforms,
+            &self.animated_instance_indices,
+            elapsed,
+            animate_model,
+        );
         for &index in &self.animated_instance_indices {
-            self.current_transforms[index] = rotation * self.base_transforms[index];
+            let current = rotation * self.base_transforms[index];
+            self.current_transforms[index] = current;
             let rows = matrix_rows(self.previous_transforms[index]);
             self.instance_data[index].previous_object_to_world_row0 = rows[0];
             self.instance_data[index].previous_object_to_world_row1 = rows[1];
             self.instance_data[index].previous_object_to_world_row2 = rows[2];
         }
+        dirty
     }
 
     pub fn commit_animation(&mut self, animate_model: bool) {
@@ -312,6 +321,26 @@ impl SceneGeometry {
             self.previous_transforms[index] = self.current_transforms[index];
         }
     }
+}
+
+fn animation_rotation(elapsed: Duration) -> glam::Mat4 {
+    glam::Mat4::from_rotation_y(elapsed.as_secs_f32() * 0.35)
+}
+
+fn animation_dirty(
+    current_transforms: &[glam::Mat4],
+    base_transforms: &[glam::Mat4],
+    animated_instance_indices: &[usize],
+    elapsed: Duration,
+    animate_model: bool,
+) -> bool {
+    if !animate_model {
+        return false;
+    }
+    let rotation = animation_rotation(elapsed);
+    animated_instance_indices
+        .iter()
+        .any(|&index| current_transforms[index] != rotation * base_transforms[index])
 }
 
 fn matrix_to_d3d12_transform(matrix: glam::Mat4) -> [f32; 12] {
@@ -380,7 +409,6 @@ impl AccelerationStructures {
         let command_list4: ID3D12GraphicsCommandList4 = command_list.cast()?;
         let mut blas = Vec::with_capacity(geometry.primitive_count());
         let mut blas_infos = Vec::with_capacity(geometry.primitive_count());
-        let mut scratch_size = 0_u64;
         for primitive_index in 0..geometry.primitive_count() {
             let geometry_desc = geometry.geometry_desc(primitive_index);
             let blas_inputs = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS {
@@ -396,7 +424,6 @@ impl AccelerationStructures {
             unsafe {
                 device5.GetRaytracingAccelerationStructurePrebuildInfo(&blas_inputs, &mut info);
             }
-            scratch_size = scratch_size.max(info.ScratchDataSizeInBytes);
             blas_infos.push(info);
             blas.push(create_default_buffer(
                 device,
@@ -442,7 +469,7 @@ impl AccelerationStructures {
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
         )?;
-        scratch_size = scratch_size.max(tlas_info.ScratchDataSizeInBytes);
+        let scratch_size = required_scratch_size(&blas_infos, &tlas_info);
         let scratch = create_default_buffer(
             device,
             scratch_size,
@@ -543,6 +570,21 @@ impl AccelerationStructures {
     pub fn release_build_resources(&mut self) {
         // TLAS update keeps this scratch allocation alive for the renderer lifetime.
     }
+}
+
+fn required_scratch_size(
+    blas_infos: &[D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO],
+    tlas_info: &D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO,
+) -> u64 {
+    blas_infos
+        .iter()
+        .map(|info| info.ScratchDataSizeInBytes)
+        .chain([
+            tlas_info.ScratchDataSizeInBytes,
+            tlas_info.UpdateScratchDataSizeInBytes,
+        ])
+        .max()
+        .unwrap_or(0)
 }
 
 fn uav_barrier(command_list: &ID3D12GraphicsCommandList, resource: &ID3D12Resource) {
@@ -1014,5 +1056,38 @@ mod tests {
         let dielectric_diffuse_weight = (1.0 - 0.0) * (1.0 - fresnel_schlick(0.5, 0.04));
         assert!(metallic_diffuse_weight.abs() < 1.0e-6);
         assert!(dielectric_diffuse_weight > 0.0);
+    }
+
+    #[test]
+    fn tlas_update_scratch_is_included_in_required_capacity() {
+        let blas = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO {
+            ScratchDataSizeInBytes: 64,
+            ..Default::default()
+        };
+        let tlas = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO {
+            ScratchDataSizeInBytes: 128,
+            UpdateScratchDataSizeInBytes: 512,
+            ..Default::default()
+        };
+        assert_eq!(required_scratch_size(&[blas], &tlas), 512);
+    }
+
+    #[test]
+    fn static_scene_does_not_mark_acceleration_structure_dirty() {
+        let base = [glam::Mat4::from_translation(glam::Vec3::new(2.0, 0.0, 0.0))];
+        assert!(!animation_dirty(
+            &base,
+            &base,
+            &[0],
+            Duration::from_secs(1),
+            false,
+        ));
+        assert!(animation_dirty(
+            &base,
+            &base,
+            &[0],
+            Duration::from_secs(1),
+            true,
+        ));
     }
 }

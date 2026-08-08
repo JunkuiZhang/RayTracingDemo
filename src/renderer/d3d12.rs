@@ -431,13 +431,16 @@ impl Dx12Renderer {
                 frame_index,
                 GpuPass::AccelerationStructure,
             );
-            self._scene_geometry
+            let acceleration_dirty = self
+                ._scene_geometry
                 .prepare_animation(self.animation_start.elapsed(), self.animate_model);
-            self._acceleration_structures.update(
-                &self.command_list,
-                frame_index,
-                &self._scene_geometry,
-            )?;
+            if acceleration_dirty {
+                self._acceleration_structures.update(
+                    &self.command_list,
+                    frame_index,
+                    &self._scene_geometry,
+                )?;
+            }
             self.gpu_profiler.end(
                 &self.command_list,
                 frame_index,
