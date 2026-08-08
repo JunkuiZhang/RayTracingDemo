@@ -1540,7 +1540,10 @@ impl Dx12Renderer {
         };
         match result {
             Ok(shaders) => match self.rebuild_shader_pipelines(shaders) {
-                Ok(()) => self.shader_status = "热重载成功".to_string(),
+                Ok(()) => {
+                    self.shader_status = "热重载成功".to_string();
+                    eprintln!("Shader 热重载成功");
+                }
                 Err(error) => {
                     self.shader_status = format!("热重载管线失败：{error}");
                     eprintln!("{}", self.shader_status);
