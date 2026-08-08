@@ -834,7 +834,7 @@ Rust 只传递稳定的句柄、枚举和 POD 结构，禁止跨 FFI 传递 Rust
 
 8C 通过 `--command-recording-mode baseline|optimized` 保留 A/B：optimized 把 steady-state tracked transition API 调用从 58 降至 11，transition 元素保持 58，baseline À-Trous pipeline bind 从 4 降至 1。RTX 4060 Laptop GPU 三档各三次 30 秒数值矩阵和 Debug GPU Validation 已通过数值门槛，命令记录默认已切换为 optimized，baseline 继续作为显式回退路径；自动截图/逐视图像素对比仍须在 8G 前补齐。完整原始数据见阶段 8 执行计划 9.3。
 
-8D 增加 `--acceleration-structure-mode baseline|optimized`：optimized 使用 Phase A build/postbuild readback、CPU committed-allocation 决策和 Phase B compact copy/TLAS build，并按真实动画能力决定 TLAS update 与 scratch 常驻。RTX 4060 Laptop 的 Cornell 和小型 glTF 均因 64 KiB allocation 粒度没有执行 compact copy，因此 AS 默认继续 baseline；大 BLAS 和画面对比仍待验收。下一代码工作包为 8E-1：解耦输出尺寸与内部渲染尺寸。
+8D 增加 `--acceleration-structure-mode baseline|optimized`：optimized 使用 Phase A build/postbuild readback、CPU committed-allocation 决策和 Phase B compact copy/TLAS build，并按真实动画能力决定 TLAS update 与 scratch 常驻。RTX 4060 Laptop 的 Cornell 和小型 glTF 均因 64 KiB allocation 粒度没有执行 compact copy，因此 AS 默认继续 baseline；大 BLAS 和画面对比仍待验收。下一代码工作包为 8E-1：解耦输出尺寸与内部渲染尺寸；详细实施边界、资源代际设计和 Luna 提示词见 [`阶段8E1输出与内部渲染尺寸解耦执行方案.md`](阶段8E1输出与内部渲染尺寸解耦执行方案.md)，当前尚未实现。
 
 阶段 7 的历史 Release Cornell 基线为：1280×720 Total 10.87 ms、1600×900 Total 16.51 ms、1920×1080 Total 24.45 ms。它们不包含 AS 区间且仅显示最近样本，不能直接用作阶段 8 的最终验收数据。
 
