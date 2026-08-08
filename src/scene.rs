@@ -160,9 +160,15 @@ impl SceneAsset {
             primitive.material_index += material_offset;
         }
         let instance_offset = self.instances.len();
-        for instance in &mut other.instances {
+        let stable_id_base = self
+            .instances
+            .iter()
+            .map(|instance| instance.stable_id)
+            .max()
+            .map_or(0, |maximum| maximum.saturating_add(1));
+        for (local_index, instance) in other.instances.iter_mut().enumerate() {
             instance.primitive_index += primitive_offset;
-            instance.stable_id += instance_offset as u32;
+            instance.stable_id = stable_id_base.saturating_add(local_index as u32);
         }
         let animated_instances = other
             .animated_root_instances
@@ -184,6 +190,23 @@ impl SceneAsset {
         }
         if self.materials.is_empty() {
             return Err("场景没有材质".to_string());
+        }
+        for (material_index, material) in self.materials.iter().enumerate() {
+            for (texture_name, texture_index) in [
+                ("base_color", material.base_color_texture),
+                ("metallic_roughness", material.metallic_roughness_texture),
+                ("normal", material.normal_texture),
+                ("emissive", material.emissive_texture),
+            ] {
+                if let Some(texture_index) = texture_index
+                    && texture_index >= self.images.len()
+                {
+                    return Err(format!(
+                        "material {material_index} 的 {texture_name} texture {texture_index} 越界（图片数 {}）",
+                        self.images.len()
+                    ));
+                }
+            }
         }
         for (primitive_index, primitive) in self.primitives.iter().enumerate() {
             if primitive.vertices.is_empty() {
@@ -299,5 +322,13 @@ mod tests {
                 .enumerate()
                 .all(|(index, instance)| instance.stable_id == index as u32)
         );
+    }
+
+    #[test]
+    fn scene_validation_rejects_out_of_range_texture_reference() {
+        let mut scene = SceneAsset::cornell_box();
+        scene.materials[0].base_color_texture = Some(0);
+        let error = scene.validate().unwrap_err();
+        assert!(error.contains("base_color texture 0 越界"));
     }
 }

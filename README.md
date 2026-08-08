@@ -112,10 +112,27 @@ RayTracingDemo - 阶段 2 | FPS 240 | GPU 0.422 ms | Shader 内嵌 DXIL
 
 按 `F1` 可依次查看最终结果、原始 1 SPP、反照率、法线/粗糙度、深度、运动矢量、方差、历史拒绝原因、历史长度、物体/材质 ID 和镜面命中距离。窗口标题分别显示 Path Trace、Temporal 和 À-Trous GPU 时间。
 
+## 阶段 7：动态场景与 glTF
+
+阶段 7 将默认 Cornell Box 和导入场景统一为 `SceneAsset` 路径，支持静态 glTF 2.0 网格、节点层级、多实例、PBR metallic-roughness 材质、RGBA8 图片以及刚体实例动画：
+
+```powershell
+cargo run --release
+cargo run --release -- --model assets/gltf/Triangle/Triangle.gltf
+cargo run --release -- --model assets/gltf/NonIndexedMultiNode/NonIndexedMultiNode.gltf --animate-model
+```
+
+`--model` 只接受本地 `.gltf`/`.glb` 文件；`--animate-model` 让导入实例按绝对时间绕 Y 轴旋转。每个唯一 mesh primitive 共享一个 BLAS，每个 node-primitive 生成一个 TLAS instance，动画帧只更新三帧 Frame Context 分片中的实例描述和 TLAS，不在每帧等待 GPU。
+
+材质使用 glTF 的 base color、metallic-roughness、normal 和 emissive factor/texture。base color/emissive 使用 sRGB SRV，metallic-roughness/normal 使用线性 SRV，metallic-roughness 严格读取 G=roughness、B=metallic。缺失纹理使用预初始化 fallback；normal texture 但 primitive 缺少 tangent 时禁用 normal map并输出警告。
+
+当前明确不支持并会报错：非 OPAQUE alpha、skin、morph target、animation channel、非 TRIANGLES primitive 和 `extensionsRequired`。压缩纹理、运行时网络下载、完整动画系统、阶段 8/9/10 优化也不在本阶段范围内。
+
 ## 检查项目
 
 ```powershell
 cargo fmt -- --check
-cargo check
-cargo test
+cargo test --all-targets
+cargo clippy --all-targets -- -D warnings
+cargo build --release
 ```
