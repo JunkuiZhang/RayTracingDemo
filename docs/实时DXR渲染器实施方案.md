@@ -826,9 +826,11 @@ Rust 只传递稳定的句柄、枚举和 POD 结构，禁止跨 FFI 传递 Rust
 
 ### 阶段 8：性能优化
 
-当前状态：**方案已制定，尚未实现**。详细的工作包、验收矩阵、提交顺序和 Luna 交付要求见 [`阶段8性能优化执行计划.md`](阶段8性能优化执行计划.md)。
+当前状态：**8A 可信 GPU 基线和显存遥测已实现；8A 长时真机验收及 8B–8G 尚未完成**。详细的工作包、验收矩阵、提交顺序和 Luna 交付要求见 [`阶段8性能优化执行计划.md`](阶段8性能优化执行计划.md)。因此本阶段仍不能标记为完成。
 
-当前 Release Cornell 基线为：1280×720 Total 10.87 ms、1600×900 Total 16.51 ms、1920×1080 Total 24.45 ms。现有 `Total` 不包含 AS 区间且仅显示最近样本，阶段 8 必须先修正测量口径，不能直接用这些数值宣告性能达标。
+8A 已将 `Total` 从 AS build/update 前开始到 ToneMap 完成后结束，并排除了 Present/垂直同步；同时记录 AS、Path Trace、Temporal、À-Trous 聚合及 0/1/2/3 子迭代、ToneMap。profiler 使用三帧 Frame Context 的 query/readback 槽，只有对应 fence 完成后才读取；统计窗口固定保留最近 240 个有效样本并提供 p50/p95。`--benchmark-seconds <1..3600>` 在 120 个有效帧预热后输出单行稳定 JSON，显存字段来自所选 adapter 的 IDXGIAdapter3 local segment 查询，查询间隔约 500 ms。
+
+阶段 7 的历史 Release Cornell 基线为：1280×720 Total 10.87 ms、1600×900 Total 16.51 ms、1920×1080 Total 24.45 ms。它们不包含 AS 区间且仅显示最近样本，不能直接用作阶段 8 的最终验收数据。
 
 工作内容：
 

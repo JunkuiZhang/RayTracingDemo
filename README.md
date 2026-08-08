@@ -134,6 +134,18 @@ cargo run --release -- --model assets/gltf/NonIndexedMultiNode/NonIndexedMultiNo
 
 仓库内的 `assets/gltf/TextureSampler` 是项目内生成的离线回归夹具；公开 Khronos `BoxTextured`/`DamagedHelmet` 资产不随仓库自动下载。
 
+## 阶段 8：性能优化（8A）
+
+8A 已建立可信 GPU 基线和显存遥测，但阶段 8 尚未完成。窗口标题显示阶段 8、最近有效 GPU Total、输出尺寸和 local VRAM usage/budget；PIX capture 可按 AS、Path Trace、Temporal、À-Trous 0/1/2/3 和 ToneMap 区分事件。
+
+Release benchmark 在 120 个有效 GPU 帧预热后采样指定时长，stdout 最终输出恰好一行 JSON：
+
+```powershell
+target\release\ray_tracing_demo.exe --benchmark-seconds 30
+```
+
+JSON 包含实际 GPU 名称、输出/内部尺寸、有效样本数、Total/AS/Path Trace/Temporal/À-Trous 聚合与四次迭代/ToneMap 的 p50/p95，以及显存 usage/budget。`Present(1)` 的 FPS 不参与 GPU 统计。8B 的 shared memory、8D 的 AS 压缩和 8E 的动态分辨率尚未实施。
+
 ## 检查项目
 
 ```powershell
