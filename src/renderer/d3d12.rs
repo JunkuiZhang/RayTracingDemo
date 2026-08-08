@@ -20,7 +20,9 @@ use winit::{
 use crate::{
     as_policy::AccelerationStructureStats,
     realtime::{AtrousMode, CommandRecordingMode, RealtimeConfig},
-    resolution::{Extent2D, RenderScale, render_extent},
+    resolution::{
+        Extent2D, RenderExtentChange, RenderScale, classify_render_extent_change, render_extent,
+    },
     scene::{MAX_SCENE_SAMPLERS, SceneAsset, gltf_loader},
 };
 
@@ -153,7 +155,7 @@ pub struct Dx12Renderer {
     benchmark_generation_create_baseline: u64,
     benchmark_generation_switch_baseline: u64,
     benchmark_generation_retired_baseline: u64,
-    benchmark_retired_high_watermark_baseline: u64,
+    benchmark_retired_high_watermark: u64,
     benchmark_gpu_idle_wait_baseline: u64,
     benchmark_render_scale_noop_baseline: u64,
     benchmark_render_min: Extent2D,
@@ -425,7 +427,7 @@ impl Dx12Renderer {
                 benchmark_generation_create_baseline: 1,
                 benchmark_generation_switch_baseline: 0,
                 benchmark_generation_retired_baseline: 0,
-                benchmark_retired_high_watermark_baseline: 0,
+                benchmark_retired_high_watermark: 0,
                 benchmark_gpu_idle_wait_baseline: 0,
                 benchmark_render_scale_noop_baseline: 0,
                 benchmark_render_min: render_extent,
@@ -943,13 +945,24 @@ impl Dx12Renderer {
     /// the old generation remains owned until its submission fence completes.
     pub fn set_render_scale(&mut self, requested: RenderScale) -> Result<()> {
         let output_extent = self.active_generation.output_extent;
-        let new_render_extent = render_extent(output_extent, requested);
-        if new_render_extent == self.active_generation.render_extent {
-            self.requested_render_scale = requested;
-            self.render_scale_quantized_noop_count =
-                self.render_scale_quantized_noop_count.saturating_add(1);
-            return Ok(());
-        }
+        let new_render_extent = match classify_render_extent_change(
+            self.minimized,
+            output_extent,
+            self.active_generation.render_extent,
+            requested,
+        ) {
+            RenderExtentChange::DeferredWhileMinimized => {
+                self.requested_render_scale = requested;
+                return Ok(());
+            }
+            RenderExtentChange::QuantizedNoop => {
+                self.requested_render_scale = requested;
+                self.render_scale_quantized_noop_count =
+                    self.render_scale_quantized_noop_count.saturating_add(1);
+                return Ok(());
+            }
+            RenderExtentChange::Recreate(extent) => extent,
+        };
 
         let generation_id = self.next_generation_id;
         let new_generation = RenderResourceGeneration::new(
@@ -984,6 +997,11 @@ impl Dx12Renderer {
             self.retired_generation_high_watermark = self
                 .retired_generation_high_watermark
                 .max(self.retired_generations.len() as u64);
+            if self.benchmark_measurement_active {
+                self.benchmark_retired_high_watermark = self
+                    .benchmark_retired_high_watermark
+                    .max(self.retired_generations.len() as u64);
+            }
         }
         self.render_extent_change_count = self.render_extent_change_count.saturating_add(1);
         self.request_history_reset();
@@ -1074,7 +1092,7 @@ impl Dx12Renderer {
         self.benchmark_generation_create_baseline = self.render_generation_create_count;
         self.benchmark_generation_switch_baseline = self.render_generation_switch_count;
         self.benchmark_generation_retired_baseline = self.render_generation_retired_count;
-        self.benchmark_retired_high_watermark_baseline = self.retired_generation_high_watermark;
+        self.benchmark_retired_high_watermark = self.retired_generations.len() as u64;
         self.benchmark_gpu_idle_wait_baseline = self.gpu_idle_wait_count;
         self.benchmark_render_scale_noop_baseline = self.render_scale_quantized_noop_count;
         self.benchmark_render_min = self.active_generation.render_extent;
@@ -1151,9 +1169,7 @@ impl Dx12Renderer {
                     .render_generation_retired_count
                     .saturating_sub(self.benchmark_generation_retired_baseline),
                 retired_generation_count: self.retired_generation_count() as u64,
-                retired_generation_high_watermark: self
-                    .retired_generation_high_watermark
-                    .saturating_sub(self.benchmark_retired_high_watermark_baseline),
+                retired_generation_high_watermark: self.benchmark_retired_high_watermark,
                 gpu_idle_wait_count: self
                     .gpu_idle_wait_count
                     .saturating_sub(self.benchmark_gpu_idle_wait_baseline),
@@ -1990,7 +2006,7 @@ mod tests {
                 render_generation_switch_count: 0,
                 render_generation_retired_count: 0,
                 retired_generation_count: 0,
-                retired_generation_high_watermark: 0,
+                retired_generation_high_watermark: 2,
                 gpu_idle_wait_count: 0,
                 render_scale_quantized_noop_count: 0,
                 render_min: Extent2D {
@@ -2041,6 +2057,7 @@ mod tests {
         assert_eq!(value["render_generation_id"], 1);
         assert_eq!(value["render_generation_create_count"], 0);
         assert_eq!(value["retired_generation_count"], 0);
+        assert_eq!(value["retired_generation_high_watermark"], 2);
         assert_eq!(value["atrous_mode"], "shared");
         assert_eq!(value["command_recording"]["mode"], "optimized");
         assert_eq!(value["command_recording"]["cpu_ms"]["p95_ms"], 0.61);

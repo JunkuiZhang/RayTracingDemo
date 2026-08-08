@@ -826,7 +826,7 @@ Rust 只传递稳定的句柄、枚举和 POD 结构，禁止跨 FFI 传递 Rust
 
 ### 阶段 8：性能优化
 
-当前状态：**8A 可信 GPU 基线和显存遥测已实现；8B shared tile 实验已完成但因实测回退未采纳；8C 屏障批处理和重复绑定清理已采用 optimized 默认并保留回退路径；8D 两阶段 AS 初始化、TLAS 策略和 allocation 遥测已实现，但真实 compact copy、大模型及画面对比尚未验收，AS 默认仍为 baseline；8E-1 输出/内部尺寸解耦代码已实现并完成自动化、四档 Release smoke 和两条 RTX 4060 Laptop Debug Validation，但完整 F1/F2/resize/最小化/恢复/hot-reload 人工矩阵、长时矩阵和截图对比尚未完成；8E-2、8F、8G 尚未完成**。详细工作包和验收矩阵见 [`阶段8性能优化执行计划.md`](阶段8性能优化执行计划.md)，因此本阶段仍不能标记为完成。
+当前状态：**8A 可信 GPU 基线和显存遥测已实现；8B shared tile 实验已完成但因实测回退未采纳；8C 屏障批处理和重复绑定清理已采用 optimized 默认并保留回退路径；8D 两阶段 AS 初始化、TLAS 策略和 allocation 遥测已实现，但真实 compact copy、大模型及画面对比尚未验收，AS 默认仍为 baseline；8E-1 输出/内部尺寸解耦代码、首轮 review 修复、自动化、四档 Release smoke、两条 RTX 4060 Laptop Debug Validation 和 50 次 F2 生命周期验证已完成，但完整 F1/resize/最小化/恢复/hot-reload 人工矩阵、长时矩阵和截图对比尚未完成；8E-2、8F、8G 尚未完成**。详细工作包和验收矩阵见 [`阶段8性能优化执行计划.md`](阶段8性能优化执行计划.md)，因此本阶段仍不能标记为完成。
 
 8A 已将 `Total` 从 AS build/update 前开始到 ToneMap 完成后结束，并排除了 Present/垂直同步；同时记录 AS、Path Trace、Temporal、À-Trous 聚合及 0/1/2/3 子迭代、ToneMap。profiler 使用三帧 Frame Context 的 query/readback 槽，只有对应 fence 完成后才读取；UI 统计窗口固定保留最近 240 个有效样本，benchmark 则使用固定内存直方图覆盖完整测量区间，并在开始时排除尚未完成的预热帧。`--benchmark-seconds <1..3600>` 在 120 个有效帧预热后输出单行稳定 JSON，显存字段来自所选 adapter 的 IDXGIAdapter3 local segment 查询，查询间隔约 500 ms。Microsoft 官方 WinPixEventRuntime x64 DLL 随仓库固定版本部署到可执行文件目录，JSON 会报告 PIX event 是否可用。
 

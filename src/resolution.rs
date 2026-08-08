@@ -30,6 +30,13 @@ pub enum RenderScaleError {
     AboveMaximum,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderExtentChange {
+    DeferredWhileMinimized,
+    QuantizedNoop,
+    Recreate(Extent2D),
+}
+
 impl RenderScale {
     pub const NATIVE: Self = Self(1.0);
     pub const MIN: f32 = 0.5;
@@ -61,6 +68,23 @@ pub fn render_extent(output: Extent2D, scale: RenderScale) -> Extent2D {
     Extent2D {
         width: quantize_dimension(output.width, scale.get()),
         height: quantize_dimension(output.height, scale.get()),
+    }
+}
+
+pub fn classify_render_extent_change(
+    minimized: bool,
+    output: Extent2D,
+    current: Extent2D,
+    requested: RenderScale,
+) -> RenderExtentChange {
+    if minimized {
+        return RenderExtentChange::DeferredWhileMinimized;
+    }
+    let requested_extent = render_extent(output, requested);
+    if requested_extent == current {
+        RenderExtentChange::QuantizedNoop
+    } else {
+        RenderExtentChange::Recreate(requested_extent)
     }
 }
 
@@ -180,6 +204,29 @@ mod tests {
         assert_eq!(
             render_extent(output, RenderScale::new(0.7501).unwrap()),
             render_extent(output, RenderScale::new(0.75).unwrap())
+        );
+    }
+
+    #[test]
+    fn extent_changes_are_deferred_while_minimized() {
+        let output = Extent2D {
+            width: 1920,
+            height: 1080,
+        };
+        assert_eq!(
+            classify_render_extent_change(true, output, output, RenderScale::new(0.67).unwrap(),),
+            RenderExtentChange::DeferredWhileMinimized
+        );
+        assert_eq!(
+            classify_render_extent_change(false, output, output, RenderScale::NATIVE),
+            RenderExtentChange::QuantizedNoop
+        );
+        assert_eq!(
+            classify_render_extent_change(false, output, output, RenderScale::new(0.67).unwrap(),),
+            RenderExtentChange::Recreate(Extent2D {
+                width: 1280,
+                height: 720,
+            })
         );
     }
 }
