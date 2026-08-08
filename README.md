@@ -136,7 +136,7 @@ cargo run --release -- --model assets/gltf/NonIndexedMultiNode/NonIndexedMultiNo
 
 ## 阶段 8：性能优化（8A）
 
-8A 已建立可信 GPU 基线和显存遥测，但阶段 8 尚未完成。窗口标题显示阶段 8、最近有效 GPU Total、输出尺寸和 local VRAM usage/budget；PIX capture 可按 AS、Path Trace、Temporal、À-Trous 0/1/2/3 和 ToneMap 区分事件。
+8A 已建立可信 GPU 基线和显存遥测，但阶段 8 尚未完成。窗口标题显示阶段 8、最近有效 GPU Total、滚动 p95、输出尺寸和 local VRAM usage/budget；PIX capture 可按 AS、Path Trace、Temporal、À-Trous 0/1/2/3 和 ToneMap 区分事件。
 
 Release benchmark 在 120 个有效 GPU 帧预热后采样指定时长，stdout 最终输出恰好一行 JSON：
 
@@ -144,7 +144,9 @@ Release benchmark 在 120 个有效 GPU 帧预热后采样指定时长，stdout 
 target\release\ray_tracing_demo.exe --benchmark-seconds 30
 ```
 
-JSON 包含实际 GPU 名称、输出/内部尺寸、有效样本数、Total/AS/Path Trace/Temporal/À-Trous 聚合与四次迭代/ToneMap 的 p50/p95，以及显存 usage/budget。`Present(1)` 的 FPS 不参与 GPU 统计。8B 的 shared memory、8D 的 AS 压缩和 8E 的动态分辨率尚未实施。
+JSON 包含实际 GPU 名称、输出/内部尺寸范围、分辨率模式、完整测量区间的有效样本数、Total/AS/Path Trace/Temporal/À-Trous 聚合与四次迭代/ToneMap 的 p50/p95、历史/尺寸重置计数、PIX runtime 状态，以及显存 usage/budget。UI 的最近 240 帧滚动窗口不会截断 benchmark；正式测量开始时也会排除三帧 Frame Context 中尚未完成的预热 timestamp。`Present(1)` 的 FPS 不参与 GPU 统计。
+
+项目随仓库固定包含 Microsoft 官方 `WinPixEventRuntime 1.0.240308001` 的 x64 DLL。`build.rs` 会将 DLL 和许可证复制到 Cargo profile 输出目录，程序只从可执行文件旁的绝对路径加载。它仅用于写入 PIX instrumentation；加载失败不影响渲染，但 JSON 中 `pix_events_available` 会为 `false`。来源、哈希和许可证见 [`third_party/winpix/README.md`](third_party/winpix/README.md)。8B 的 shared memory、8D 的 AS 压缩和 8E 的动态分辨率尚未实施。
 
 ## 检查项目
 
