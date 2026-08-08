@@ -38,15 +38,13 @@ impl Camera {
     ) -> Vec<Ray> {
         let mut rays = Vec::with_capacity(samples_per_pixel);
         for sample_index in 0..samples_per_pixel {
-            let target;
-            if sample_index == 0 {
-                target = self.upper_left_point + (col_num as f64 + 0.5) * self.u
-                    - (row_num as f64 + 0.5) * self.v;
+            let target = if sample_index == 0 {
+                self.upper_left_point + (col_num as f64 + 0.5) * self.u
+                    - (row_num as f64 + 0.5) * self.v
             } else {
-                target = self.upper_left_point
-                    + (col_num as f64 + rng.random_range(0.0..1.0)) * self.u
-                    - (row_num as f64 + rng.random_range(0.0..1.0)) * self.v;
-            }
+                self.upper_left_point + (col_num as f64 + rng.random_range(0.0..1.0)) * self.u
+                    - (row_num as f64 + rng.random_range(0.0..1.0)) * self.v
+            };
             let ray = Ray::new(self.position, (target - self.position).normalize());
             rays.push(ray);
         }

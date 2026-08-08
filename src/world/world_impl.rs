@@ -2,7 +2,6 @@ use std::{
     path::PathBuf,
     sync::{Arc, RwLock},
     time::SystemTime,
-    u32,
 };
 
 use image::{ImageBuffer, Rgb};
@@ -63,7 +62,7 @@ impl World {
         thread_pool.shut_down();
 
         self.save_image(&res.0, "origin-img".to_string(), 0);
-        return res;
+        res
     }
 
     fn res_process(&self, thread_pool: &ThreadPool) -> (PixelContainer, GeometryBuffer) {
@@ -89,7 +88,7 @@ impl World {
                 break 'job_loop;
             }
         }
-        return (pixel_res, gbuffer_res);
+        (pixel_res, gbuffer_res)
     }
 
     fn outlier_removal(
@@ -122,7 +121,7 @@ impl World {
 
         let preview = self.remodulate_image(&res_vec, gbuffer);
         self.save_image(&preview, "outlier-removal".to_string(), indicator);
-        return res_vec;
+        res_vec
     }
 
     fn atrous_filter(
@@ -369,7 +368,7 @@ impl World {
                 Point::new([110.0, 0.0, -460.0]),
                 Point::new([280.0, 330.0, -280.0]),
             ],
-            Some(10.0),
+            Some(10.0_f64.to_radians()),
             Arc::new(white),
             objs.len(),
             // Arc::new(blue),
@@ -379,7 +378,7 @@ impl World {
                 Point::new([350.0, 0.0, -270.0]),
                 Point::new([500.0, 150.0, -120.0]),
             ],
-            Some(-5.0),
+            Some((-5.0_f64).to_radians()),
             // None,
             Arc::new(white),
             objs.len(),

@@ -16,7 +16,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use crate::renderer::d3d12::Dx12Renderer;
+use crate::renderer::d3d12::{Dx12Renderer, profiler::GpuPass};
 
 pub fn run() -> Result<(), Box<dyn Error>> {
     // 让窗口、截图工具和 GPU 输出统一使用物理像素，避免 200% 缩放时只截到左上角四分之一。
@@ -94,10 +94,10 @@ impl ApplicationHandler for RealtimeApplication {
                 event_loop.exit();
             }
             WindowEvent::Resized(PhysicalSize { width, height }) => {
-                if let Some(renderer) = self.renderer.as_mut() {
-                    if let Err(error) = renderer.resize(width, height) {
-                        self.fail(event_loop, format!("调整交换链尺寸：{error}"));
-                    }
+                if let Some(renderer) = self.renderer.as_mut()
+                    && let Err(error) = renderer.resize(width, height)
+                {
+                    self.fail(event_loop, format!("调整交换链尺寸：{error}"));
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -112,10 +112,14 @@ impl ApplicationHandler for RealtimeApplication {
                     if elapsed >= Duration::from_millis(500) {
                         let fps = self.frames_since_stats as f64 / elapsed.as_secs_f64();
                         window.set_title(&format!(
-                            "RayTracingDemo - 阶段 6 | FPS {:.0} | GPU {:.3} ms | SPP {} | {} | Shader {}",
+                            "RayTracingDemo - 阶段 6 | FPS {:.0} | GPU {:.2} ms (PT {:.2} T {:.2} A {:.2}) | SPP {} | 视图 {} | {} | {}",
                             fps,
                             renderer.gpu_time_ms(),
+                            renderer.gpu_pass_time_ms(GpuPass::PathTrace),
+                            renderer.gpu_pass_time_ms(GpuPass::Temporal),
+                            renderer.gpu_pass_time_ms(GpuPass::Atrous),
                             renderer.sample_count(),
+                            renderer.debug_view_name(),
                             renderer.raytracing_status(),
                             renderer.shader_status()
                         ));
@@ -140,6 +144,7 @@ impl ApplicationHandler for RealtimeApplication {
                         PhysicalKey::Code(KeyCode::ArrowRight) => renderer.rotate_camera(0.04, 0.0),
                         PhysicalKey::Code(KeyCode::ArrowUp) => renderer.rotate_camera(0.0, 0.04),
                         PhysicalKey::Code(KeyCode::ArrowDown) => renderer.rotate_camera(0.0, -0.04),
+                        PhysicalKey::Code(KeyCode::F1) => renderer.cycle_debug_view(),
                         _ => {}
                     }
                 }

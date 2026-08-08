@@ -42,15 +42,15 @@ impl Hittable for Panel {
         }
         let hit_point = ray_in.at(t);
         if point_in_2d(hit_point, self.points, axis) {
-            return Some(HitInfo {
+            Some(HitInfo {
                 hit_point,
                 t,
                 normal: self.normal,
                 material: self.material.clone(),
                 obj_id: self.id,
-            });
+            })
         } else {
-            return None;
+            None
         }
     }
 
@@ -69,7 +69,7 @@ impl Light for Panel {
             }
             res *= self.points[1].data[n] - self.points[0].data[n];
         }
-        return res;
+        res
     }
 
     fn get_light_color(&self) -> crate::some_math::Color {
@@ -82,12 +82,12 @@ impl HittableLight for Panel {
         let axis = self.normal.get_axis();
         let mut data = [0.0; 3];
         data[axis] = self.points[0].data[axis];
-        for i in 0..3 {
+        for (i, value) in data.iter_mut().enumerate() {
             if i == axis {
                 continue;
             }
-            data[i] = rng.random_range(self.points[0].data[i]..self.points[1].data[i]);
+            *value = rng.random_range(self.points[0].data[i]..self.points[1].data[i]);
         }
-        return (Point::new(data), self.normal);
+        (Point::new(data), self.normal)
     }
 }

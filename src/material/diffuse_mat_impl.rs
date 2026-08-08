@@ -38,11 +38,11 @@ impl Material for DiffuseMat {
 
         let temp_dir = Vector3::new([x, y, z]);
         let scatter_dir = rotate_vec_given_normal(&temp_dir, hit_normal);
-        return ScatterInfo {
+        ScatterInfo {
             scatter_dir,
             color: self.diffuse_color,
             pdf,
-        };
+        }
     }
 
     fn emit(&self) -> Color {

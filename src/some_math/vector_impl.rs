@@ -1,7 +1,6 @@
 use std::{
     fmt::Display,
     ops::{Add, AddAssign, Div, DivAssign, Mul, Sub},
-    usize,
 };
 
 use super::{Color, Vector3, clamp};
@@ -16,16 +15,10 @@ impl Vector3 {
 
     pub fn unit_vec_from_axis(axis: usize) -> Option<Self> {
         match axis {
-            0 => {
-                return Some(Vector3::new([1.0, 0.0, 0.0]));
-            }
-            1 => {
-                return Some(Vector3::new([0.0, 1.0, 0.0]));
-            }
-            2 => {
-                return Some(Vector3::new([0.0, 0.0, 1.0]));
-            }
-            _ => return None,
+            0 => Some(Vector3::new([1.0, 0.0, 0.0])),
+            1 => Some(Vector3::new([0.0, 1.0, 0.0])),
+            2 => Some(Vector3::new([0.0, 0.0, 1.0])),
+            _ => None,
         }
     }
 
@@ -41,16 +34,16 @@ impl Vector3 {
         self.data[2]
     }
 
-    pub fn to_u8(&self) -> [u8; 3] {
+    pub fn to_u8(self) -> [u8; 3] {
         let mut res = [0; 3];
         for (num, r) in self.data.iter().zip(&mut res) {
             *r = (clamp((*num).sqrt(), 0.0, 1.0) * 255.0) as u8;
         }
-        return res;
+        res
     }
 
     pub fn length_square(&self) -> f64 {
-        return self.data.iter().map(|num| (*num) * (*num)).sum();
+        self.data.iter().map(|num| (*num) * (*num)).sum()
     }
 
     pub fn length(&self) -> f64 {
@@ -66,7 +59,7 @@ impl Vector3 {
         for ((a, b), r) in self.data.iter().zip(&rhs.data).zip(&mut data) {
             *r = (*a) * (*b);
         }
-        return Vector3 { data };
+        Vector3 { data }
     }
 
     pub fn get_axis(&self) -> usize {
@@ -76,7 +69,7 @@ impl Vector3 {
         } else if self.data[2].abs() > 1e-3 {
             n = 2;
         }
-        return n;
+        n
     }
 
     pub fn cross_product(&self, rhs: Vector3) -> Vector3 {
@@ -98,7 +91,7 @@ impl Add<Vector3> for Vector3 {
         for ((s, r), res) in self.data.iter().zip(&rhs.data).zip(&mut data) {
             *res = *s + *r;
         }
-        return Vector3 { data };
+        Vector3 { data }
     }
 }
 
@@ -118,7 +111,7 @@ impl Mul<Vector3> for Vector3 {
         for (a, b) in self.data.iter().zip(&rhs.data) {
             res += (*a) * (*b);
         }
-        return res;
+        res
     }
 }
 
@@ -130,7 +123,7 @@ impl Mul<f64> for Vector3 {
         for (num, res) in self.data.iter().zip(&mut data) {
             *res = (*num) * rhs;
         }
-        return Vector3 { data };
+        Vector3 { data }
     }
 }
 
@@ -150,7 +143,7 @@ impl Div<f64> for Vector3 {
         for (num, res) in self.data.iter().zip(&mut data) {
             *res = (*num) / rhs;
         }
-        return Vector3 { data };
+        Vector3 { data }
     }
 }
 
@@ -170,7 +163,7 @@ impl Sub<Vector3> for Vector3 {
         for ((a, b), r) in self.data.iter().zip(&rhs.data).zip(&mut data) {
             *r = *a - *b;
         }
-        return Vector3 { data };
+        Vector3 { data }
     }
 }
 

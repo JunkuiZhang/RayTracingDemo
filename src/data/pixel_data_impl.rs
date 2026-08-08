@@ -12,7 +12,7 @@ impl PixelContainer {
         for _ in 0..WINDOW_HEIGHT {
             data.push(RowColPixels::new());
         }
-        return PixelContainer { data };
+        PixelContainer { data }
     }
 
     pub fn get_colors(&self, col_num: usize, row_num: usize) -> [f64; 3] {
@@ -40,7 +40,7 @@ impl PixelContainer {
             }
             res.push(row_pixel_u8);
         }
-        return res.concat();
+        res.concat()
     }
 }
 

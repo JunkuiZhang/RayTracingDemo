@@ -5,13 +5,27 @@ use windows::{
     core::Result,
 };
 
-/// 使用 Timestamp Query 统计 GPU Pass 耗时，结果在 Frame Context 再次复用时读取。
+#[derive(Clone, Copy)]
+#[repr(usize)]
+pub enum GpuPass {
+    Total = 0,
+    PathTrace = 1,
+    Temporal = 2,
+    Atrous = 3,
+    ToneMap = 4,
+}
+
+const PASS_COUNT: usize = 5;
+const TIMESTAMPS_PER_FRAME: usize = PASS_COUNT * 2;
+
+/// Timestamp profiler with an independent begin/end pair for every GPU pass.
+/// Results are read only after the owning frame context fence has completed.
 pub struct GpuProfiler {
     query_heap: ID3D12QueryHeap,
     readback: ID3D12Resource,
     timestamp_frequency: u64,
     frame_count: usize,
-    last_time_ms: f64,
+    last_times_ms: [f64; PASS_COUNT],
 }
 
 impl GpuProfiler {
@@ -22,7 +36,7 @@ impl GpuProfiler {
     ) -> Result<Self> {
         let query_description = D3D12_QUERY_HEAP_DESC {
             Type: D3D12_QUERY_HEAP_TYPE_TIMESTAMP,
-            Count: (frame_count * 2) as u32,
+            Count: (frame_count * TIMESTAMPS_PER_FRAME) as u32,
             NodeMask: 0,
         };
         let mut query_heap = None;
@@ -30,15 +44,11 @@ impl GpuProfiler {
 
         let heap_properties = D3D12_HEAP_PROPERTIES {
             Type: D3D12_HEAP_TYPE_READBACK,
-            CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
-            MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
-            CreationNodeMask: 0,
-            VisibleNodeMask: 0,
+            ..Default::default()
         };
         let resource_description = D3D12_RESOURCE_DESC {
             Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-            Alignment: 0,
-            Width: (frame_count * 2 * size_of::<u64>()) as u64,
+            Width: (frame_count * TIMESTAMPS_PER_FRAME * size_of::<u64>()) as u64,
             Height: 1,
             DepthOrArraySize: 1,
             MipLevels: 1,
@@ -48,7 +58,7 @@ impl GpuProfiler {
                 Quality: 0,
             },
             Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-            Flags: D3D12_RESOURCE_FLAG_NONE,
+            ..Default::default()
         };
         let mut readback = None;
         unsafe {
@@ -66,54 +76,72 @@ impl GpuProfiler {
             readback: readback.unwrap(),
             timestamp_frequency: unsafe { command_queue.GetTimestampFrequency()? },
             frame_count,
-            last_time_ms: 0.0,
+            last_times_ms: [0.0; PASS_COUNT],
         })
     }
 
-    pub fn begin(&self, command_list: &ID3D12GraphicsCommandList, frame_index: usize) {
-        assert!(frame_index < self.frame_count, "GPU 计时帧索引越界");
+    pub fn begin(
+        &self,
+        command_list: &ID3D12GraphicsCommandList,
+        frame_index: usize,
+        pass: GpuPass,
+    ) {
+        self.write_timestamp(command_list, frame_index, pass, 0);
+    }
+
+    pub fn end(&self, command_list: &ID3D12GraphicsCommandList, frame_index: usize, pass: GpuPass) {
+        self.write_timestamp(command_list, frame_index, pass, 1);
+    }
+
+    fn write_timestamp(
+        &self,
+        command_list: &ID3D12GraphicsCommandList,
+        frame_index: usize,
+        pass: GpuPass,
+        endpoint: usize,
+    ) {
+        assert!(frame_index < self.frame_count);
+        let query = frame_index * TIMESTAMPS_PER_FRAME + pass as usize * 2 + endpoint;
         unsafe {
-            command_list.EndQuery(
-                &self.query_heap,
-                D3D12_QUERY_TYPE_TIMESTAMP,
-                (frame_index * 2) as u32,
-            );
+            command_list.EndQuery(&self.query_heap, D3D12_QUERY_TYPE_TIMESTAMP, query as u32);
         }
     }
 
-    pub fn end(&self, command_list: &ID3D12GraphicsCommandList, frame_index: usize) {
-        let query_index = (frame_index * 2) as u32;
+    pub fn resolve_frame(&self, command_list: &ID3D12GraphicsCommandList, frame_index: usize) {
+        let query_start = frame_index * TIMESTAMPS_PER_FRAME;
         unsafe {
-            command_list.EndQuery(
-                &self.query_heap,
-                D3D12_QUERY_TYPE_TIMESTAMP,
-                query_index + 1,
-            );
             command_list.ResolveQueryData(
                 &self.query_heap,
                 D3D12_QUERY_TYPE_TIMESTAMP,
-                query_index,
-                2,
+                query_start as u32,
+                TIMESTAMPS_PER_FRAME as u32,
                 &self.readback,
-                query_index as u64 * size_of::<u64>() as u64,
+                (query_start * size_of::<u64>()) as u64,
             );
         }
     }
 
     pub fn collect(&mut self, frame_index: usize) -> Result<()> {
-        let byte_offset = frame_index * 2 * size_of::<u64>();
+        let timestamp_start = frame_index * TIMESTAMPS_PER_FRAME;
+        let byte_start = timestamp_start * size_of::<u64>();
         let read_range = D3D12_RANGE {
-            Begin: byte_offset,
-            End: byte_offset + 2 * size_of::<u64>(),
+            Begin: byte_start,
+            End: byte_start + TIMESTAMPS_PER_FRAME * size_of::<u64>(),
         };
         let mut mapped = std::ptr::null_mut::<c_void>();
         unsafe {
             self.readback.Map(0, Some(&read_range), Some(&mut mapped))?;
-            let timestamps =
-                std::slice::from_raw_parts(mapped.cast::<u64>().add(frame_index * 2), 2);
-            if timestamps[1] >= timestamps[0] && timestamps[0] != 0 {
-                self.last_time_ms = (timestamps[1] - timestamps[0]) as f64 * 1000.0
-                    / self.timestamp_frequency as f64;
+            let timestamps = std::slice::from_raw_parts(
+                mapped.cast::<u64>().add(timestamp_start),
+                TIMESTAMPS_PER_FRAME,
+            );
+            for pass in 0..PASS_COUNT {
+                let begin = timestamps[pass * 2];
+                let end = timestamps[pass * 2 + 1];
+                if end >= begin && begin != 0 {
+                    self.last_times_ms[pass] =
+                        (end - begin) as f64 * 1000.0 / self.timestamp_frequency as f64;
+                }
             }
             self.readback
                 .Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }));
@@ -121,7 +149,7 @@ impl GpuProfiler {
         Ok(())
     }
 
-    pub fn last_time_ms(&self) -> f64 {
-        self.last_time_ms
+    pub fn time_ms(&self, pass: GpuPass) -> f64 {
+        self.last_times_ms[pass as usize]
     }
 }

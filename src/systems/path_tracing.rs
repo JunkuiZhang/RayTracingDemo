@@ -1,4 +1,4 @@
-use std::{f64::INFINITY, sync::Arc};
+use std::sync::Arc;
 
 use rand::rngs::StdRng;
 
@@ -20,19 +20,27 @@ struct EmissionContext {
     is_delta: bool,
 }
 
+type SceneObject = Arc<dyn Hittable + Send + Sync>;
+type SceneLight = Arc<dyn HittableLight + Send + Sync>;
+
+struct TraceContext<'a> {
+    objects: &'a [SceneObject],
+    lights: &'a [SceneLight],
+}
+
 pub fn shade(
     ray_in: &Ray,
-    objects: &Vec<Arc<dyn Hittable + Send + Sync>>,
-    lights: &Vec<Arc<dyn HittableLight + Send + Sync>>,
+    objects: &[SceneObject],
+    lights: &[SceneLight],
     depth: i32,
     rng: &mut StdRng,
     gb_indicator: bool,
     gbuffer_data: &mut GBInfo,
 ) -> Color {
+    let context = TraceContext { objects, lights };
     shade_recursive(
         ray_in,
-        objects,
-        lights,
+        &context,
         depth,
         rng,
         gb_indicator,
@@ -43,8 +51,7 @@ pub fn shade(
 
 fn shade_recursive(
     ray_in: &Ray,
-    objects: &Vec<Arc<dyn Hittable + Send + Sync>>,
-    lights: &Vec<Arc<dyn HittableLight + Send + Sync>>,
+    context: &TraceContext<'_>,
     depth: i32,
     rng: &mut StdRng,
     gb_indicator: bool,
@@ -55,7 +62,7 @@ fn shade_recursive(
         return Color::BLACK;
     }
 
-    let Some(info) = ray_hit(ray_in, objects) else {
+    let Some(info) = ray_hit(ray_in, context.objects) else {
         return Color::BLACK;
     };
     if gb_indicator {
@@ -68,21 +75,22 @@ fn shade_recursive(
         };
     }
     if info.material.is_light() {
-        return weighted_emission(&info, ray_in, lights, emission_context);
+        return weighted_emission(&info, ray_in, context.lights, emission_context);
     }
 
-    shade_point(ray_in, &info, objects, lights, depth - 1, rng)
+    shade_point(ray_in, &info, context, depth - 1, rng)
 }
 
-fn ray_hit(ray_in: &Ray, objects: &Vec<Arc<dyn Hittable + Send + Sync>>) -> Option<HitInfo> {
-    let mut closest_distance = INFINITY;
+fn ray_hit(ray_in: &Ray, objects: &[SceneObject]) -> Option<HitInfo> {
+    let mut closest_distance = f64::INFINITY;
     let mut hit_info = None;
     for object in objects {
-        if let Some(info) = object.ray_intersect(ray_in) {
-            if info.t > RAY_EPSILON && info.t < closest_distance {
-                closest_distance = info.t;
-                hit_info = Some(info);
-            }
+        if let Some(info) = object.ray_intersect(ray_in)
+            && info.t > RAY_EPSILON
+            && info.t < closest_distance
+        {
+            closest_distance = info.t;
+            hit_info = Some(info);
         }
     }
     hit_info
@@ -91,12 +99,11 @@ fn ray_hit(ray_in: &Ray, objects: &Vec<Arc<dyn Hittable + Send + Sync>>) -> Opti
 fn shade_point(
     ray_in: &Ray,
     info: &HitInfo,
-    objects: &Vec<Arc<dyn Hittable + Send + Sync>>,
-    lights: &Vec<Arc<dyn HittableLight + Send + Sync>>,
+    context: &TraceContext<'_>,
     depth: i32,
     rng: &mut StdRng,
 ) -> Color {
-    let direct_light = estimate_direct_light(info, objects, lights, rng);
+    let direct_light = estimate_direct_light(info, context.objects, context.lights, rng);
     let scatter_info = info.material.scatter(ray_in, &info.normal, rng);
     let scatter_direction = scatter_info.scatter_dir.normalize();
     let scatter_origin = offset_ray_origin(info.hit_point, info.normal, scatter_direction);
@@ -109,8 +116,7 @@ fn shade_point(
     };
     let incoming_light = shade_recursive(
         &scatter_ray,
-        objects,
-        lights,
+        context,
         depth,
         rng,
         false,
@@ -141,8 +147,8 @@ fn shade_point(
 
 fn estimate_direct_light(
     info: &HitInfo,
-    objects: &Vec<Arc<dyn Hittable + Send + Sync>>,
-    lights: &Vec<Arc<dyn HittableLight + Send + Sync>>,
+    objects: &[SceneObject],
+    lights: &[SceneLight],
     rng: &mut StdRng,
 ) -> Color {
     if info.material.is_delta() {
@@ -182,7 +188,7 @@ fn is_occluded(
     point: Point,
     normal: Vector3,
     sample_point: Point,
-    objects: &Vec<Arc<dyn Hittable + Send + Sync>>,
+    objects: &[SceneObject],
 ) -> bool {
     let initial_direction = (sample_point - point).normalize();
     let origin = offset_ray_origin(point, normal, initial_direction);
@@ -199,7 +205,7 @@ fn is_occluded(
 fn weighted_emission(
     info: &HitInfo,
     ray_in: &Ray,
-    lights: &Vec<Arc<dyn HittableLight + Send + Sync>>,
+    lights: &[SceneLight],
     context: Option<EmissionContext>,
 ) -> Color {
     let emission = info.material.emit();

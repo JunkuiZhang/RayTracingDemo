@@ -35,24 +35,24 @@ impl Hittable for Sphere {
         if t > 0.0 {
             let hit_point = ray_in.at(t);
             let normal = (hit_point - self.center).normalize();
-            return Some(HitInfo {
+            Some(HitInfo {
                 hit_point,
                 t,
                 normal,
                 material: self.material.clone(),
                 obj_id: self.id,
-            });
+            })
         } else {
             let t = (-b + indicator.sqrt()) / (2.0 * a);
             let hit_point = ray_in.at(t);
             let normal = (hit_point - self.center).normalize();
-            return Some(HitInfo {
+            Some(HitInfo {
                 hit_point,
                 t,
                 normal,
                 material: self.material.clone(),
                 obj_id: self.id,
-            });
+            })
         }
     }
 

@@ -16,7 +16,7 @@ impl Mul<Vector3> for Matrix3 {
         for (vec, num) in self.vectors.iter().zip(&rhs.data) {
             res += (*vec) * (*num);
         }
-        return res;
+        res
     }
 }
 

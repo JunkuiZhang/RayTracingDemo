@@ -1,7 +1,4 @@
-use std::{
-    f64::{INFINITY, NEG_INFINITY},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use crate::{
     data::HitInfo,
@@ -33,21 +30,21 @@ impl Rectangle {
             for n in 0..2 {
                 trans_points[n] = rotate_around_y(rotated_position[n], -angle);
             }
-            return Rectangle {
+            Rectangle {
                 points,
                 angle_rotate_y,
                 trans_points,
                 material,
                 id,
-            };
+            }
         } else {
-            return Rectangle {
+            Rectangle {
                 points,
                 angle_rotate_y,
-                trans_points: points.clone(),
+                trans_points: points,
                 material,
                 id,
-            };
+            }
         }
     }
 }
@@ -65,8 +62,8 @@ impl Hittable for Rectangle {
             p2 = self.trans_points[1];
         }
         let mut hit_normal = Vector3::default();
-        let mut t_min = NEG_INFINITY;
-        let mut t_max = INFINITY;
+        let mut t_min = f64::NEG_INFINITY;
+        let mut t_max = f64::INFINITY;
         for n in 0..3 {
             let t_0 = (p1.data[n] - ray_origin.data[n]) / ray_direction.data[n];
             let t_1 = (p2.data[n] - ray_origin.data[n]) / ray_direction.data[n];
@@ -93,13 +90,13 @@ impl Hittable for Rectangle {
         } else {
             normal = hit_normal;
         }
-        return Some(HitInfo {
+        Some(HitInfo {
             hit_point,
             t: t_min,
             normal,
             material: self.material.clone(),
             obj_id: self.id,
-        });
+        })
     }
 
     fn get_id(&self) -> usize {

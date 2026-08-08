@@ -22,7 +22,7 @@ pub fn rotate_vec_given_normal(vec: &Vector3, normal: &Vector3) -> Vector3 {
     //     "{} around {} with ({}, {}, {}, {}) by {}, {} ==> {}",
     //     *vec, *normal, sin_theta, cos_theta, sin_phi, cos_phi, trans_rotate_y, trans_rotate_z, res
     // );
-    return res;
+    res
 }
 
 #[allow(dead_code)]
@@ -31,7 +31,7 @@ pub fn generate_unit_vec_sphere(rng: &mut StdRng) -> Vector3 {
     let phi = rng.random_range(0.0..(2.0 * PI));
     let trans_rotate_z = matrix_rotate_around_z(theta.sin(), theta.cos());
     let trans_rotate_y = matrix_rotate_around_y(phi.sin(), phi.cos());
-    return trans_rotate_y * (trans_rotate_z * Vector3::new([0.0, 1.0, 0.0]));
+    trans_rotate_y * (trans_rotate_z * Vector3::new([0.0, 1.0, 0.0]))
 }
 
 fn agnle_rotate_y_to_normal(normal: &Vector3) -> (f64, f64, f64, f64) {
@@ -47,26 +47,26 @@ fn agnle_rotate_y_to_normal(normal: &Vector3) -> (f64, f64, f64, f64) {
         if normal.z() < 0.0 {
             sin_phi = -sin_phi;
         }
-        return (sin_theta, cos_theta, sin_phi, cos_phi);
+        (sin_theta, cos_theta, sin_phi, cos_phi)
     } else {
-        return (sin_theta, cos_theta, 0.0, 1.0);
+        (sin_theta, cos_theta, 0.0, 1.0)
     }
 }
 
 fn matrix_rotate_around_z(sin_theta: f64, cos_theta: f64) -> Matrix3 {
     // agnle in radians
-    return Matrix3::new([
+    Matrix3::new([
         Vector3::new([cos_theta, sin_theta, 0.0]),
         Vector3::new([-sin_theta, cos_theta, 0.0]),
         Vector3::new([0.0, 0.0, 1.0]),
-    ]);
+    ])
 }
 
 fn matrix_rotate_around_y(sin_phi: f64, cos_phi: f64) -> Matrix3 {
     // angle in radians
-    return Matrix3::new([
+    Matrix3::new([
         Vector3::new([cos_phi, 0.0, -sin_phi]),
         Vector3::new([0.0, 1.0, 0.0]),
         Vector3::new([sin_phi, 0.0, cos_phi]),
-    ]);
+    ])
 }

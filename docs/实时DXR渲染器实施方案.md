@@ -2,7 +2,7 @@
 
 ## 1. 文档目的
 
-本文档描述如何将当前的 Rust CPU 单帧路径追踪 Demo，逐步升级为运行在 Windows 和 RTX 5060 上的实时交互式 DX12/DXR 渲染器。
+本文档描述如何将当前的 Rust CPU 单帧路径追踪 Demo，逐步升级为运行在 Windows 和 RTX 4060 Laptop GPU 上的实时交互式 DX12/DXR 渲染器。
 
 最终产品不是“在窗口里重复运行现有 CPU 渲染”，而是完整的新 GPU 渲染后端：使用 RTX 光追单元执行求交，使用时空滤波稳定每帧低采样结果，并预留 NVIDIA NRD、DLSS Ray Reconstruction、DLSS Super Resolution 和 Frame Generation 的接入位置。
 
@@ -33,7 +33,7 @@
 
 ### 2.2 首要性能目标
 
-以 RTX 5060 为目标显卡，第一版采用以下保守指标：
+以 RTX 4060 Laptop GPU 为目标显卡，第一版采用以下保守指标：
 
 | 项目 | 基线目标 | 进阶目标 |
 | --- | --- | --- |
@@ -68,7 +68,7 @@ Frame Generation 不能替代基础帧率。接入插帧前，应保证不插帧
 选择理由：
 
 - 项目目标平台已经确定为 Windows。
-- RTX 5060 可以通过 DXR 使用硬件光追单元。
+- RTX 4060 Laptop GPU 可以通过 DXR 使用硬件光追单元。
 - PIX、Nsight Graphics、DRED 和 DirectX Debug Layer 适合定位 GPU 问题。
 - NVIDIA Streamline、DLSS、NRD 和 Ray Reconstruction 在 DX12 上有成熟接入路径。
 - HLSL、DXC 和 Shader Model 6.6 适合统一所有光追与计算着色器。
@@ -280,7 +280,7 @@ UI 合成并 Present
 ### 7.1 初始化
 
 - Debug 构建启用 D3D12 Debug Layer 和 GPU-Based Validation。
-- 创建 DXGI Factory，枚举硬件适配器并显式选择 RTX 5060。
+- 创建 DXGI Factory，按高性能优先级枚举适配器，并选择支持 DXR Tier 1.1 的硬件设备；目标验证设备为 RTX 4060 Laptop GPU。
 - 检查 `D3D12_FEATURE_D3D12_OPTIONS5`，要求支持 Raytracing Tier 1.1。
 - 创建 Direct Command Queue、Copy Command Queue 和对应 Fence。
 - 创建三缓冲交换链，格式优先使用 `R8G8B8A8_UNORM`；HDR 显示作为后续功能。
@@ -656,7 +656,7 @@ Rust 只传递稳定的句柄、枚举和 POD 结构，禁止跨 FFI 传递 Rust
 
 ### 15.3 GPU 冒烟测试
 
-本地 RTX 5060 每次重要阶段至少验证：
+本地 RTX 4060 Laptop GPU 每次重要阶段至少验证：
 
 - 创建和销毁窗口无资源泄漏。
 - 连续调整窗口大小不崩溃。
@@ -736,7 +736,7 @@ Rust 只传递稳定的句柄、枚举和 POD 结构，禁止跨 FFI 传递 Rust
 
 验收条件：
 
-- RTX 5060 上确认使用 DXR Tier 1.1。
+- RTX 4060 Laptop GPU 上确认使用 DXR Tier 1.1 或更高版本。
 - 窗口实时显示可旋转观察的三角形或简单盒子。
 - Nsight/PIX 中可看到 `DispatchRays`。
 
@@ -770,6 +770,8 @@ Rust 只传递稳定的句柄、枚举和 POD 结构，禁止跨 FFI 传递 Rust
 
 ### 阶段 6：GPU 时空降噪
 
+**当前状态（2026-08-08）：阶段 6 工程实现已完成，阶段 7 尚未开始。**
+
 工作内容：
 
 - 实现运动矢量和历史重投影。
@@ -782,6 +784,8 @@ Rust 只传递稳定的句柄、枚举和 POD 结构，禁止跨 FFI 传递 Rust
 - 1 SPP 静止画面在短时间内稳定。
 - 相机移动和动态遮挡时无大面积鬼影。
 - 可以实时查看拒绝掩码、方差和历史长度。
+
+本阶段已在 NVIDIA GeForce RTX 4060 Laptop GPU（DXR Tier 1.2）上通过 Release 和启用 GPU-Based Validation 的 Debug 冒烟测试。一次 Release 稳态采样的结果为：1280×720 约 113 FPS / 8.58 ms，1600×900 约 72 FPS / 13.81 ms，1920×1080 约 51 FPS / 19.43 ms。因此 720p–900p 内部光追分辨率已达到 60 FPS 基线；当前不降分辨率的原生 1080p 落在 45–60 FPS 最低可用区间，但未达到 60 FPS。这些数据是单机单次测量，不代替 PIX/Nsight 长时帧分析与动态鬼影的图像对比验收。
 
 ### 阶段 7：动态场景和 glTF
 
@@ -923,7 +927,7 @@ Rust 只传递稳定的句柄、枚举和 POD 结构，禁止跨 FFI 传递 Rust
 只有同时满足以下条件，项目才达到本文档定义的最终效果：
 
 - 默认启动进入实时窗口，而不是生成单张 PNG 后退出。
-- RTX 5060 通过 DXR 执行场景求交和路径追踪。
+- RTX 4060 Laptop GPU 通过 DXR 执行场景求交和路径追踪。
 - 用户可以实时移动相机并观察动态收敛。
 - 1 SPP 画面经过时域与空间降噪后可稳定交互。
 - 漫反射、镜面和玻璃信号没有明显串色或大面积拖影。
@@ -948,4 +952,3 @@ Rust 只传递稳定的句柄、枚举和 POD 结构，禁止跨 FFI 传递 Rust
 - NVIDIA NRD：<https://github.com/NVIDIAGameWorks/RayTracingDenoiser>
 - NVIDIA Nsight Graphics：<https://developer.nvidia.com/nsight-graphics>
 - Intel Open Image Denoise：<https://www.openimagedenoise.org/>
-

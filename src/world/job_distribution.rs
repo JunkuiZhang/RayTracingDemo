@@ -52,5 +52,5 @@ pub fn process_job_sequence(
         pixel_res.set_color(col_num as usize, pixel_color.data);
         gbuffer_res.push_data(gbuffer_data);
     }
-    return (content, pixel_res, gbuffer_res);
+    (content, pixel_res, gbuffer_res)
 }

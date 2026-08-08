@@ -113,3 +113,33 @@ fn print_help() {
          --help, -h             显示帮助"
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_decimal_and_hexadecimal_seeds() {
+        assert_eq!(parse_seed("42").unwrap(), 42);
+        assert_eq!(parse_seed("0x2A").unwrap(), 42);
+        assert!(parse_seed("0xGG").is_err());
+    }
+
+    #[test]
+    fn rejects_zero_cpu_samples() {
+        let result = parse_arguments([
+            "--cpu-reference".to_string(),
+            "--samples".to_string(),
+            "0".to_string(),
+        ]);
+        assert!(matches!(result, Err(message) if message.contains("必须大于零")));
+    }
+
+    #[test]
+    fn realtime_is_the_default_command() {
+        assert!(matches!(
+            parse_arguments(Vec::<String>::new()),
+            Ok(Command::Realtime)
+        ));
+    }
+}

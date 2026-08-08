@@ -25,33 +25,31 @@ impl Material for Glass {
         let reflection_portion = self.fresnel(&ray_in.direction, hit_normal);
         if rng.random_range(0.0..1.0) < reflection_portion {
             let scatter_dir = reflect(&ray_in.direction, hit_normal);
-            return ScatterInfo {
+            ScatterInfo {
                 scatter_dir,
                 color: self.color,
                 pdf: 1.0,
-            };
-        } else {
-            let refraction_ratio;
-            if ray_in.direction * (*hit_normal) > 0.0 {
-                refraction_ratio = self.eta;
-            } else {
-                refraction_ratio = 1.0 / self.eta;
             }
+        } else {
+            let refraction_ratio = if ray_in.direction * (*hit_normal) > 0.0 {
+                self.eta
+            } else {
+                1.0 / self.eta
+            };
             let cos_theta = ((-1.0) * ray_in.direction * (*hit_normal)).min(1.0);
             let sin_theta = (1.0 - cos_theta * cos_theta).sqrt();
             let connot_refract = sin_theta * refraction_ratio > 1.0;
-            let scatter_dir;
-            if connot_refract {
-                scatter_dir = reflect(&ray_in.direction, hit_normal);
+            let scatter_dir = if connot_refract {
+                reflect(&ray_in.direction, hit_normal)
             } else {
-                scatter_dir = refract(&ray_in.direction, hit_normal, refraction_ratio);
-            }
+                refract(&ray_in.direction, hit_normal, refraction_ratio)
+            };
             // let scatter_dir = refract(&ray_in.direction, hit_normal, refraction_ratio);
-            return ScatterInfo {
+            ScatterInfo {
                 scatter_dir,
                 color: self.color,
                 pdf: 1.0,
-            };
+            }
         }
     }
 

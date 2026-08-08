@@ -23,7 +23,7 @@ pub fn clamp(x: f64, min: f64, max: f64) -> f64 {
     if x > max {
         return max;
     }
-    return x;
+    x
 }
 
 pub fn point_in_2d(point: Point, square: [Point; 2], axis: usize) -> bool {
@@ -35,15 +35,11 @@ pub fn point_in_2d(point: Point, square: [Point; 2], axis: usize) -> bool {
             return false;
         }
     }
-    return true;
+    true
 }
 
 pub fn order_numbers(x: f64, y: f64) -> (f64, f64, bool) {
-    if x <= y {
-        return (x, y, false);
-    } else {
-        return (y, x, true);
-    }
+    if x <= y { (x, y, false) } else { (y, x, true) }
 }
 
 #[allow(dead_code)]
@@ -55,8 +51,8 @@ pub fn reflect(vec: &Vector3, normal: &Vector3) -> Vector3 {
 pub fn refract(vec: &Vector3, normal: &Vector3, factor: f64) -> Vector3 {
     let cos_theta = ((-1.0) * (*vec) * (*normal)).min(1.0);
     let r_out_perp = factor * (*vec + cos_theta * (*normal));
-    let r_out_para = (-1.0) * (1.0 - r_out_perp.length_square()).abs().sqrt() * (*normal);
-    return (r_out_para + r_out_perp).normalize();
+    let r_out_para = -(1.0 - r_out_perp.length_square()).abs().sqrt() * (*normal);
+    (r_out_para + r_out_perp).normalize()
 }
 
 pub fn generate_neighbor_pixel_coordinate(col_num: usize, row_num: usize) -> Vec<(usize, usize)> {
@@ -74,12 +70,12 @@ pub fn generate_neighbor_pixel_coordinate(col_num: usize, row_num: usize) -> Vec
             res.push((col as usize, row as usize));
         }
     }
-    return res;
+    res
 }
 
-pub fn num_inline(list: &Vec<[f64; 3]>, target: [f64; 3]) -> [f64; 3] {
+pub fn num_inline(list: &[[f64; 3]], target: [f64; 3]) -> [f64; 3] {
     let l = list.len();
-    let mut res = target.clone();
+    let mut res = target;
     let mut r_vec = Vec::with_capacity(l);
     let mut g_vec = Vec::with_capacity(l);
     let mut b_vec = Vec::with_capacity(l);
@@ -112,7 +108,7 @@ pub fn num_inline(list: &Vec<[f64; 3]>, target: [f64; 3]) -> [f64; 3] {
     res[0] = clamp(target[0], mean_r - 1.5 * sigma_r, mean_r + 1.5 * sigma_r);
     res[1] = clamp(target[1], mean_g - 1.5 * sigma_g, mean_g + 1.5 * sigma_g);
     res[2] = clamp(target[2], mean_b - 1.5 * sigma_b, mean_b + 1.5 * sigma_b);
-    return res;
+    res
 }
 
 pub fn to_u8(num: &f64) -> u8 {
