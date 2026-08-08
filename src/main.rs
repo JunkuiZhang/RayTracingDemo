@@ -2,7 +2,6 @@ use std::{env, path::PathBuf, process::ExitCode};
 
 use cpu_reference::CpuReferenceConfig;
 
-#[expect(dead_code)]
 mod as_policy;
 mod camera;
 mod cpu_reference;

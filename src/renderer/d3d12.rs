@@ -18,6 +18,7 @@ use winit::{
 };
 
 use crate::{
+    as_policy::AccelerationStructureStats,
     realtime::{AtrousMode, CommandRecordingMode, RealtimeConfig},
     scene::{MAX_SCENE_SAMPLERS, SceneAsset, gltf_loader},
 };
@@ -301,20 +302,14 @@ impl Dx12Renderer {
             let mut scene_geometry =
                 SceneGeometry::new(&device, &command_list, &scene, &texture_set)
                     .map_err(|error| dx_error("创建场景网格", error))?;
-            let mut acceleration_structures =
-                AccelerationStructures::build(&device, &command_list, &scene_geometry)
-                    .map_err(|error| dx_error("构建 DXR 加速结构", error))?;
-            let tlas_view = D3D12_SHADER_RESOURCE_VIEW_DESC {
-                Format: DXGI_FORMAT_UNKNOWN,
-                ViewDimension: D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE,
-                Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
-                Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
-                    RaytracingAccelerationStructure: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_SRV {
-                        Location: acceleration_structures.tlas.GetGPUVirtualAddress(),
-                    },
-                },
-            };
-            device.CreateShaderResourceView(None, Some(&tlas_view), shader_heap.cpu_handle(0));
+            let pending_acceleration_structures = AccelerationStructures::build_phase_a(
+                &device,
+                &command_list,
+                &scene_geometry,
+                config.acceleration_structure_mode,
+                config.animate_model,
+            )
+            .map_err(|error| dx_error("构建 DXR 加速结构 Phase A", error))?;
             create_structured_srv(
                 &device,
                 &shader_heap,
@@ -369,8 +364,41 @@ impl Dx12Renderer {
             command_queue.Signal(&fence, 1)?;
             fence.SetEventOnCompletion(1, fence_event)?;
             WaitForSingleObject(fence_event, INFINITE);
+            frames[0].allocator.Reset()?;
+            command_list.Reset(&frames[0].allocator, None::<&ID3D12PipelineState>)?;
+            let mut acceleration_structures = pending_acceleration_structures
+                .finish_phase_b(&device, &command_list, &scene_geometry)
+                .map_err(|error| dx_error("构建 DXR 加速结构 Phase B", error))?;
+            command_list.Close()?;
+            let phase_b_list: ID3D12CommandList = command_list.cast()?;
+            command_queue.ExecuteCommandLists(&[Some(phase_b_list)]);
+            command_queue.Signal(&fence, 2)?;
+            fence.SetEventOnCompletion(2, fence_event)?;
+            WaitForSingleObject(fence_event, INFINITE);
+            let tlas_view = D3D12_SHADER_RESOURCE_VIEW_DESC {
+                Format: DXGI_FORMAT_UNKNOWN,
+                ViewDimension: D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE,
+                Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                    RaytracingAccelerationStructure: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_SRV {
+                        Location: acceleration_structures.tlas.GetGPUVirtualAddress(),
+                    },
+                },
+            };
+            device.CreateShaderResourceView(None, Some(&tlas_view), shader_heap.cpu_handle(0));
             scene_geometry.release_uploads();
             texture_set.release_uploads();
+            let as_stats = acceleration_structures.stats();
+            eprintln!(
+                "DXR AS：{}，BLAS {}/{} compacted，allocation {} -> {} KiB，TLAS update={}，retained scratch={} KiB",
+                as_stats.mode.as_str(),
+                as_stats.compacted_blas_count,
+                as_stats.blas_count,
+                as_stats.original_allocation_bytes / 1024,
+                as_stats.final_allocation_bytes / 1024,
+                as_stats.tlas_update_enabled,
+                as_stats.retained_update_scratch_bytes / 1024,
+            );
             acceleration_structures.release_build_resources();
             let mut renderer = Self {
                 device,
@@ -423,7 +451,7 @@ impl Dx12Renderer {
                 command_list,
                 transition_batch: TransitionBatch::with_capacity(64),
                 fence,
-                next_fence_value: 2,
+                next_fence_value: 3,
                 fence_event,
                 width,
                 height,
@@ -1048,6 +1076,7 @@ impl Dx12Renderer {
             self.gpu_profiler.benchmark_statistics(),
             self.gpu_profiler.command_recording_statistics(),
             self.video_memory_snapshot(),
+            self._acceleration_structures.stats(),
         )
     }
 }
@@ -1092,6 +1121,7 @@ fn benchmark_json_line(
     report: profiler::GpuTimingReport,
     command_recording: profiler::CommandRecordingStats,
     memory: VideoMemorySnapshot,
+    acceleration_structures: &AccelerationStructureStats,
 ) -> String {
     let BenchmarkJsonContext {
         gpu_name,
@@ -1110,6 +1140,22 @@ fn benchmark_json_line(
         VideoMemoryStatus::Adapter3Unavailable => "adapter3_unavailable",
         VideoMemoryStatus::QueryFailed => "query_failed",
     };
+    let blas = acceleration_structures
+        .blas
+        .iter()
+        .map(|record| {
+            serde_json::json!({
+                "primitive_index": record.primitive_index,
+                "original_result_bytes": record.original_result_bytes,
+                "reported_compacted_bytes": record.reported_compacted_bytes,
+                "original_allocation_bytes": record.original_allocation_bytes,
+                "candidate_allocation_bytes": record.candidate_allocation_bytes,
+                "final_result_bytes": record.final_result_bytes,
+                "final_allocation_bytes": record.final_allocation_bytes,
+                "decision": record.decision.as_str(),
+            })
+        })
+        .collect::<Vec<_>>();
     serde_json::json!({
         "schema_version": 1,
         "gpu_name": gpu_name,
@@ -1134,6 +1180,25 @@ fn benchmark_json_line(
             "tracked_transition_barriers_mean": command_recording.tracked_transition_barriers_mean,
             "atrous_pipeline_binds_mean": command_recording.atrous_pipeline_binds_mean,
             "atrous_argument_updates_mean": command_recording.atrous_argument_updates_mean,
+        },
+        "acceleration_structures": {
+            "mode": acceleration_structures.mode.as_str(),
+            "tlas_update_enabled": acceleration_structures.tlas_update_enabled,
+            "blas_count": acceleration_structures.blas_count,
+            "compacted_blas_count": acceleration_structures.compacted_blas_count,
+            "invalid_compacted_size_count": acceleration_structures.invalid_compacted_size_count,
+            "no_allocation_saving_count": acceleration_structures.no_allocation_saving_count,
+            "disabled_blas_count": acceleration_structures.disabled_blas_count,
+            "original_result_bytes": acceleration_structures.original_result_bytes,
+            "final_result_bytes": acceleration_structures.final_result_bytes,
+            "original_allocation_bytes": acceleration_structures.original_allocation_bytes,
+            "final_allocation_bytes": acceleration_structures.final_allocation_bytes,
+            "allocation_bytes_saved": acceleration_structures.allocation_bytes_saved,
+            "allocation_saving_ratio": acceleration_structures.allocation_saving_ratio.filter(|value| value.is_finite()),
+            "tlas_result_bytes": acceleration_structures.tlas_result_bytes,
+            "tlas_allocation_bytes": acceleration_structures.tlas_allocation_bytes,
+            "retained_update_scratch_bytes": acceleration_structures.retained_update_scratch_bytes,
+            "blas": blas,
         },
         "benchmark_seconds": duration_seconds,
         "warmup_valid_frames": warmup_valid_frames,
@@ -2050,6 +2115,14 @@ mod tests {
                 atrous_argument_updates_mean: Some(4.0),
             },
             memory,
+            &AccelerationStructureStats::from_records(
+                crate::realtime::AccelerationStructureMode::Baseline,
+                true,
+                Vec::new(),
+                256,
+                256,
+                512,
+            ),
         );
         assert!(!json.contains(['\r', '\n']));
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -2076,6 +2149,9 @@ mod tests {
         assert_eq!(value["passes"]["tone_map"]["valid_samples"], 240);
         assert_eq!(value["memory"]["usage_bytes"], 512);
         assert_eq!(value["memory"]["usage_ratio"], 0.5);
+        assert_eq!(value["acceleration_structures"]["mode"], "baseline");
+        assert_eq!(value["acceleration_structures"]["blas_count"], 0);
+        assert!(value["acceleration_structures"]["allocation_saving_ratio"].is_null());
     }
 
     #[test]

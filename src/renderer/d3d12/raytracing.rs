@@ -15,6 +15,14 @@ use crate::scene::{
     MATERIAL_FLAG_LEGACY_DIELECTRIC, MATERIAL_FLAG_LEGACY_EMISSIVE, MATERIAL_FLAG_LEGACY_METAL,
     MaterialKind, SceneAsset,
 };
+use crate::{
+    as_policy::{
+        AccelerationStructureStats, BlasAllocationRecord, CompactionDecision,
+        acceleration_structure_policy, align_acceleration_structure_size, evaluate_compaction,
+        required_scratch_size as policy_required_scratch_size,
+    },
+    realtime::AccelerationStructureMode,
+};
 
 use super::texture::TextureSet;
 
@@ -56,9 +64,13 @@ pub struct SceneGeometry {
 /// 保持 BLAS、TLAS 及其构建依赖资源存活。
 pub struct AccelerationStructures {
     pub tlas: ID3D12Resource,
-    _blas: Vec<ID3D12Resource>,
+    blas: Vec<ID3D12Resource>,
     build_scratch: Option<ID3D12Resource>,
     frame_data: Vec<FrameInstanceData>,
+    tlas_update_enabled: bool,
+    tlas_build_flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS,
+    initialization_retirements: Vec<ID3D12Resource>,
+    telemetry: AccelerationStructureStats,
 }
 
 const FRAME_CONTEXT_COUNT: usize = 3;
@@ -294,6 +306,10 @@ impl SceneGeometry {
         self.primitive_ranges.len()
     }
 
+    pub fn has_animation_groups(&self) -> bool {
+        !self.animation_groups.is_empty()
+    }
+
     pub fn instance_descriptors(
         &self,
         blas: &[ID3D12Resource],
@@ -446,40 +462,262 @@ fn gpu_material(
     })
 }
 
+struct BlasBuildInfo {
+    prebuild: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO,
+    original_allocation_bytes: u64,
+}
+
+pub(super) struct PendingAccelerationStructures {
+    mode: AccelerationStructureMode,
+    tlas_update_enabled: bool,
+    tlas_build_flags: u32,
+    blas_infos: Vec<BlasBuildInfo>,
+    original_blas: Vec<Option<ID3D12Resource>>,
+    phase_a_scratch: Option<ID3D12Resource>,
+    postbuild_buffer: Option<ID3D12Resource>,
+    readback: Option<ID3D12Resource>,
+}
+
 impl AccelerationStructures {
-    pub fn build(
+    pub fn build_phase_a(
         device: &ID3D12Device,
         command_list: &ID3D12GraphicsCommandList,
         geometry: &SceneGeometry,
-    ) -> Result<Self> {
+        mode: AccelerationStructureMode,
+        animate_model: bool,
+    ) -> Result<PendingAccelerationStructures> {
         let device5: ID3D12Device5 = device.cast()?;
+        let policy =
+            acceleration_structure_policy(mode, animate_model, geometry.has_animation_groups());
+        let blas_flags =
+            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS(policy.blas_build_flags as i32);
         let command_list4: ID3D12GraphicsCommandList4 = command_list.cast()?;
-        let mut blas = Vec::with_capacity(geometry.primitive_count());
+        let mut original_blas = Vec::with_capacity(geometry.primitive_count());
         let mut blas_infos = Vec::with_capacity(geometry.primitive_count());
         for primitive_index in 0..geometry.primitive_count() {
             let geometry_desc = geometry.geometry_desc(primitive_index);
             let blas_inputs = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS {
                 Type: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL,
-                Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE,
+                Flags: blas_flags,
                 NumDescs: 1,
                 DescsLayout: D3D12_ELEMENTS_LAYOUT_ARRAY,
                 Anonymous: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_0 {
                     pGeometryDescs: &geometry_desc,
                 },
             };
-            let mut info = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO::default();
+            let mut prebuild = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO::default();
             unsafe {
-                device5.GetRaytracingAccelerationStructurePrebuildInfo(&blas_inputs, &mut info);
+                device5.GetRaytracingAccelerationStructurePrebuildInfo(&blas_inputs, &mut prebuild);
             }
-            blas_infos.push(info);
-            blas.push(create_default_buffer(
+            let result_bytes = align_acceleration_structure_size(prebuild.ResultDataMaxSizeInBytes)
+                .ok_or_else(|| as_error(format!("BLAS {primitive_index} result size overflow")))?;
+            blas_infos.push(BlasBuildInfo {
+                prebuild,
+                original_allocation_bytes: resource_allocation_bytes(
+                    device,
+                    result_bytes,
+                    D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                ),
+            });
+            original_blas.push(Some(create_default_buffer(
                 device,
-                info.ResultDataMaxSizeInBytes,
+                result_bytes,
                 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
                 D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
-            )?);
+            )?));
         }
-        let instance_descs = geometry.instance_descriptors(&blas);
+        let scratch_size = policy_required_scratch_size(
+            blas_infos
+                .iter()
+                .map(|info| info.prebuild.ScratchDataSizeInBytes),
+            0,
+            None,
+        );
+        let scratch = create_default_buffer(
+            device,
+            scratch_size,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_COMMON,
+        )?;
+        transition_buffer(
+            command_list,
+            &scratch,
+            D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        );
+        for (primitive_index, blas_resource) in original_blas.iter().enumerate() {
+            let geometry_desc = geometry.geometry_desc(primitive_index);
+            let blas_inputs = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS {
+                Type: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL,
+                Flags: blas_flags,
+                NumDescs: 1,
+                DescsLayout: D3D12_ELEMENTS_LAYOUT_ARRAY,
+                Anonymous: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_0 {
+                    pGeometryDescs: &geometry_desc,
+                },
+            };
+            let blas_resource = blas_resource
+                .as_ref()
+                .ok_or_else(|| as_error(format!("BLAS {primitive_index} resource missing")))?;
+            let blas_build = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC {
+                DestAccelerationStructureData: unsafe { blas_resource.GetGPUVirtualAddress() },
+                Inputs: blas_inputs,
+                SourceAccelerationStructureData: 0,
+                ScratchAccelerationStructureData: unsafe { scratch.GetGPUVirtualAddress() },
+            };
+            unsafe {
+                command_list4.BuildRaytracingAccelerationStructure(&blas_build, None);
+            }
+            uav_barrier(command_list, blas_resource);
+        }
+        let (postbuild_buffer, readback) = if policy.compact_blas {
+            let query_size = (geometry.primitive_count() as u64)
+                .checked_mul(size_of::<u64>() as u64)
+                .ok_or_else(|| as_error("BLAS postbuild query size overflow"))?;
+            let postbuild = create_default_buffer(
+                device,
+                query_size,
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_COMMON,
+            )?;
+            transition_buffer(
+                command_list,
+                &postbuild,
+                D3D12_RESOURCE_STATE_COMMON,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            );
+            let source_addresses = original_blas
+                .iter()
+                .map(|resource| unsafe { resource.as_ref().unwrap().GetGPUVirtualAddress() })
+                .collect::<Vec<_>>();
+            let postbuild_desc = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC {
+                DestBuffer: unsafe { postbuild.GetGPUVirtualAddress() },
+                InfoType: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE,
+            };
+            unsafe {
+                command_list4.EmitRaytracingAccelerationStructurePostbuildInfo(
+                    &postbuild_desc,
+                    &source_addresses,
+                );
+            }
+            uav_barrier(command_list, &postbuild);
+            transition_buffer(
+                command_list,
+                &postbuild,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_COPY_SOURCE,
+            );
+            let readback = create_readback_buffer(device, query_size)?;
+            unsafe {
+                command_list.CopyBufferRegion(&readback, 0, &postbuild, 0, query_size);
+            }
+            (Some(postbuild), Some(readback))
+        } else {
+            (None, None)
+        };
+        Ok(PendingAccelerationStructures {
+            mode,
+            tlas_update_enabled: policy.tlas_update_enabled,
+            tlas_build_flags: policy.tlas_build_flags,
+            blas_infos,
+            original_blas,
+            phase_a_scratch: Some(scratch),
+            postbuild_buffer,
+            readback,
+        })
+    }
+}
+
+impl PendingAccelerationStructures {
+    pub fn finish_phase_b(
+        mut self,
+        device: &ID3D12Device,
+        command_list: &ID3D12GraphicsCommandList,
+        geometry: &SceneGeometry,
+    ) -> Result<AccelerationStructures> {
+        let compacted_sizes = match self.readback.as_ref() {
+            Some(readback) => read_compacted_sizes(readback, self.blas_infos.len())?,
+            None => vec![0; self.blas_infos.len()],
+        };
+        let command_list4: ID3D12GraphicsCommandList4 = command_list.cast()?;
+        let mut final_blas = Vec::with_capacity(self.original_blas.len());
+        let mut retirements = Vec::with_capacity(self.original_blas.len() + 3);
+        let mut records = Vec::with_capacity(self.blas_infos.len());
+        for (primitive_index, reported_size) in compacted_sizes.iter().copied().enumerate() {
+            let info = &self.blas_infos[primitive_index];
+            let original = self.original_blas[primitive_index].take().ok_or_else(|| {
+                as_error(format!("BLAS {primitive_index} original resource missing"))
+            })?;
+            let candidate_size = (reported_size > 0)
+                .then(|| align_acceleration_structure_size(reported_size))
+                .flatten();
+            let candidate_allocation_bytes = candidate_size
+                .map(|size| {
+                    resource_allocation_bytes(
+                        device,
+                        size,
+                        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                    )
+                })
+                .unwrap_or(0);
+            let evaluation = evaluate_compaction(
+                self.mode == AccelerationStructureMode::Optimized,
+                info.prebuild.ResultDataMaxSizeInBytes,
+                reported_size,
+                info.original_allocation_bytes,
+                candidate_allocation_bytes,
+            );
+            let (final_result_bytes, final_allocation_bytes) =
+                if evaluation.decision == CompactionDecision::Compacted {
+                    let compacted_size = evaluation
+                        .aligned_compacted_bytes
+                        .ok_or_else(|| as_error("compacted BLAS size missing"))?;
+                    let compacted = create_default_buffer(
+                        device,
+                        compacted_size,
+                        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                        D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
+                    )?;
+                    unsafe {
+                        command_list4.CopyRaytracingAccelerationStructure(
+                            compacted.GetGPUVirtualAddress(),
+                            original.GetGPUVirtualAddress(),
+                            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_COMPACT,
+                        );
+                    }
+                    uav_barrier(command_list, &compacted);
+                    retirements.push(original);
+                    final_blas.push(compacted);
+                    (compacted_size, candidate_allocation_bytes)
+                } else {
+                    final_blas.push(original);
+                    (
+                        info.prebuild.ResultDataMaxSizeInBytes,
+                        info.original_allocation_bytes,
+                    )
+                };
+            records.push(BlasAllocationRecord {
+                primitive_index,
+                original_result_bytes: info.prebuild.ResultDataMaxSizeInBytes,
+                reported_compacted_bytes: reported_size,
+                original_allocation_bytes: info.original_allocation_bytes,
+                candidate_allocation_bytes,
+                final_result_bytes,
+                final_allocation_bytes,
+                decision: evaluation.decision,
+            });
+        }
+        if let Some(scratch) = self.phase_a_scratch.take() {
+            retirements.push(scratch);
+        }
+        if let Some(postbuild_buffer) = self.postbuild_buffer.take() {
+            retirements.push(postbuild_buffer);
+        }
+        if let Some(readback) = self.readback.take() {
+            retirements.push(readback);
+        }
+
+        let instance_descs = geometry.instance_descriptors(&final_blas);
         let mut frame_data = Vec::with_capacity(FRAME_CONTEXT_COUNT);
         for frame_index in 0..FRAME_CONTEXT_COUNT {
             frame_data.push(FrameInstanceData {
@@ -495,28 +733,38 @@ impl AccelerationStructures {
                 )?,
             });
         }
+        let tlas_build_flags =
+            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS(self.tlas_build_flags as i32);
         let instance_buffer = &frame_data[0].instance_descs.resource;
         let tlas_inputs = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS {
             Type: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL,
-            Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE
-                | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE,
+            Flags: tlas_build_flags,
             NumDescs: instance_descs.len() as u32,
             DescsLayout: D3D12_ELEMENTS_LAYOUT_ARRAY,
             Anonymous: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_0 {
                 InstanceDescs: unsafe { instance_buffer.GetGPUVirtualAddress() },
             },
         };
+        let device5: ID3D12Device5 = device.cast()?;
         let mut tlas_info = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO::default();
         unsafe {
             device5.GetRaytracingAccelerationStructurePrebuildInfo(&tlas_inputs, &mut tlas_info);
         }
+        let tlas_result_bytes = tlas_info.ResultDataMaxSizeInBytes;
+        let tlas_result_allocation_size = align_acceleration_structure_size(tlas_result_bytes)
+            .ok_or_else(|| as_error("TLAS result size overflow"))?;
         let tlas = create_default_buffer(
             device,
-            tlas_info.ResultDataMaxSizeInBytes,
+            tlas_result_allocation_size,
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
         )?;
-        let scratch_size = required_scratch_size(&blas_infos, &tlas_info);
+        let scratch_size = policy_required_scratch_size(
+            std::iter::empty::<u64>(),
+            tlas_info.ScratchDataSizeInBytes,
+            self.tlas_update_enabled
+                .then_some(tlas_info.UpdateScratchDataSizeInBytes),
+        );
         let scratch = create_default_buffer(
             device,
             scratch_size,
@@ -529,29 +777,6 @@ impl AccelerationStructures {
             D3D12_RESOURCE_STATE_COMMON,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
         );
-
-        for (primitive_index, blas_resource) in blas.iter().enumerate() {
-            let geometry_desc = geometry.geometry_desc(primitive_index);
-            let blas_inputs = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS {
-                Type: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL,
-                Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE,
-                NumDescs: 1,
-                DescsLayout: D3D12_ELEMENTS_LAYOUT_ARRAY,
-                Anonymous: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_0 {
-                    pGeometryDescs: &geometry_desc,
-                },
-            };
-            let blas_build = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC {
-                DestAccelerationStructureData: unsafe { blas_resource.GetGPUVirtualAddress() },
-                Inputs: blas_inputs,
-                SourceAccelerationStructureData: 0,
-                ScratchAccelerationStructureData: unsafe { scratch.GetGPUVirtualAddress() },
-            };
-            unsafe {
-                command_list4.BuildRaytracingAccelerationStructure(&blas_build, None);
-            }
-            uav_barrier(command_list, blas_resource);
-        }
         let tlas_build = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC {
             DestAccelerationStructureData: unsafe { tlas.GetGPUVirtualAddress() },
             Inputs: tlas_inputs,
@@ -562,22 +787,47 @@ impl AccelerationStructures {
             command_list4.BuildRaytracingAccelerationStructure(&tlas_build, None);
         }
         uav_barrier(command_list, &tlas);
-        Ok(Self {
+        let telemetry = AccelerationStructureStats::from_records(
+            self.mode,
+            self.tlas_update_enabled,
+            records,
+            tlas_result_bytes,
+            resource_allocation_bytes(
+                device,
+                tlas_result_allocation_size,
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            ),
+            if self.tlas_update_enabled {
+                scratch_size
+            } else {
+                0
+            },
+        );
+        Ok(AccelerationStructures {
             tlas,
-            _blas: blas,
+            blas: final_blas,
             build_scratch: Some(scratch),
             frame_data,
+            tlas_update_enabled: self.tlas_update_enabled,
+            tlas_build_flags,
+            initialization_retirements: retirements,
+            telemetry,
         })
     }
+}
 
+impl AccelerationStructures {
     pub fn update(
         &mut self,
         command_list: &ID3D12GraphicsCommandList,
         frame_index: usize,
         geometry: &SceneGeometry,
     ) -> Result<()> {
+        if !self.tlas_update_enabled {
+            return Err(as_error("静态 TLAS 不允许 update；调用方违反了 AS 策略"));
+        }
         let frame = &self.frame_data[frame_index % FRAME_CONTEXT_COUNT];
-        let instance_descs = geometry.instance_descriptors(&self._blas);
+        let instance_descs = geometry.instance_descriptors(&self.blas);
         frame.instance_descs.write(&instance_descs);
         frame.instance_gpu.write(geometry.instance_gpu_data());
         let scratch = self.build_scratch.as_ref().ok_or_else(|| {
@@ -588,9 +838,9 @@ impl AccelerationStructures {
         })?;
         let inputs = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS {
             Type: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL,
-            Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE
-                | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE
-                | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE,
+            Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS(
+                crate::as_policy::update_flags(self.tlas_build_flags.0 as u32) as i32,
+            ),
             NumDescs: instance_descs.len() as u32,
             DescsLayout: D3D12_ELEMENTS_LAYOUT_ARRAY,
             Anonymous: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_0 {
@@ -618,26 +868,66 @@ impl AccelerationStructures {
         }
     }
 
-    /// BLAS scratch is only needed until the initial AS build fence completes;
-    /// the instance upload remains alive for the TLAS update path.
     pub fn release_build_resources(&mut self) {
-        // TLAS update keeps this scratch allocation alive for the renderer lifetime.
+        self.initialization_retirements.clear();
+        if !self.tlas_update_enabled {
+            self.build_scratch = None;
+        }
+    }
+
+    pub fn stats(&self) -> &AccelerationStructureStats {
+        &self.telemetry
     }
 }
 
-fn required_scratch_size(
-    blas_infos: &[D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO],
-    tlas_info: &D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO,
-) -> u64 {
-    blas_infos
-        .iter()
-        .map(|info| info.ScratchDataSizeInBytes)
-        .chain([
-            tlas_info.ScratchDataSizeInBytes,
-            tlas_info.UpdateScratchDataSizeInBytes,
-        ])
-        .max()
-        .unwrap_or(0)
+fn as_error(message: impl Into<String>) -> windows::core::Error {
+    windows::core::Error::new(
+        windows::core::HRESULT(0x80004005_u32 as i32),
+        message.into(),
+    )
+}
+
+fn read_compacted_sizes(resource: &ID3D12Resource, count: usize) -> Result<Vec<u64>> {
+    let byte_size = count
+        .checked_mul(size_of::<u64>())
+        .ok_or_else(|| as_error("BLAS compacted size readback size overflow"))?;
+    let read_range = D3D12_RANGE {
+        Begin: 0,
+        End: byte_size,
+    };
+    let mut mapped = std::ptr::null_mut::<c_void>();
+    unsafe {
+        resource.Map(0, Some(&read_range), Some(&mut mapped))?;
+        let values = std::slice::from_raw_parts(mapped.cast::<u64>(), count).to_vec();
+        resource.Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }));
+        Ok(values)
+    }
+}
+
+fn resource_allocation_bytes(device: &ID3D12Device, size: u64, flags: D3D12_RESOURCE_FLAGS) -> u64 {
+    if size == 0 {
+        return 0;
+    }
+    let description = buffer_resource_desc(size, flags);
+    unsafe { device.GetResourceAllocationInfo(0, std::slice::from_ref(&description)) }.SizeInBytes
+}
+
+fn buffer_resource_desc(size: u64, flags: D3D12_RESOURCE_FLAGS) -> D3D12_RESOURCE_DESC {
+    D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+        Alignment: 0,
+        Width: size,
+        Height: 1,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: DXGI_FORMAT_UNKNOWN,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        Flags: flags,
+    }
 }
 
 fn uav_barrier(command_list: &ID3D12GraphicsCommandList, resource: &ID3D12Resource) {
@@ -669,21 +959,7 @@ fn create_default_buffer(
         CreationNodeMask: 0,
         VisibleNodeMask: 0,
     };
-    let description = D3D12_RESOURCE_DESC {
-        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-        Alignment: 0,
-        Width: size,
-        Height: 1,
-        DepthOrArraySize: 1,
-        MipLevels: 1,
-        Format: DXGI_FORMAT_UNKNOWN,
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
-        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-        Flags: flags,
-    };
+    let description = buffer_resource_desc(size, flags);
     let mut resource = None;
     unsafe {
         device.CreateCommittedResource(
@@ -691,6 +967,26 @@ fn create_default_buffer(
             D3D12_HEAP_FLAG_NONE,
             &description,
             state,
+            None,
+            &mut resource,
+        )?;
+    }
+    Ok(resource.unwrap())
+}
+
+fn create_readback_buffer(device: &ID3D12Device, size: u64) -> Result<ID3D12Resource> {
+    let heap = D3D12_HEAP_PROPERTIES {
+        Type: D3D12_HEAP_TYPE_READBACK,
+        ..Default::default()
+    };
+    let description = buffer_resource_desc(size, D3D12_RESOURCE_FLAGS(0));
+    let mut resource = None;
+    unsafe {
+        device.CreateCommittedResource(
+            &heap,
+            D3D12_HEAP_FLAG_NONE,
+            &description,
+            D3D12_RESOURCE_STATE_COPY_DEST,
             None,
             &mut resource,
         )?;
@@ -1130,7 +1426,14 @@ mod tests {
             UpdateScratchDataSizeInBytes: 512,
             ..Default::default()
         };
-        assert_eq!(required_scratch_size(&[blas], &tlas), 512);
+        assert_eq!(
+            policy_required_scratch_size(
+                [blas.ScratchDataSizeInBytes],
+                tlas.ScratchDataSizeInBytes,
+                Some(tlas.UpdateScratchDataSizeInBytes),
+            ),
+            512
+        );
     }
 
     #[test]

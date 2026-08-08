@@ -19,7 +19,6 @@ pub enum AccelerationStructureMode {
 }
 
 impl AccelerationStructureMode {
-    #[expect(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Baseline => "baseline",
