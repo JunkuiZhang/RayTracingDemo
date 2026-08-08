@@ -826,9 +826,11 @@ Rust 只传递稳定的句柄、枚举和 POD 结构，禁止跨 FFI 传递 Rust
 
 ### 阶段 8：性能优化
 
-当前状态：**8A 可信 GPU 基线和显存遥测已实现；8A 长时真机验收及 8B–8G 尚未完成**。详细的工作包、验收矩阵、提交顺序和 Luna 交付要求见 [`阶段8性能优化执行计划.md`](阶段8性能优化执行计划.md)。因此本阶段仍不能标记为完成。
+当前状态：**8A 可信 GPU 基线和显存遥测已实现；8B shared tile 实验已完成但因实测回退未采纳；8A 长时真机验收及 8C–8G 尚未完成**。详细的工作包、验收矩阵、提交顺序和 Luna 交付要求见 [`阶段8性能优化执行计划.md`](阶段8性能优化执行计划.md)。因此本阶段仍不能标记为完成。
 
 8A 已将 `Total` 从 AS build/update 前开始到 ToneMap 完成后结束，并排除了 Present/垂直同步；同时记录 AS、Path Trace、Temporal、À-Trous 聚合及 0/1/2/3 子迭代、ToneMap。profiler 使用三帧 Frame Context 的 query/readback 槽，只有对应 fence 完成后才读取；UI 统计窗口固定保留最近 240 个有效样本，benchmark 则使用固定内存直方图覆盖完整测量区间，并在开始时排除尚未完成的预热帧。`--benchmark-seconds <1..3600>` 在 120 个有效帧预热后输出单行稳定 JSON，显存字段来自所选 adapter 的 IDXGIAdapter3 local segment 查询，查询间隔约 500 ms。Microsoft 官方 WinPixEventRuntime x64 DLL 随仓库固定版本部署到可执行文件目录，JSON 会报告 PIX event 是否可用。
+
+8B 为 step 1/2 实现了 16×16、15360 B 的 groupshared tile，并保留 step 4/8 基线；`--atrous-mode baseline|shared` 提供显式 A/B，默认 baseline。在 RTX 4060 Laptop GPU 的 720p/900p/1080p 单次 5 秒筛选中，shared 的 À-Trous p50 分别回退 38.9%/52.1%/46.0%，Total p95 分别回退 11.3%/13.3%/13.3%，因此该实验不予采纳。Debug GPU Validation 正常退出且 InfoQueue 为 0；完整数据见阶段 8 执行计划 9.2。
 
 阶段 7 的历史 Release Cornell 基线为：1280×720 Total 10.87 ms、1600×900 Total 16.51 ms、1920×1080 Total 24.45 ms。它们不包含 AS 区间且仅显示最近样本，不能直接用作阶段 8 的最终验收数据。
 
@@ -836,7 +838,7 @@ Rust 只传递稳定的句柄、枚举和 POD 结构，禁止跨 FFI 传递 Rust
 
 - 优化 BLAS/TLAS 构建和更新。
 - 降低 Descriptor 和资源切换开销。
-- À-Trous 使用 Group Shared Memory。
+- 评估 À-Trous Group Shared Memory（实验已完成，未采纳为默认）。
 - 根据 GPU 计时建立动态内部渲染分辨率。
 - 评估 Inline Ray Query/Wavefront 路径追踪。
 
