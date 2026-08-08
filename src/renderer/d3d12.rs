@@ -829,15 +829,17 @@ impl Dx12Renderer {
             self.gpu_profiler.end_event(&self.command_list);
             display_output
                 .collect_transition(&mut self.transition_batch, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            self.render_targets[frame_index]
-                .as_mut()
-                .unwrap()
-                .collect_transition(&mut self.transition_batch, D3D12_RESOURCE_STATE_COPY_DEST);
             self.submit_transition_batch(&mut command_recording_stats);
 
             self.gpu_profiler
                 .end(&self.command_list, frame_index, GpuPass::Total);
             self.gpu_profiler.end_event(&self.command_list);
+
+            self.render_targets[frame_index]
+                .as_mut()
+                .unwrap()
+                .collect_transition(&mut self.transition_batch, D3D12_RESOURCE_STATE_COPY_DEST);
+            self.submit_transition_batch(&mut command_recording_stats);
 
             let display_output = self.display_output.as_ref().unwrap();
             let render_target = self.render_targets[frame_index].as_mut().unwrap();
@@ -974,10 +976,9 @@ impl Dx12Renderer {
     }
 
     fn atrous_pipeline_for_step(&self, step_width: u32) -> &ComputePipeline {
-        if uses_shared_atrous(self.atrous_mode, step_width) {
-            &self.atrous_shared_pipeline
-        } else {
-            &self.atrous_baseline_pipeline
+        match atrous_pipeline_kind(self.atrous_mode, step_width) {
+            AtrousPipelineKind::Baseline => &self.atrous_baseline_pipeline,
+            AtrousPipelineKind::Shared => &self.atrous_shared_pipeline,
         }
     }
 
@@ -1051,8 +1052,26 @@ impl Dx12Renderer {
     }
 }
 
-fn uses_shared_atrous(mode: AtrousMode, step_width: u32) -> bool {
-    mode == AtrousMode::Shared && matches!(step_width, 1 | 2)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AtrousPipelineKind {
+    Baseline,
+    Shared,
+}
+
+fn atrous_pipeline_kind(mode: AtrousMode, step_width: u32) -> AtrousPipelineKind {
+    if mode == AtrousMode::Shared && matches!(step_width, 1 | 2) {
+        AtrousPipelineKind::Shared
+    } else {
+        AtrousPipelineKind::Baseline
+    }
+}
+
+fn should_bind_atrous_pipeline<T: Copy + PartialEq>(
+    command_mode: CommandRecordingMode,
+    previous: Option<T>,
+    current: T,
+) -> bool {
+    command_mode == CommandRecordingMode::Baseline || previous != Some(current)
 }
 
 struct BenchmarkJsonContext<'a> {
@@ -1523,9 +1542,7 @@ impl Dx12Renderer {
     ) {
         let pipeline = self.atrous_pipeline_for_step(step_width);
         let identity = pipeline as *const ComputePipeline;
-        if self.command_recording_mode == CommandRecordingMode::Baseline
-            || *previous_pipeline != Some(identity)
-        {
+        if should_bind_atrous_pipeline(self.command_recording_mode, *previous_pipeline, identity) {
             pipeline.bind_pipeline(&self.command_list);
             *previous_pipeline = Some(identity);
             stats.atrous_pipeline_binds = stats.atrous_pipeline_binds.saturating_add(1);
@@ -2027,7 +2044,7 @@ mod tests {
                     p95_ms: Some(0.61),
                     valid_samples: 240,
                 },
-                tracked_transition_api_calls_mean: Some(10.0),
+                tracked_transition_api_calls_mean: Some(11.0),
                 tracked_transition_barriers_mean: Some(58.0),
                 atrous_pipeline_binds_mean: Some(1.0),
                 atrous_argument_updates_mean: Some(4.0),
@@ -2044,7 +2061,7 @@ mod tests {
         assert_eq!(value["command_recording"]["cpu_ms"]["p95_ms"], 0.61);
         assert_eq!(
             value["command_recording"]["tracked_transition_api_calls_mean"],
-            10.0
+            11.0
         );
         assert_eq!(
             value["command_recording"]["atrous_pipeline_binds_mean"],
@@ -2063,11 +2080,60 @@ mod tests {
 
     #[test]
     fn shared_atrous_is_limited_to_the_small_step_iterations() {
-        assert!(!uses_shared_atrous(AtrousMode::Baseline, 1));
-        assert!(uses_shared_atrous(AtrousMode::Shared, 1));
-        assert!(uses_shared_atrous(AtrousMode::Shared, 2));
-        assert!(!uses_shared_atrous(AtrousMode::Shared, 4));
-        assert!(!uses_shared_atrous(AtrousMode::Shared, 8));
-        assert!(!uses_shared_atrous(AtrousMode::Shared, 0));
+        assert_eq!(
+            atrous_pipeline_kind(AtrousMode::Baseline, 1),
+            AtrousPipelineKind::Baseline
+        );
+        assert_eq!(
+            atrous_pipeline_kind(AtrousMode::Shared, 1),
+            AtrousPipelineKind::Shared
+        );
+        assert_eq!(
+            atrous_pipeline_kind(AtrousMode::Shared, 2),
+            AtrousPipelineKind::Shared
+        );
+        assert_eq!(
+            atrous_pipeline_kind(AtrousMode::Shared, 4),
+            AtrousPipelineKind::Baseline
+        );
+        assert_eq!(
+            atrous_pipeline_kind(AtrousMode::Shared, 8),
+            AtrousPipelineKind::Baseline
+        );
+        assert_eq!(
+            atrous_pipeline_kind(AtrousMode::Shared, 0),
+            AtrousPipelineKind::Baseline
+        );
+    }
+
+    #[test]
+    fn atrous_binding_runs_match_command_and_shader_modes() {
+        fn counts(command_mode: CommandRecordingMode, atrous_mode: AtrousMode) -> (usize, usize) {
+            let mut previous = None;
+            let mut pipeline_binds = 0;
+            let mut argument_updates = 0;
+            for step_width in [1, 2, 4, 8] {
+                let current = atrous_pipeline_kind(atrous_mode, step_width);
+                if should_bind_atrous_pipeline(command_mode, previous, current) {
+                    pipeline_binds += 1;
+                }
+                previous = Some(current);
+                argument_updates += 1;
+            }
+            (pipeline_binds, argument_updates)
+        }
+
+        assert_eq!(
+            counts(CommandRecordingMode::Baseline, AtrousMode::Baseline),
+            (4, 4)
+        );
+        assert_eq!(
+            counts(CommandRecordingMode::Optimized, AtrousMode::Baseline),
+            (1, 4)
+        );
+        assert_eq!(
+            counts(CommandRecordingMode::Optimized, AtrousMode::Shared),
+            (2, 4)
+        );
     }
 }
