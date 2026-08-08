@@ -227,7 +227,7 @@ fn print_help() {
          --benchmark-seconds <秒> 预热后输出固定格式 GPU JSON 报告（1..3600）\n  \
          --atrous-mode <模式>      À-Trous 路径：baseline 或 shared，默认 baseline\n  \
          --output-size <宽x高>     窗口物理像素尺寸，范围 320x180..7680x4320\n  \
-         --command-recording-mode <模式> 命令记录：baseline 或 optimized，默认 baseline\n  \
+         --command-recording-mode <模式> 命令记录：baseline 或 optimized，默认 optimized\n  \
          --help, -h             显示帮助"
     );
 }
@@ -258,7 +258,10 @@ mod tests {
     fn realtime_is_the_default_command() {
         assert!(matches!(
             parse_arguments(Vec::<String>::new()),
-            Ok(Command::Realtime(_))
+            Ok(Command::Realtime(RealtimeConfig {
+                command_recording_mode: crate::realtime::CommandRecordingMode::Optimized,
+                ..
+            }))
         ));
     }
 

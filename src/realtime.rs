@@ -28,8 +28,8 @@ impl AtrousMode {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CommandRecordingMode {
-    #[default]
     Baseline,
+    #[default]
     Optimized,
 }
 

@@ -136,7 +136,7 @@ cargo run --release -- --model assets/gltf/NonIndexedMultiNode/NonIndexedMultiNo
 
 ## 阶段 8：性能优化（8A–8C）
 
-8A 已建立可信 GPU 基线和显存遥测；8B 已完成 À-Trous small-step shared tile 实验，但在 RTX 4060 Laptop GPU 上三个测试分辨率均明显慢于基线；8C 已完成 barrier/bind A/B 实现和三档 Release 数值矩阵，optimized 数值门槛通过但截图/人工画面对比尚未完成，因此默认仍使用 baseline。阶段 8 尚未完成。窗口标题显示阶段 8、命令记录模式、最近有效 GPU Total、滚动 p95、输出尺寸、À-Trous 模式和 local VRAM usage/budget；PIX capture 可按 AS、Path Trace、Temporal、À-Trous 0/1/2/3 和 ToneMap 区分事件。
+8A 已建立可信 GPU 基线和显存遥测；8B 已完成 À-Trous small-step shared tile 实验，但在 RTX 4060 Laptop GPU 上三个测试分辨率均明显慢于基线；8C 已完成 barrier/bind A/B 实现和三档 Release 数值矩阵，命令记录默认已切换为 optimized，并永久保留 baseline 回退开关。截图/逐视图画面对比仍是待补验收项，阶段 8 尚未完成。窗口标题显示阶段 8、命令记录模式、最近有效 GPU Total、滚动 p95、输出尺寸、À-Trous 模式和 local VRAM usage/budget；PIX capture 可按 AS、Path Trace、Temporal、À-Trous 0/1/2/3 和 ToneMap 区分事件。
 
 Release benchmark 在 120 个有效 GPU 帧预热后采样指定时长，stdout 最终输出恰好一行 JSON：
 
