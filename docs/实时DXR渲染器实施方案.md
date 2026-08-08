@@ -826,7 +826,7 @@ Rust 只传递稳定的句柄、枚举和 POD 结构，禁止跨 FFI 传递 Rust
 
 ### 阶段 8：性能优化
 
-当前状态：**8A 可信 GPU 基线和显存遥测已实现；8B shared tile 实验已完成但因实测回退未采纳；8C 屏障批处理和重复绑定清理已采用 optimized 默认并保留回退路径；8D 两阶段 AS 初始化、TLAS 策略和 allocation 遥测已实现，但真实 compact copy、大模型及画面对比尚未验收，AS 默认仍为 baseline；8A 长时真机验收和 8E–8G 尚未完成**。详细工作包和验收矩阵见 [`阶段8性能优化执行计划.md`](阶段8性能优化执行计划.md)，因此本阶段仍不能标记为完成。
+当前状态：**8A 可信 GPU 基线和显存遥测已实现；8B shared tile 实验已完成但因实测回退未采纳；8C 屏障批处理和重复绑定清理已采用 optimized 默认并保留回退路径；8D 两阶段 AS 初始化、TLAS 策略和 allocation 遥测已实现，但真实 compact copy、大模型及画面对比尚未验收，AS 默认仍为 baseline；8E-1 输出/内部尺寸解耦代码已实现并完成自动化、四档 Release smoke 和两条 RTX 4060 Laptop Debug Validation，但完整 F1/F2/resize/最小化/恢复/hot-reload 人工矩阵、长时矩阵和截图对比尚未完成；8E-2、8F、8G 尚未完成**。详细工作包和验收矩阵见 [`阶段8性能优化执行计划.md`](阶段8性能优化执行计划.md)，因此本阶段仍不能标记为完成。
 
 8A 已将 `Total` 从 AS build/update 前开始到 ToneMap 完成后结束，并排除了 Present/垂直同步；同时记录 AS、Path Trace、Temporal、À-Trous 聚合及 0/1/2/3 子迭代、ToneMap。profiler 使用三帧 Frame Context 的 query/readback 槽，只有对应 fence 完成后才读取；UI 统计窗口固定保留最近 240 个有效样本，benchmark 则使用固定内存直方图覆盖完整测量区间，并在开始时排除尚未完成的预热帧。`--benchmark-seconds <1..3600>` 在 120 个有效帧预热后输出单行稳定 JSON，显存字段来自所选 adapter 的 IDXGIAdapter3 local segment 查询，查询间隔约 500 ms。Microsoft 官方 WinPixEventRuntime x64 DLL 随仓库固定版本部署到可执行文件目录，JSON 会报告 PIX event 是否可用。
 
@@ -834,7 +834,7 @@ Rust 只传递稳定的句柄、枚举和 POD 结构，禁止跨 FFI 传递 Rust
 
 8C 通过 `--command-recording-mode baseline|optimized` 保留 A/B：optimized 把 steady-state tracked transition API 调用从 58 降至 11，transition 元素保持 58，baseline À-Trous pipeline bind 从 4 降至 1。RTX 4060 Laptop GPU 三档各三次 30 秒数值矩阵和 Debug GPU Validation 已通过数值门槛，命令记录默认已切换为 optimized，baseline 继续作为显式回退路径；自动截图/逐视图像素对比仍须在 8G 前补齐。完整原始数据见阶段 8 执行计划 9.3。
 
-8D 增加 `--acceleration-structure-mode baseline|optimized`：optimized 使用 Phase A build/postbuild readback、CPU committed-allocation 决策和 Phase B compact copy/TLAS build，并按真实动画能力决定 TLAS update 与 scratch 常驻。RTX 4060 Laptop 的 Cornell 和小型 glTF 均因 64 KiB allocation 粒度没有执行 compact copy，因此 AS 默认继续 baseline；大 BLAS 和画面对比仍待验收。下一代码工作包为 8E-1：解耦输出尺寸与内部渲染尺寸；详细实施边界、资源代际设计和 Luna 提示词见 [`阶段8E1输出与内部渲染尺寸解耦执行方案.md`](阶段8E1输出与内部渲染尺寸解耦执行方案.md)，当前尚未实现。
+8D 增加 `--acceleration-structure-mode baseline|optimized`：optimized 使用 Phase A build/postbuild readback、CPU committed-allocation 决策和 Phase B compact copy/TLAS build，并按真实动画能力决定 TLAS update 与 scratch 常驻。RTX 4060 Laptop 的 Cornell 和小型 glTF 均因 64 KiB allocation 粒度没有执行 compact copy，因此 AS 默认继续 baseline；大 BLAS 和画面对比仍待验收。8E-1 已增加 `output_extent`/`render_extent`、固定 `--render-scale`、ToneMap/F1 重采样、独立 generation heap、F2 档位、fence 退休和遥测；完整人工矩阵与长时性能验收仍待完成。详细实施边界、资源代际设计和验收记录见 [`阶段8E1输出与内部渲染尺寸解耦执行方案.md`](阶段8E1输出与内部渲染尺寸解耦执行方案.md) 与阶段 8 执行计划，阶段 8 仍未完成。
 
 阶段 7 的历史 Release Cornell 基线为：1280×720 Total 10.87 ms、1600×900 Total 16.51 ms、1920×1080 Total 24.45 ms。它们不包含 AS 区间且仅显示最近样本，不能直接用作阶段 8 的最终验收数据。
 
