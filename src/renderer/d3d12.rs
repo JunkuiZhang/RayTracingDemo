@@ -21,7 +21,8 @@ use crate::{
     as_policy::AccelerationStructureStats,
     realtime::{AtrousMode, CommandRecordingMode, RealtimeConfig},
     resolution::{
-        Extent2D, RenderExtentChange, RenderScale, classify_render_extent_change, render_extent,
+        DynamicResolutionController, DynamicResolutionDirection, Extent2D, RenderExtentChange,
+        RenderScale, ResolutionMode, classify_render_extent_change, render_extent,
     },
     scene::{MAX_SCENE_SAMPLERS, SceneAsset, gltf_loader},
 };
@@ -74,6 +75,7 @@ struct FrameContext {
     allocator: ID3D12CommandAllocator,
     fence_value: u64,
     timing_valid: bool,
+    timing_generation_id: u64,
 }
 
 #[repr(C)]
@@ -102,6 +104,9 @@ pub struct Dx12Renderer {
     render_targets: [Option<TrackedResource>; FRAME_COUNT],
     active_generation: RenderResourceGeneration,
     retired_generations: VecDeque<RetiredRenderResourceGeneration>,
+    resolution_mode: ResolutionMode,
+    dynamic_resolution: Option<DynamicResolutionController>,
+    resolution_clock: Instant,
     requested_render_scale: RenderScale,
     next_generation_id: u64,
     render_generation_create_count: u64,
@@ -243,6 +248,7 @@ impl Dx12Renderer {
                     allocator: device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)?,
                     fence_value: 0,
                     timing_valid: false,
+                    timing_generation_id: 0,
                 });
             }
             let command_list: ID3D12GraphicsCommandList = device.CreateCommandList(
@@ -345,7 +351,11 @@ impl Dx12Renderer {
             );
             acceleration_structures.release_build_resources();
             let output_extent = Extent2D { width, height };
-            let render_extent = render_extent(output_extent, config.render_scale);
+            let initial_scale = match config.resolution_mode {
+                ResolutionMode::Fixed(scale) => scale,
+                ResolutionMode::Dynamic(_) => RenderScale::NATIVE,
+            };
+            let render_extent = render_extent(output_extent, initial_scale);
             let active_generation = RenderResourceGeneration::new(
                 &device,
                 &texture_set,
@@ -366,7 +376,15 @@ impl Dx12Renderer {
                 render_targets: [None, None, None],
                 active_generation,
                 retired_generations: VecDeque::new(),
-                requested_render_scale: config.render_scale,
+                resolution_mode: config.resolution_mode,
+                dynamic_resolution: match config.resolution_mode {
+                    ResolutionMode::Fixed(_) => None,
+                    ResolutionMode::Dynamic(dynamic_config) => {
+                        Some(DynamicResolutionController::new(dynamic_config))
+                    }
+                },
+                resolution_clock: Instant::now(),
+                requested_render_scale: initial_scale,
                 next_generation_id: 2,
                 render_generation_create_count: 1,
                 render_generation_switch_count: 0,
@@ -447,19 +465,27 @@ impl Dx12Renderer {
             return Ok(());
         }
         self.memory_telemetry.poll(false);
-        let output_extent = self.active_generation.output_extent;
-        let render_extent = self.active_generation.render_extent;
 
         unsafe {
             let frame_index = self.swap_chain.GetCurrentBackBufferIndex() as usize;
             let previous_fence_value = self.frames[frame_index].fence_value;
             let previous_timing_valid = self.frames[frame_index].timing_valid;
+            let previous_timing_generation_id = self.frames[frame_index].timing_generation_id;
             self.wait_for_frame(frame_index)?;
             let fence_completed =
                 previous_fence_value != 0 && self.fence.GetCompletedValue() >= previous_fence_value;
-            self.gpu_profiler
-                .collect(frame_index, fence_completed, previous_timing_valid)?;
+            let timing_sample =
+                self.gpu_profiler
+                    .collect(frame_index, fence_completed, previous_timing_valid)?;
+            if let Some(sample) = timing_sample {
+                self.apply_dynamic_resolution_sample(
+                    sample.total_ms,
+                    previous_timing_generation_id == self.active_generation.id,
+                )?;
+            }
             self.reclaim_retired_generations();
+            let output_extent = self.active_generation.output_extent;
+            let render_extent = self.active_generation.render_extent;
             let command_recording_started = Instant::now();
             let mut command_recording_stats = CommandRecordingFrameStats::default();
             let frame = &self.frames[frame_index];
@@ -847,6 +873,7 @@ impl Dx12Renderer {
             self.command_queue.Signal(&self.fence, fence_value)?;
             self.frames[frame_index].fence_value = fence_value;
             self.frames[frame_index].timing_valid = !self.reset_history;
+            self.frames[frame_index].timing_generation_id = self.active_generation.id;
             self.active_generation.last_used_fence = fence_value;
             if self.benchmark_measurement_active {
                 self.benchmark_render_min.width =
@@ -903,6 +930,7 @@ impl Dx12Renderer {
             for frame in &mut self.frames {
                 frame.fence_value = 0;
                 frame.timing_valid = false;
+                frame.timing_generation_id = 0;
             }
             self.width = width;
             self.height = height;
@@ -930,6 +958,9 @@ impl Dx12Renderer {
             )?;
             self.next_generation_id = self.next_generation_id.saturating_add(1);
             self.active_generation = new_generation;
+            if let Some(controller) = self.dynamic_resolution.as_mut() {
+                controller.reset_after_discontinuity(self.requested_render_scale);
+            }
             self.render_generation_create_count =
                 self.render_generation_create_count.saturating_add(1);
             self.render_generation_switch_count =
@@ -938,6 +969,61 @@ impl Dx12Renderer {
             self.create_render_targets()?;
             Ok(())
         }
+    }
+
+    fn apply_dynamic_resolution_sample(
+        &mut self,
+        total_gpu_time_ms: f64,
+        generation_matches: bool,
+    ) -> Result<()> {
+        let now = self.resolution_clock.elapsed();
+        let output_extent = self.active_generation.output_extent;
+        let active_extent = self.active_generation.render_extent;
+        let decision = match self.dynamic_resolution.as_mut() {
+            Some(controller) => controller.observe_sample(
+                Some(total_gpu_time_ms),
+                generation_matches,
+                now,
+                output_extent,
+                active_extent,
+            ),
+            None => return Ok(()),
+        };
+        let Some(decision) = decision else {
+            return Ok(());
+        };
+
+        let old_generation_id = self.active_generation.id;
+        let old_extent = self.active_generation.render_extent;
+        let old_retire_fence = self.active_generation.last_used_fence;
+        self.set_render_scale(decision.new_scale)?;
+        if self.active_generation.id == old_generation_id {
+            return Ok(());
+        }
+
+        self.dynamic_resolution
+            .as_mut()
+            .expect("dynamic resolution controller exists for a dynamic decision")
+            .commit_switch(decision, now);
+        let direction = match decision.direction {
+            DynamicResolutionDirection::Down => "down",
+            DynamicResolutionDirection::Up => "up",
+        };
+        eprintln!(
+            "动态分辨率切换：direction={direction} total={:.3}ms threshold={:.3}ms streak={} scale {:.3}->{:.3} extent {}x{}->{}x{} generation={} old_retire_fence={}",
+            f64::from(decision.total_gpu_time_us) / 1_000.0,
+            f64::from(decision.threshold_gpu_time_us) / 1_000.0,
+            decision.streak,
+            decision.old_scale.get(),
+            decision.new_scale.get(),
+            old_extent.width,
+            old_extent.height,
+            self.active_generation.render_extent.width,
+            self.active_generation.render_extent.height,
+            self.active_generation.id,
+            old_retire_fence,
+        );
+        Ok(())
     }
 
     /// Request a fixed internal scale at a frame boundary. New resources and
@@ -1014,6 +1100,10 @@ impl Dx12Renderer {
     }
 
     pub fn cycle_render_scale(&mut self) -> Result<()> {
+        if matches!(self.resolution_mode, ResolutionMode::Dynamic(_)) {
+            eprintln!("动态分辨率模式由 GPU 控制，F2 固定档位不可用");
+            return Ok(());
+        }
         let profiles = [
             RenderScale::NATIVE,
             RenderScale::new(0.83).expect("固定 F2 档位必须有效"),
@@ -1546,6 +1636,7 @@ impl Dx12Renderer {
         self.gpu_profiler.invalidate();
         for frame in &mut self.frames {
             frame.timing_valid = false;
+            frame.timing_generation_id = 0;
         }
         let raytracing = RaytracingPipeline::new(&self.device, &shaders.raytracing)?;
         let temporal = ComputePipeline::new(
@@ -1587,6 +1678,9 @@ impl Dx12Renderer {
         self.tonemap_pipeline = tonemap;
         self.request_history_reset();
         self.accumulated_frames = 0;
+        if let Some(controller) = self.dynamic_resolution.as_mut() {
+            controller.reset_after_discontinuity(self.requested_render_scale);
+        }
         Ok(())
     }
 

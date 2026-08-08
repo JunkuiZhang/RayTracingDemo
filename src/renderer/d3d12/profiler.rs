@@ -298,6 +298,7 @@ pub struct GpuProfiler {
     benchmark: Option<BenchmarkAccumulator>,
     command_recording: Option<CommandRecordingAccumulator>,
     valid_sample_serial: u64,
+    collected_frames: Vec<bool>,
     pix: PixEventRuntime,
 }
 
@@ -354,6 +355,7 @@ impl GpuProfiler {
             benchmark: None,
             command_recording: None,
             valid_sample_serial: 0,
+            collected_frames: vec![false; frame_count],
             pix: PixEventRuntime::load(),
         })
     }
@@ -408,7 +410,7 @@ impl GpuProfiler {
         }
     }
 
-    pub fn resolve_frame(&self, command_list: &ID3D12GraphicsCommandList, frame_index: usize) {
+    pub fn resolve_frame(&mut self, command_list: &ID3D12GraphicsCommandList, frame_index: usize) {
         let query_start = frame_index * TIMESTAMPS_PER_FRAME;
         unsafe {
             command_list.ResolveQueryData(
@@ -420,6 +422,7 @@ impl GpuProfiler {
                 (query_start * size_of::<u64>()) as u64,
             );
         }
+        self.collected_frames[frame_index] = false;
     }
 
     /// `fence_completed` must be true only after the frame context fence has
@@ -430,9 +433,12 @@ impl GpuProfiler {
         frame_index: usize,
         fence_completed: bool,
         sample_valid: bool,
-    ) -> Result<bool> {
+    ) -> Result<Option<GpuTimingSample>> {
         if !fence_completed {
-            return Ok(false);
+            return Ok(None);
+        }
+        if self.collected_frames[frame_index] {
+            return Ok(None);
         }
 
         let timestamp_start = frame_index * TIMESTAMPS_PER_FRAME;
@@ -452,6 +458,7 @@ impl GpuProfiler {
             self.readback
                 .Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }));
         }
+        self.collected_frames[frame_index] = true;
 
         let mut values = [0.0_f64; PASS_COUNT];
         let mut valid = sample_valid && self.timestamp_frequency != 0;
@@ -469,7 +476,7 @@ impl GpuProfiler {
         }
 
         if !valid {
-            return Ok(false);
+            return Ok(None);
         }
         let sample = GpuTimingSample {
             acceleration_structure_ms: values[GpuPass::AccelerationStructure as usize],
@@ -494,7 +501,7 @@ impl GpuProfiler {
             benchmark.push(values);
         }
         self.valid_sample_serial = self.valid_sample_serial.wrapping_add(1);
-        Ok(true)
+        Ok(Some(sample))
     }
 
     pub fn invalidate(&mut self) {
