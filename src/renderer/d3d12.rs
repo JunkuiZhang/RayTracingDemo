@@ -21,8 +21,9 @@ use crate::{
     as_policy::AccelerationStructureStats,
     realtime::{AtrousMode, CommandRecordingMode, RealtimeConfig},
     resolution::{
-        DynamicResolutionController, DynamicResolutionDirection, Extent2D, RenderExtentChange,
-        RenderScale, ResolutionMode, classify_render_extent_change, render_extent,
+        DynamicResolutionConfig, DynamicResolutionController, DynamicResolutionDirection, Extent2D,
+        RenderExtentChange, RenderScale, ResolutionMode, classify_render_extent_change,
+        render_extent,
     },
     scene::{MAX_SCENE_SAMPLERS, SceneAsset, gltf_loader},
 };
@@ -163,6 +164,12 @@ pub struct Dx12Renderer {
     benchmark_retired_high_watermark: u64,
     benchmark_gpu_idle_wait_baseline: u64,
     benchmark_render_scale_noop_baseline: u64,
+    benchmark_dynamic_valid_samples_baseline: u64,
+    benchmark_dynamic_stale_samples_baseline: u64,
+    benchmark_dynamic_downscale_baseline: u64,
+    benchmark_dynamic_upscale_baseline: u64,
+    benchmark_dynamic_at_min_baseline: u64,
+    benchmark_dynamic_at_max_baseline: u64,
     benchmark_render_min: Extent2D,
     benchmark_render_max: Extent2D,
     benchmark_measurement_active: bool,
@@ -448,6 +455,12 @@ impl Dx12Renderer {
                 benchmark_retired_high_watermark: 0,
                 benchmark_gpu_idle_wait_baseline: 0,
                 benchmark_render_scale_noop_baseline: 0,
+                benchmark_dynamic_valid_samples_baseline: 0,
+                benchmark_dynamic_stale_samples_baseline: 0,
+                benchmark_dynamic_downscale_baseline: 0,
+                benchmark_dynamic_upscale_baseline: 0,
+                benchmark_dynamic_at_min_baseline: 0,
+                benchmark_dynamic_at_max_baseline: 0,
                 benchmark_render_min: render_extent,
                 benchmark_render_max: render_extent,
                 benchmark_measurement_active: false,
@@ -1185,6 +1198,22 @@ impl Dx12Renderer {
         self.benchmark_retired_high_watermark = self.retired_generations.len() as u64;
         self.benchmark_gpu_idle_wait_baseline = self.gpu_idle_wait_count;
         self.benchmark_render_scale_noop_baseline = self.render_scale_quantized_noop_count;
+        if let Some(controller) = self.dynamic_resolution.as_ref() {
+            let state = controller.snapshot();
+            self.benchmark_dynamic_valid_samples_baseline = state.valid_samples_consumed;
+            self.benchmark_dynamic_stale_samples_baseline = state.stale_generation_samples_ignored;
+            self.benchmark_dynamic_downscale_baseline = state.downscale_count;
+            self.benchmark_dynamic_upscale_baseline = state.upscale_count;
+            self.benchmark_dynamic_at_min_baseline = state.at_min_count;
+            self.benchmark_dynamic_at_max_baseline = state.at_max_count;
+        } else {
+            self.benchmark_dynamic_valid_samples_baseline = 0;
+            self.benchmark_dynamic_stale_samples_baseline = 0;
+            self.benchmark_dynamic_downscale_baseline = 0;
+            self.benchmark_dynamic_upscale_baseline = 0;
+            self.benchmark_dynamic_at_min_baseline = 0;
+            self.benchmark_dynamic_at_max_baseline = 0;
+        }
         self.benchmark_render_min = self.active_generation.render_extent;
         self.benchmark_render_max = self.active_generation.render_extent;
         self.benchmark_measurement_active = true;
@@ -1231,6 +1260,29 @@ impl Dx12Renderer {
         self.requested_render_scale.get()
     }
 
+    pub fn resolution_mode_name(&self) -> &'static str {
+        match self.resolution_mode {
+            ResolutionMode::Fixed(_) => "fixed",
+            ResolutionMode::Dynamic(_) => "dynamic",
+        }
+    }
+
+    pub fn resolution_title(&self) -> String {
+        match self.dynamic_resolution.as_ref() {
+            Some(controller) => {
+                let state = controller.snapshot();
+                format!(
+                    "动态 {:.2} / 目标 {:.1} ms / C{} U{}",
+                    state.current_scale.get(),
+                    controller.config().target_gpu_time_ms(),
+                    state.cooldown_valid_samples_remaining,
+                    state.upscale_warmup_remaining,
+                )
+            }
+            None => format!("固定 {:.2}", self.render_scale()),
+        }
+    }
+
     pub fn render_generation_id(&self) -> u64 {
         self.active_generation.id
     }
@@ -1248,6 +1300,8 @@ impl Dx12Renderer {
                 render_width: self.render_width(),
                 render_height: self.render_height(),
                 render_scale_requested: self.render_scale(),
+                resolution_mode: self.resolution_mode_name(),
+                dynamic_resolution: self.dynamic_resolution_json(),
                 render_generation_id: self.render_generation_id(),
                 render_generation_create_count: self
                     .render_generation_create_count
@@ -1286,6 +1340,62 @@ impl Dx12Renderer {
             self._acceleration_structures.stats(),
         )
     }
+
+    fn dynamic_resolution_json(&self) -> serde_json::Value {
+        let Some(controller) = self.dynamic_resolution.as_ref() else {
+            return serde_json::Value::Null;
+        };
+        let config = controller.config();
+        let state = controller.snapshot();
+        let direction = state.last_direction.map(|direction| match direction {
+            DynamicResolutionDirection::Down => "down",
+            DynamicResolutionDirection::Up => "up",
+        });
+        let lifetime_switches = state.downscale_count.saturating_add(state.upscale_count);
+        serde_json::json!({
+            "config": {
+                "target_gpu_ms": config.target_gpu_time_ms(),
+                "high_threshold_ms": f64::from(config.high_threshold_us()) / 1_000.0,
+                "low_threshold_ms": f64::from(config.low_threshold_us()) / 1_000.0,
+                "min_scale": f64::from(DynamicResolutionConfig::DYNAMIC_MIN_SCALE_MILLI) / 1_000.0,
+                "max_scale": f64::from(DynamicResolutionConfig::DYNAMIC_MAX_SCALE_MILLI) / 1_000.0,
+                "down_streak": DynamicResolutionConfig::DOWN_STREAK,
+                "up_streak": DynamicResolutionConfig::UP_STREAK,
+                "down_step": f64::from(DynamicResolutionConfig::DOWN_STEP_MILLI) / 1_000.0,
+                "up_step": f64::from(DynamicResolutionConfig::UP_STEP_MILLI) / 1_000.0,
+                "cooldown_valid_samples": DynamicResolutionConfig::COOLDOWN_VALID_SAMPLES,
+                "cooldown_seconds": DynamicResolutionConfig::COOLDOWN_TIME.as_secs_f64(),
+                "upscale_warmup": DynamicResolutionConfig::UPSCALE_WARMUP,
+            },
+            "state": {
+                "current_requested_scale": state.current_scale.get(),
+                "cooldown_valid_samples_remaining": state.cooldown_valid_samples_remaining,
+                "upscale_warmup_remaining": state.upscale_warmup_remaining,
+                "over_budget_streak": state.over_budget_streak,
+                "under_budget_streak": state.under_budget_streak,
+                "last_direction": direction,
+                "last_trigger_total_ms": state.last_trigger_total_us.map(|value| f64::from(value) / 1_000.0),
+            },
+            "measurement": {
+                "valid_samples": state.valid_samples_consumed.saturating_sub(self.benchmark_dynamic_valid_samples_baseline),
+                "stale_generation_samples_ignored": state.stale_generation_samples_ignored.saturating_sub(self.benchmark_dynamic_stale_samples_baseline),
+                "downscale_count": state.downscale_count.saturating_sub(self.benchmark_dynamic_downscale_baseline),
+                "upscale_count": state.upscale_count.saturating_sub(self.benchmark_dynamic_upscale_baseline),
+                "switch_count": lifetime_switches.saturating_sub(self.benchmark_dynamic_downscale_baseline.saturating_add(self.benchmark_dynamic_upscale_baseline)),
+                "at_min_count": state.at_min_count.saturating_sub(self.benchmark_dynamic_at_min_baseline),
+                "at_max_count": state.at_max_count.saturating_sub(self.benchmark_dynamic_at_max_baseline),
+            },
+            "lifetime": {
+                "valid_samples": state.valid_samples_consumed,
+                "stale_generation_samples_ignored": state.stale_generation_samples_ignored,
+                "downscale_count": state.downscale_count,
+                "upscale_count": state.upscale_count,
+                "switch_count": lifetime_switches,
+                "at_min_count": state.at_min_count,
+                "at_max_count": state.at_max_count,
+            },
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1317,6 +1427,8 @@ struct BenchmarkJsonContext<'a> {
     render_width: u32,
     render_height: u32,
     render_scale_requested: f32,
+    resolution_mode: &'a str,
+    dynamic_resolution: serde_json::Value,
     render_generation_id: u64,
     render_generation_create_count: u64,
     render_generation_switch_count: u64,
@@ -1350,6 +1462,8 @@ fn benchmark_json_line(
         render_width,
         render_height,
         render_scale_requested,
+        resolution_mode,
+        dynamic_resolution,
         render_generation_id,
         render_generation_create_count,
         render_generation_switch_count,
@@ -1400,7 +1514,7 @@ fn benchmark_json_line(
         "render_min_height": render_min.height,
         "render_max_width": render_max.width,
         "render_max_height": render_max.height,
-        "resolution_mode": "fixed",
+        "resolution_mode": resolution_mode,
         "render_scale_requested": render_scale_requested,
         "render_scale_effective_x": render_width as f64 / width as f64,
         "render_scale_effective_y": render_height as f64 / height as f64,
@@ -1412,6 +1526,7 @@ fn benchmark_json_line(
         "retired_generation_high_watermark": retired_generation_high_watermark,
         "gpu_idle_wait_count": gpu_idle_wait_count,
         "render_scale_quantized_noop_count": render_scale_quantized_noop_count,
+        "dynamic_resolution": dynamic_resolution,
         "atrous_mode": atrous_mode,
         "command_recording": {
             "mode": command_recording_mode,
@@ -2095,6 +2210,8 @@ mod tests {
                 render_width: 1280,
                 render_height: 720,
                 render_scale_requested: 1.0,
+                resolution_mode: "fixed",
+                dynamic_resolution: serde_json::Value::Null,
                 render_generation_id: 1,
                 render_generation_create_count: 0,
                 render_generation_switch_count: 0,
@@ -2147,6 +2264,7 @@ mod tests {
         assert_eq!(value["schema_version"], 1);
         assert_eq!(value["gpu_name"], "RTX 4060 \"Laptop\"");
         assert_eq!(value["resolution_mode"], "fixed");
+        assert!(value["dynamic_resolution"].is_null());
         assert_eq!(value["render_scale_requested"], 1.0);
         assert_eq!(value["render_generation_id"], 1);
         assert_eq!(value["render_generation_create_count"], 0);

@@ -126,24 +126,12 @@ impl DynamicResolutionConfig {
         })
     }
 
-    pub const fn from_microseconds(
-        target_gpu_time_us: u32,
-    ) -> Result<Self, DynamicResolutionConfigError> {
-        if target_gpu_time_us < Self::MIN_TARGET_GPU_TIME_US {
-            return Err(DynamicResolutionConfigError::BelowMinimum);
-        }
-        if target_gpu_time_us > Self::MAX_TARGET_GPU_TIME_US {
-            return Err(DynamicResolutionConfigError::AboveMaximum);
-        }
-        Ok(Self { target_gpu_time_us })
-    }
-
     pub const fn target_gpu_time_us(self) -> u32 {
         self.target_gpu_time_us
     }
 
     pub fn target_gpu_time_ms(self) -> f64 {
-        f64::from(self.target_gpu_time_us) / 1_000.0
+        f64::from(self.target_gpu_time_us()) / 1_000.0
     }
 
     pub const fn high_threshold_us(self) -> u32 {
@@ -280,9 +268,7 @@ impl DynamicResolutionController {
             return None;
         }
 
-        let Some(total_gpu_time_us) = total_gpu_time_to_us(total_gpu_time_ms) else {
-            return None;
-        };
+        let total_gpu_time_us = total_gpu_time_to_us(total_gpu_time_ms)?;
 
         self.valid_samples_consumed += 1;
         self.upscale_warmup_remaining = self.upscale_warmup_remaining.saturating_sub(1);
