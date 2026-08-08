@@ -196,7 +196,7 @@ impl SceneGeometry {
             .map(|instance| {
                 let material =
                     &scene.materials[scene.primitives[instance.primitive_index].material_index];
-                compute_instance_flags(material, instance.base_world)
+                compute_instance_flags(material)
             })
             .collect();
         let (vertex_buffer, vertex_upload) =
@@ -398,13 +398,12 @@ fn matrix_rows(matrix: glam::Mat4) -> [[f32; 4]; 4] {
     ]
 }
 
-fn compute_instance_flags(material: &crate::scene::MaterialAsset, transform: glam::Mat4) -> u32 {
+/// DXR triangle facing is defined in object space. Instance transforms,
+/// including transforms with a negative determinant, do not change winding.
+fn compute_instance_flags(material: &crate::scene::MaterialAsset) -> u32 {
     let mut flags = INSTANCE_FLAG_FRONT_COUNTER_CLOCKWISE;
     if material.double_sided || material.kind == MaterialKind::LegacyDielectric {
         flags |= INSTANCE_FLAG_CULL_DISABLE;
-    }
-    if transform.determinant() < 0.0 {
-        flags ^= INSTANCE_FLAG_FRONT_COUNTER_CLOCKWISE;
     }
     flags
 }
@@ -1166,27 +1165,31 @@ mod tests {
     }
 
     #[test]
-    fn instance_flags_distinguish_single_double_and_mirrored_materials() {
+    fn instance_flags_depend_only_on_material_sidedness() {
         let material = crate::scene::MaterialAsset::opaque("single", [1.0; 4]);
-        assert_eq!(compute_instance_flags(&material, glam::Mat4::IDENTITY), 2);
+        assert_eq!(compute_instance_flags(&material), 2);
 
         let mut double_sided = material.clone();
         double_sided.double_sided = true;
-        assert_eq!(
-            compute_instance_flags(&double_sided, glam::Mat4::IDENTITY),
-            3
-        );
+        assert_eq!(compute_instance_flags(&double_sided), 3);
 
         let mut dielectric = material;
         dielectric.kind = MaterialKind::LegacyDielectric;
-        assert_eq!(compute_instance_flags(&dielectric, glam::Mat4::IDENTITY), 3);
+        assert_eq!(compute_instance_flags(&dielectric), 3);
+    }
+
+    #[test]
+    fn shader_rays_cull_single_sided_backfaces_without_dropping_transmission() {
+        let shader = include_str!("../../../shaders/stage3_triangle.hlsl");
         assert_eq!(
-            compute_instance_flags(
-                &double_sided,
-                glam::Mat4::from_scale(glam::Vec3::new(-1.0, 1.0, 1.0))
-            ),
-            1
+            shader
+                .matches("RAY_FLAG_CULL_BACK_FACING_TRIANGLES")
+                .count(),
+            5,
+            "primary, bounce and shadow rays in both shader paths must use the same culling rule"
         );
+        assert!(!shader.contains("TraceRay(Scene, RAY_FLAG_NONE"));
+        assert!(shader.contains("if (!sampledTransmission && dot(normal, direction) <= 0.0)"));
     }
 
     fn split_first_bounce(

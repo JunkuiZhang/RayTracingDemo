@@ -18,6 +18,7 @@ pub const DXR_TEXTURE_BASE: usize = 4;
 pub const DXR_UAV_BASE: usize = DXR_TEXTURE_BASE + MAX_TEXTURE_VIEWS;
 
 const FALLBACK_COUNT: usize = 4;
+const FALLBACK_EMISSIVE_RGBA8: [u8; 4] = [255, 255, 255, 255];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct TextureView {
@@ -69,7 +70,9 @@ impl TextureSet {
             // glTF metallic-roughness: G=roughness=1, B=metallic=0.
             ("Fallback MetallicRoughness 线性", [0, 255, 0, 255]),
             ("Fallback Normal 线性", [128, 128, 255, 255]),
-            ("Fallback Emissive sRGB", [0, 0, 0, 255]),
+            // glTF treats an omitted texture as all-one texels, so an
+            // emissive factor must remain visible without emissiveTexture.
+            ("Fallback Emissive sRGB", FALLBACK_EMISSIVE_RGBA8),
         ];
         let mut gpu_images = Vec::with_capacity(FALLBACK_COUNT + images.len());
         for (name, rgba8) in fallback_images {
@@ -513,5 +516,10 @@ mod tests {
         assert_eq!(linear.Filter, D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT);
         assert_eq!(linear.AddressU, D3D12_TEXTURE_ADDRESS_MODE_WRAP);
         assert_eq!(linear.AddressV, D3D12_TEXTURE_ADDRESS_MODE_WRAP);
+    }
+
+    #[test]
+    fn missing_emissive_texture_preserves_the_emissive_factor() {
+        assert_eq!(FALLBACK_EMISSIVE_RGBA8, [255, 255, 255, 255]);
     }
 }

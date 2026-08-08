@@ -293,7 +293,15 @@ void RayGen()
     GBufferId[pixel] = 0xFFFFFFFFu;
     GBufferWorldPosition[pixel] = 0;
     GBufferHitDistance[pixel] = 0;
-    TraceRay(Scene, RAY_FLAG_NONE, 0xFF, 0, 1, 0, ray, payload);
+    TraceRay(
+        Scene,
+        RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+        0xFF,
+        0,
+        1,
+        0,
+        ray,
+        payload);
 
     RawDiffuse[pixel] = float4(payload.rawDiffuse, 1.0);
     RawSpecular[pixel] = float4(payload.rawSpecular, 1.0);
@@ -453,7 +461,9 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
             shadowRay.TMax = lightDistance - 0.004;
             TraceRay(
                 Scene,
-                RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
+                RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH
+                    | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
+                    | RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
                 0xFF,
                 0,
                 1,
@@ -494,6 +504,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     float3 specularBounceWeight = 0;
     float samplePdf = 1.0;
     bool sampledSpecular = kind == 1u || kind == 2u;
+    bool sampledTransmission = false;
     if (kind == 1u)
     {
         direction = reflect(WorldRayDirection(), normal);
@@ -508,6 +519,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         bool reflectRay = length(refracted) < 0.001
             || Schlick(cosine, etaRatio) > RandomFloat(payload.seed);
         direction = reflectRay ? reflect(WorldRayDirection(), normal) : refracted;
+        sampledTransmission = !reflectRay;
         bounceWeight = baseColor.xyz;
         specularBounceWeight = bounceWeight;
     }
@@ -552,7 +564,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         }
     }
 
-    if (dot(normal, direction) <= 0.0)
+    if (!sampledTransmission && dot(normal, direction) <= 0.0)
     {
         bounceWeight = 0;
         diffuseBounceWeight = 0;
@@ -572,7 +584,15 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     child.hitDistance = 0;
     child.rawDiffuse = 0;
     child.rawSpecular = 0;
-    TraceRay(Scene, RAY_FLAG_NONE, 0xFF, 0, 1, 0, bounce, child);
+    TraceRay(
+        Scene,
+        RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+        0xFF,
+        0,
+        1,
+        0,
+        bounce,
+        child);
     payload.seed = child.seed;
     float3 bouncedRadiance = bounceWeight * child.radiance;
     if (payload.depth == 0)
@@ -709,7 +729,9 @@ void LegacyClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttri
             shadowRay.TMax = lightDistance - 0.004;
             TraceRay(
                 Scene,
-                RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
+                RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH
+                    | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
+                    | RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
                 0xFF,
                 0,
                 1,
@@ -741,7 +763,15 @@ void LegacyClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttri
         : 0.0;
     child.firstKind = payload.firstKind;
     child.hitDistance = 0;
-    TraceRay(Scene, RAY_FLAG_NONE, 0xFF, 0, 1, 0, bounce, child);
+    TraceRay(
+        Scene,
+        RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+        0xFF,
+        0,
+        1,
+        0,
+        bounce,
+        child);
     payload.seed = child.seed;
     if (payload.depth == 0 && (kind == 1u || kind == 2u))
         GBufferHitDistance[DispatchRaysIndex().xy] = child.hitDistance;
