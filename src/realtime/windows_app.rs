@@ -162,7 +162,7 @@ impl ApplicationHandler for RealtimeApplication {
                                 .warmup_valid_samples
                                 .saturating_add(new_samples.min(u32::MAX as u64) as u32);
                             if benchmark.warmup_valid_samples >= 120 {
-                                renderer.clear_gpu_statistics();
+                                renderer.begin_benchmark_measurement();
                                 benchmark.sampling_started = Some(Instant::now());
                             }
                         } else if benchmark
@@ -183,9 +183,10 @@ impl ApplicationHandler for RealtimeApplication {
                     if elapsed >= Duration::from_millis(500) {
                         let fps = self.frames_since_stats as f64 / elapsed.as_secs_f64();
                         window.set_title(&format!(
-                            "RayTracingDemo - 阶段 8 | FPS {:.0} | GPU {:.2} ms | 输出 {}x{} | VRAM {} | AS {:.2} PT {:.2} T {:.2} A {:.2} | SPP {} | 视图 {} | {} | {}",
+                            "RayTracingDemo - 阶段 8 | FPS {:.0} | GPU {:.2} ms (p95 {:.2}) | 输出 {}x{} | VRAM {} | AS {:.2} PT {:.2} T {:.2} A {:.2} | SPP {} | 视图 {} | {} | {}",
                             fps,
                             renderer.gpu_time_ms(),
+                            renderer.gpu_time_p95_ms(),
                             renderer.output_width(),
                             renderer.output_height(),
                             renderer.video_memory_title(),

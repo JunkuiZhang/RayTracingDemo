@@ -25,6 +25,10 @@ pub enum GpuPass {
 pub const PASS_COUNT: usize = 10;
 pub const TIMING_WINDOW_CAPACITY: usize = 240;
 const TIMESTAMPS_PER_FRAME: usize = PASS_COUNT * 2;
+const BENCHMARK_HISTOGRAM_RESOLUTION_MS: f64 = 0.01;
+const BENCHMARK_HISTOGRAM_MAX_MS: f64 = 1_000.0;
+const BENCHMARK_HISTOGRAM_BIN_COUNT: usize =
+    (BENCHMARK_HISTOGRAM_MAX_MS / BENCHMARK_HISTOGRAM_RESOLUTION_MS) as usize + 1;
 
 /// One completed GPU timestamp sample. `valid` is false for warm-up or a
 /// malformed/incomplete timestamp pair and such samples never enter the
@@ -65,7 +69,7 @@ pub struct GpuTimingStats {
     pub valid_samples: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct GpuTimingReport {
     pub passes: [GpuTimingStats; PASS_COUNT],
 }
@@ -126,6 +130,86 @@ impl RollingStats {
     }
 }
 
+/// Fixed-memory full benchmark accumulator. The UI still uses the latest 240
+/// samples, while a benchmark needs every completed sample from the requested
+/// wall-clock interval. A 0.01 ms histogram keeps percentile error bounded to
+/// 0.005 ms without allocating on the render path.
+struct BenchmarkHistogram {
+    bins: Vec<u32>,
+    len: usize,
+}
+
+impl Default for BenchmarkHistogram {
+    fn default() -> Self {
+        Self {
+            bins: vec![0; BENCHMARK_HISTOGRAM_BIN_COUNT],
+            len: 0,
+        }
+    }
+}
+
+impl BenchmarkHistogram {
+    fn push(&mut self, value: f64) {
+        if !value.is_finite() || value < 0.0 {
+            return;
+        }
+        let bin = (value / BENCHMARK_HISTOGRAM_RESOLUTION_MS)
+            .round()
+            .clamp(0.0, (BENCHMARK_HISTOGRAM_BIN_COUNT - 1) as f64) as usize;
+        self.bins[bin] = self.bins[bin].saturating_add(1);
+        self.len = self.len.saturating_add(1);
+    }
+
+    fn snapshot(&self) -> GpuTimingStats {
+        if self.len == 0 {
+            return GpuTimingStats::default();
+        }
+        GpuTimingStats {
+            p50_ms: Some(self.percentile(0.50)),
+            p95_ms: Some(self.percentile(0.95)),
+            valid_samples: self.len,
+        }
+    }
+
+    fn percentile(&self, percentile: f64) -> f64 {
+        let target = (self.len as f64 * percentile).ceil() as usize;
+        let mut cumulative = 0usize;
+        for (index, count) in self.bins.iter().copied().enumerate() {
+            cumulative = cumulative.saturating_add(count as usize);
+            if cumulative >= target {
+                return index as f64 * BENCHMARK_HISTOGRAM_RESOLUTION_MS;
+            }
+        }
+        BENCHMARK_HISTOGRAM_MAX_MS
+    }
+}
+
+struct BenchmarkAccumulator {
+    passes: [BenchmarkHistogram; PASS_COUNT],
+}
+
+impl Default for BenchmarkAccumulator {
+    fn default() -> Self {
+        Self {
+            passes: std::array::from_fn(|_| BenchmarkHistogram::default()),
+        }
+    }
+}
+
+impl BenchmarkAccumulator {
+    fn push(&mut self, values: [f64; PASS_COUNT]) {
+        for (histogram, value) in self.passes.iter_mut().zip(values) {
+            histogram.push(value);
+        }
+    }
+
+    fn report(&self) -> GpuTimingReport {
+        GpuTimingReport {
+            passes: std::array::from_fn(|index| self.passes[index].snapshot()),
+        }
+    }
+}
+
 fn percentile_index(length: usize, percentile: f64) -> usize {
     let rank = (length as f64 * percentile).ceil() as usize;
     rank.saturating_sub(1).min(length.saturating_sub(1))
@@ -141,6 +225,7 @@ pub struct GpuProfiler {
     frame_count: usize,
     last_sample: Option<GpuTimingSample>,
     windows: [RollingStats; PASS_COUNT],
+    benchmark: Option<BenchmarkAccumulator>,
     valid_sample_serial: u64,
     pix: PixEventRuntime,
 }
@@ -195,6 +280,7 @@ impl GpuProfiler {
             frame_count,
             last_sample: None,
             windows: [RollingStats::default(); PASS_COUNT],
+            benchmark: None,
             valid_sample_serial: 0,
             pix: PixEventRuntime::load(),
         })
@@ -332,6 +418,9 @@ impl GpuProfiler {
         for (window, value) in self.windows.iter_mut().zip(values) {
             window.push(value);
         }
+        if let Some(benchmark) = self.benchmark.as_mut() {
+            benchmark.push(values);
+        }
         self.valid_sample_serial = self.valid_sample_serial.wrapping_add(1);
         Ok(true)
     }
@@ -339,6 +428,9 @@ impl GpuProfiler {
     pub fn invalidate(&mut self) {
         self.last_sample = None;
         self.clear_statistics();
+        if self.benchmark.is_some() {
+            self.benchmark = Some(BenchmarkAccumulator::default());
+        }
     }
 
     pub fn clear_statistics(&mut self) {
@@ -357,6 +449,23 @@ impl GpuProfiler {
         GpuTimingReport {
             passes: self.windows.map(|window| window.snapshot()),
         }
+    }
+
+    pub fn begin_benchmark_measurement(&mut self) {
+        self.last_sample = None;
+        self.clear_statistics();
+        self.benchmark = Some(BenchmarkAccumulator::default());
+    }
+
+    pub fn benchmark_statistics(&self) -> GpuTimingReport {
+        self.benchmark
+            .as_ref()
+            .map(BenchmarkAccumulator::report)
+            .unwrap_or_default()
+    }
+
+    pub fn pix_events_available(&self) -> bool {
+        self.pix.is_available()
     }
 
     pub fn valid_sample_serial(&self) -> u64 {
@@ -416,5 +525,17 @@ mod tests {
         assert_eq!(percentile_index(1, 0.50), 0);
         assert_eq!(percentile_index(2, 0.95), 1);
         assert_eq!(percentile_index(4, 0.50), 1);
+    }
+
+    #[test]
+    fn benchmark_accumulator_retains_the_full_measurement_interval() {
+        let mut accumulator = BenchmarkAccumulator::default();
+        for value in 1..=600 {
+            accumulator.push([value as f64 / 10.0; PASS_COUNT]);
+        }
+        let stats = accumulator.report().pass(GpuPass::Total);
+        assert_eq!(stats.valid_samples, 600);
+        assert_eq!(stats.p50_ms, Some(30.0));
+        assert_eq!(stats.p95_ms, Some(57.0));
     }
 }

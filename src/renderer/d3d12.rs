@@ -1,4 +1,4 @@
-use std::{ffi::c_void, fmt::Write as _, mem::size_of, time::Instant};
+use std::{ffi::c_void, mem::size_of, time::Instant};
 
 use windows::{
     Win32::{
@@ -168,6 +168,10 @@ pub struct Dx12Renderer {
     previous_camera_pitch: f32,
     animate_model: bool,
     animation_start: Instant,
+    history_reset_count: u64,
+    render_extent_change_count: u64,
+    benchmark_history_reset_baseline: u64,
+    benchmark_extent_change_baseline: u64,
 }
 
 impl Dx12Renderer {
@@ -423,6 +427,10 @@ impl Dx12Renderer {
                 previous_camera_pitch: 0.0,
                 animate_model: config.animate_model,
                 animation_start: Instant::now(),
+                history_reset_count: 1,
+                render_extent_change_count: 0,
+                benchmark_history_reset_baseline: 1,
+                benchmark_extent_change_baseline: 0,
             };
             renderer
                 .create_render_targets()
@@ -825,9 +833,10 @@ impl Dx12Renderer {
             }
             self.width = width;
             self.height = height;
+            self.render_extent_change_count = self.render_extent_change_count.saturating_add(1);
             self.minimized = false;
             self.history_index = 0;
-            self.reset_history = true;
+            self.request_history_reset();
             self.accumulated_frames = 0;
             self.previous_camera_position = self.camera_position;
             self.previous_camera_yaw = self.camera_yaw;
@@ -844,6 +853,14 @@ impl Dx12Renderer {
         self.gpu_profiler.time_ms(GpuPass::Total)
     }
 
+    pub fn gpu_time_p95_ms(&self) -> f64 {
+        self.gpu_profiler
+            .statistics()
+            .pass(GpuPass::Total)
+            .p95_ms
+            .unwrap_or(0.0)
+    }
+
     pub fn gpu_pass_time_ms(&self, pass: GpuPass) -> f64 {
         self.gpu_profiler.time_ms(pass)
     }
@@ -852,8 +869,16 @@ impl Dx12Renderer {
         self.gpu_profiler.valid_sample_serial()
     }
 
-    pub fn clear_gpu_statistics(&mut self) {
-        self.gpu_profiler.invalidate();
+    pub fn begin_benchmark_measurement(&mut self) {
+        // Every submitted Frame Context still belongs to warm-up. Mark those
+        // timestamp slots invalid so they cannot leak into the measurement
+        // epoch when their fences complete later.
+        for frame in &mut self.frames {
+            frame.timing_valid = false;
+        }
+        self.gpu_profiler.begin_benchmark_measurement();
+        self.benchmark_history_reset_baseline = self.history_reset_count;
+        self.benchmark_extent_change_baseline = self.render_extent_change_count;
     }
 
     pub fn refresh_memory_telemetry(&mut self) {
@@ -887,70 +912,104 @@ impl Dx12Renderer {
 
     pub fn benchmark_json(&self, duration_seconds: u64, warmup_valid_frames: u32) -> String {
         benchmark_json_line(
-            &self.gpu_name,
-            self.width,
-            self.height,
-            duration_seconds,
-            warmup_valid_frames,
-            self.gpu_profiler.statistics(),
+            BenchmarkJsonContext {
+                gpu_name: &self.gpu_name,
+                width: self.width,
+                height: self.height,
+                duration_seconds,
+                warmup_valid_frames,
+                pix_events_available: self.gpu_profiler.pix_events_available(),
+                history_reset_count: self
+                    .history_reset_count
+                    .saturating_sub(self.benchmark_history_reset_baseline),
+                render_extent_change_count: self
+                    .render_extent_change_count
+                    .saturating_sub(self.benchmark_extent_change_baseline),
+            },
+            self.gpu_profiler.benchmark_statistics(),
             self.video_memory_snapshot(),
         )
     }
 }
 
-fn benchmark_json_line(
-    gpu_name: &str,
+struct BenchmarkJsonContext<'a> {
+    gpu_name: &'a str,
     width: u32,
     height: u32,
     duration_seconds: u64,
     warmup_valid_frames: u32,
+    pix_events_available: bool,
+    history_reset_count: u64,
+    render_extent_change_count: u64,
+}
+
+fn benchmark_json_line(
+    context: BenchmarkJsonContext<'_>,
     report: profiler::GpuTimingReport,
     memory: VideoMemorySnapshot,
 ) -> String {
-    let mut json = String::new();
-    let _ = write!(
-        json,
-        "{{\"schema_version\":1,\"gpu_name\":{:?},\"output_width\":{},\"output_height\":{},\"render_width\":{},\"render_height\":{},\"benchmark_seconds\":{},\"warmup_valid_frames\":{},\"valid_samples\":{},\"passes\":{{",
+    let BenchmarkJsonContext {
         gpu_name,
-        width,
-        height,
         width,
         height,
         duration_seconds,
         warmup_valid_frames,
-        report.pass(GpuPass::Total).valid_samples,
-    );
-    append_json_pass(&mut json, "total", report.pass(GpuPass::Total), true);
-    append_json_pass(
-        &mut json,
-        "acceleration_structure",
-        report.pass(GpuPass::AccelerationStructure),
-        false,
-    );
-    append_json_pass(
-        &mut json,
-        "path_trace",
-        report.pass(GpuPass::PathTrace),
-        false,
-    );
-    append_json_pass(&mut json, "temporal", report.pass(GpuPass::Temporal), false);
-    append_json_pass(&mut json, "atrous", report.pass(GpuPass::Atrous), false);
-    append_json_pass(&mut json, "atrous_0", report.pass(GpuPass::Atrous0), false);
-    append_json_pass(&mut json, "atrous_1", report.pass(GpuPass::Atrous1), false);
-    append_json_pass(&mut json, "atrous_2", report.pass(GpuPass::Atrous2), false);
-    append_json_pass(&mut json, "atrous_3", report.pass(GpuPass::Atrous3), false);
-    append_json_pass(&mut json, "tone_map", report.pass(GpuPass::ToneMap), false);
-    json.push_str("},\"memory\":{");
-    append_json_optional_u64(&mut json, "usage_bytes", memory.usage_bytes, true);
-    append_json_optional_u64(&mut json, "budget_bytes", memory.budget_bytes, false);
-    append_json_optional_f64(&mut json, "usage_ratio", memory.usage_ratio, false);
+        pix_events_available,
+        history_reset_count,
+        render_extent_change_count,
+    } = context;
     let status = match memory.status {
         VideoMemoryStatus::Available => "available",
         VideoMemoryStatus::Adapter3Unavailable => "adapter3_unavailable",
         VideoMemoryStatus::QueryFailed => "query_failed",
     };
-    let _ = write!(json, ",\"status\":{:?}}}}}", status);
-    json
+    serde_json::json!({
+        "schema_version": 1,
+        "gpu_name": gpu_name,
+        "output_width": width,
+        "output_height": height,
+        "render_width": width,
+        "render_height": height,
+        "render_min_width": width,
+        "render_min_height": height,
+        "render_max_width": width,
+        "render_max_height": height,
+        "resolution_mode": "fixed",
+        "benchmark_seconds": duration_seconds,
+        "warmup_valid_frames": warmup_valid_frames,
+        "valid_samples": report.pass(GpuPass::Total).valid_samples,
+        "history_reset_count": history_reset_count,
+        "render_extent_change_count": render_extent_change_count,
+        "pix_events_available": pix_events_available,
+        "pix_runtime_version": env!("WINPIX_RUNTIME_VERSION"),
+        "passes": {
+            "total": gpu_pass_json(report.pass(GpuPass::Total)),
+            "acceleration_structure": gpu_pass_json(report.pass(GpuPass::AccelerationStructure)),
+            "path_trace": gpu_pass_json(report.pass(GpuPass::PathTrace)),
+            "temporal": gpu_pass_json(report.pass(GpuPass::Temporal)),
+            "atrous": gpu_pass_json(report.pass(GpuPass::Atrous)),
+            "atrous_0": gpu_pass_json(report.pass(GpuPass::Atrous0)),
+            "atrous_1": gpu_pass_json(report.pass(GpuPass::Atrous1)),
+            "atrous_2": gpu_pass_json(report.pass(GpuPass::Atrous2)),
+            "atrous_3": gpu_pass_json(report.pass(GpuPass::Atrous3)),
+            "tone_map": gpu_pass_json(report.pass(GpuPass::ToneMap)),
+        },
+        "memory": {
+            "usage_bytes": memory.usage_bytes,
+            "budget_bytes": memory.budget_bytes,
+            "usage_ratio": memory.usage_ratio.filter(|ratio| ratio.is_finite()),
+            "status": status,
+        },
+    })
+    .to_string()
+}
+
+fn gpu_pass_json(stats: profiler::GpuTimingStats) -> serde_json::Value {
+    serde_json::json!({
+        "p50_ms": stats.p50_ms.filter(|value| value.is_finite()),
+        "p95_ms": stats.p95_ms.filter(|value| value.is_finite()),
+        "valid_samples": stats.valid_samples,
+    })
 }
 
 impl Dx12Renderer {
@@ -1352,9 +1411,16 @@ impl Dx12Renderer {
         self.temporal_pipeline = temporal;
         self.atrous_pipeline = atrous;
         self.tonemap_pipeline = tonemap;
-        self.reset_history = true;
+        self.request_history_reset();
         self.accumulated_frames = 0;
         Ok(())
+    }
+
+    fn request_history_reset(&mut self) {
+        if !self.reset_history {
+            self.history_reset_count = self.history_reset_count.saturating_add(1);
+        }
+        self.reset_history = true;
     }
 
     unsafe fn wait_for_frame(&self, frame_index: usize) -> Result<()> {
@@ -1547,44 +1613,6 @@ fn dx_error(stage: &str, error: WindowsError) -> WindowsError {
     WindowsError::new(error.code(), format!("{stage}：{error}"))
 }
 
-fn append_json_pass(json: &mut String, name: &str, stats: profiler::GpuTimingStats, first: bool) {
-    if !first {
-        json.push(',');
-    }
-    let _ = write!(json, "{:?}:{{", name);
-    append_json_optional_f64(json, "p50_ms", stats.p50_ms, true);
-    append_json_optional_f64(json, "p95_ms", stats.p95_ms, false);
-    let _ = write!(json, ",\"valid_samples\":{}}}", stats.valid_samples);
-}
-
-fn append_json_optional_u64(json: &mut String, name: &str, value: Option<u64>, first: bool) {
-    if !first {
-        json.push(',');
-    }
-    match value {
-        Some(value) => {
-            let _ = write!(json, "{:?}:{}", name, value);
-        }
-        None => {
-            let _ = write!(json, "{:?}:null", name);
-        }
-    }
-}
-
-fn append_json_optional_f64(json: &mut String, name: &str, value: Option<f64>, first: bool) {
-    if !first {
-        json.push(',');
-    }
-    match value {
-        Some(value) if value.is_finite() => {
-            let _ = write!(json, "{:?}:{value:.6}", name);
-        }
-        _ => {
-            let _ = write!(json, "{:?}:null", name);
-        }
-    }
-}
-
 fn device_removed_error(device: &ID3D12Device, present_error: WindowsError) -> WindowsError {
     let reason = unsafe { device.GetDeviceRemovedReason() }
         .err()
@@ -1657,17 +1685,42 @@ unsafe fn report_debug_messages(device: &ID3D12Device) {
         eprintln!("D3D12 Debug InfoQueue：0 条消息");
         return;
     }
-    eprintln!("D3D12 Debug InfoQueue：{} 条消息", message_count);
-    for index in 0..message_count.min(32) {
+    let mut corruption_count = 0u64;
+    let mut error_count = 0u64;
+    let mut warning_count = 0u64;
+    let mut info_count = 0u64;
+    let mut message_only_count = 0u64;
+    let mut unreadable_count = 0u64;
+    for index in 0..message_count {
         let mut byte_length = 0usize;
         if unsafe { info_queue.GetMessage(index, None, &mut byte_length) }.is_err()
             || byte_length == 0
         {
+            unreadable_count = unreadable_count.saturating_add(1);
             continue;
         }
         let mut storage = vec![0_u8; byte_length];
         let message = storage.as_mut_ptr().cast::<D3D12_MESSAGE>();
         if unsafe { info_queue.GetMessage(index, Some(message), &mut byte_length) }.is_err() {
+            unreadable_count = unreadable_count.saturating_add(1);
+            continue;
+        }
+        let severity = unsafe { (*message).Severity };
+        if severity == D3D12_MESSAGE_SEVERITY_CORRUPTION {
+            corruption_count = corruption_count.saturating_add(1);
+        } else if severity == D3D12_MESSAGE_SEVERITY_ERROR {
+            error_count = error_count.saturating_add(1);
+        } else if severity == D3D12_MESSAGE_SEVERITY_WARNING {
+            warning_count = warning_count.saturating_add(1);
+        } else if severity == D3D12_MESSAGE_SEVERITY_INFO {
+            info_count = info_count.saturating_add(1);
+        } else {
+            message_only_count = message_only_count.saturating_add(1);
+        }
+        if severity != D3D12_MESSAGE_SEVERITY_CORRUPTION
+            && severity != D3D12_MESSAGE_SEVERITY_ERROR
+            && severity != D3D12_MESSAGE_SEVERITY_WARNING
+        {
             continue;
         }
         let description = if unsafe { (*message).pDescription.is_null() } {
@@ -1684,10 +1737,34 @@ unsafe fn report_debug_messages(device: &ID3D12Device) {
         eprintln!(
             "D3D12 Debug [{}] severity={} id={}: {}",
             index,
-            unsafe { (*message).Severity.0 },
+            debug_severity_label(severity),
             unsafe { (*message).ID.0 },
             description.trim_end_matches('\0')
         );
+    }
+    eprintln!(
+        "D3D12 Debug InfoQueue：总计 {}，CORRUPTION {}，ERROR {}，WARNING {}，INFO {}，MESSAGE {}，读取失败 {}",
+        message_count,
+        corruption_count,
+        error_count,
+        warning_count,
+        info_count,
+        message_only_count,
+        unreadable_count,
+    );
+}
+
+fn debug_severity_label(severity: D3D12_MESSAGE_SEVERITY) -> &'static str {
+    if severity == D3D12_MESSAGE_SEVERITY_CORRUPTION {
+        "CORRUPTION"
+    } else if severity == D3D12_MESSAGE_SEVERITY_ERROR {
+        "ERROR"
+    } else if severity == D3D12_MESSAGE_SEVERITY_WARNING {
+        "WARNING"
+    } else if severity == D3D12_MESSAGE_SEVERITY_INFO {
+        "INFO"
+    } else {
+        "MESSAGE"
     }
 }
 
@@ -1741,15 +1818,33 @@ mod tests {
             usage_ratio: Some(0.5),
             status: VideoMemoryStatus::Available,
         };
-        let json = benchmark_json_line("RTX 4060 \"Laptop\"", 1280, 720, 30, 120, report, memory);
-        assert!(!json.contains(['\r', '\n']));
-        assert!(json.starts_with("{\"schema_version\":1,"));
-        assert!(json.ends_with("}}"));
-        assert!(json.contains("\"gpu_name\":\"RTX 4060 \\\"Laptop\\\"\""));
-        assert!(json.contains("\"atrous_0\":{\"p50_ms\":1.250000"));
-        assert!(json.contains("\"tone_map\":{\"p50_ms\":1.250000"));
-        assert!(
-            json.contains("\"usage_bytes\":512,\"budget_bytes\":1024,\"usage_ratio\":0.500000")
+        let json = benchmark_json_line(
+            BenchmarkJsonContext {
+                gpu_name: "RTX 4060 \"Laptop\"",
+                width: 1280,
+                height: 720,
+                duration_seconds: 30,
+                warmup_valid_frames: 120,
+                pix_events_available: true,
+                history_reset_count: 2,
+                render_extent_change_count: 1,
+            },
+            report,
+            memory,
         );
+        assert!(!json.contains(['\r', '\n']));
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["gpu_name"], "RTX 4060 \"Laptop\"");
+        assert_eq!(value["resolution_mode"], "fixed");
+        assert_eq!(value["render_min_width"], 1280);
+        assert_eq!(value["render_max_height"], 720);
+        assert_eq!(value["history_reset_count"], 2);
+        assert_eq!(value["render_extent_change_count"], 1);
+        assert_eq!(value["pix_events_available"], true);
+        assert_eq!(value["passes"]["atrous_0"]["p50_ms"], 1.25);
+        assert_eq!(value["passes"]["tone_map"]["valid_samples"], 240);
+        assert_eq!(value["memory"]["usage_bytes"], 512);
+        assert_eq!(value["memory"]["usage_ratio"], 0.5);
     }
 }

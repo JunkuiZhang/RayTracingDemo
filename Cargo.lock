@@ -1707,6 +1707,7 @@ dependencies = [
  "gltf",
  "image",
  "rand 0.10.2",
+ "serde_json",
  "windows",
  "winit",
 ]
