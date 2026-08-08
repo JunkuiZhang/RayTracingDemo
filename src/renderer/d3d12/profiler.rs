@@ -9,13 +9,14 @@ use windows::{
 #[repr(usize)]
 pub enum GpuPass {
     Total = 0,
-    PathTrace = 1,
-    Temporal = 2,
-    Atrous = 3,
-    ToneMap = 4,
+    AccelerationStructure = 1,
+    PathTrace = 2,
+    Temporal = 3,
+    Atrous = 4,
+    ToneMap = 5,
 }
 
-const PASS_COUNT: usize = 5;
+const PASS_COUNT: usize = 6;
 const TIMESTAMPS_PER_FRAME: usize = PASS_COUNT * 2;
 
 /// Timestamp profiler with an independent begin/end pair for every GPU pass.

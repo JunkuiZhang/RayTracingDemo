@@ -1,4 +1,4 @@
-use std::{ffi::c_void, mem::size_of};
+use std::{ffi::c_void, mem::size_of, time::Instant};
 
 use windows::{
     Win32::{
@@ -155,6 +155,8 @@ pub struct Dx12Renderer {
     previous_camera_position: [f32; 3],
     previous_camera_yaw: f32,
     previous_camera_pitch: f32,
+    animate_model: bool,
+    animation_start: Instant,
 }
 
 impl Dx12Renderer {
@@ -301,14 +303,6 @@ impl Dx12Renderer {
                 scene_geometry.material_count(),
                 64,
             );
-            create_structured_srv(
-                &device,
-                &shader_heap,
-                4,
-                scene_geometry.instance_buffer(),
-                scene_geometry.instance_count(),
-                64,
-            );
             let raytracing_pipeline = RaytracingPipeline::new(&device, STAGE3_SHADER)
                 .map_err(|error| dx_error("创建 DXR State Object", error))?;
             let temporal_pipeline =
@@ -390,6 +384,8 @@ impl Dx12Renderer {
                 previous_camera_position: [0.0, 0.0, -2.666_666_7],
                 previous_camera_yaw: 0.0,
                 previous_camera_pitch: 0.0,
+                animate_model: config.animate_model,
+                animation_start: Instant::now(),
             };
             renderer
                 .create_render_targets()
@@ -420,6 +416,24 @@ impl Dx12Renderer {
             self.command_list
                 .Reset(&frame.allocator, None::<&ID3D12PipelineState>)?;
 
+            self.gpu_profiler.begin(
+                &self.command_list,
+                frame_index,
+                GpuPass::AccelerationStructure,
+            );
+            self._scene_geometry
+                .prepare_animation(self.animation_start.elapsed(), self.animate_model);
+            self._acceleration_structures.update(
+                &self.command_list,
+                frame_index,
+                &self._scene_geometry,
+            )?;
+            self.gpu_profiler.end(
+                &self.command_list,
+                frame_index,
+                GpuPass::AccelerationStructure,
+            );
+
             self.command_list
                 .SetDescriptorHeaps(&[Some(self.shader_heap.heap().clone())]);
             let command_list4: ID3D12GraphicsCommandList4 = self.command_list.cast()?;
@@ -431,6 +445,11 @@ impl Dx12Renderer {
             command_list4.SetComputeRootSignature(&self.raytracing_pipeline.root_signature);
             command_list4
                 .SetComputeRootDescriptorTable(0, self.shader_heap.gpu_handle(DXR_TABLE_BASE));
+            command_list4.SetComputeRootShaderResourceView(
+                2,
+                self._acceleration_structures
+                    .instance_gpu_address(frame_index),
+            );
             let camera = CameraConstants {
                 frame_index: self.frame_number,
                 position: self.camera_position,
@@ -646,6 +665,7 @@ impl Dx12Renderer {
             self.next_fence_value += 1;
             self.command_queue.Signal(&self.fence, fence_value)?;
             self.frames[frame_index].fence_value = fence_value;
+            self._scene_geometry.commit_animation(self.animate_model);
             self.frame_number = self.frame_number.wrapping_add(1);
             self.accumulated_frames = self.accumulated_frames.saturating_add(1);
             self.previous_camera_position = self.camera_position;
@@ -902,7 +922,7 @@ impl Dx12Renderer {
             hit_distance,
         ];
         for (offset, resource) in dxr_uavs.into_iter().enumerate() {
-            unsafe { create_texture_uav(&self.device, &self.shader_heap, 5 + offset, resource) };
+            unsafe { create_texture_uav(&self.device, &self.shader_heap, 4 + offset, resource) };
         }
 
         for current_index in 0..2 {
@@ -1378,7 +1398,7 @@ mod tests {
 
     #[test]
     fn descriptor_tables_do_not_overlap_and_fit_the_heap() {
-        let mut ranges = vec![(DXR_TABLE_BASE, DXR_TABLE_BASE + 14)];
+        let mut ranges = vec![(DXR_TABLE_BASE, DXR_TABLE_BASE + 13)];
         for base in TEMPORAL_TABLE_BASES {
             ranges.push((base, base + 28));
         }

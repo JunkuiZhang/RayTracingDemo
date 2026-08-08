@@ -2,6 +2,7 @@ use std::{
     ffi::c_void,
     mem::{ManuallyDrop, size_of},
     ptr::NonNull,
+    time::Duration,
 };
 
 use windows::{
@@ -27,15 +28,17 @@ pub struct SceneGeometry {
     vertex_buffer: ID3D12Resource,
     index_buffer: ID3D12Resource,
     material_buffer: ID3D12Resource,
-    instance_buffer: ID3D12Resource,
     vertex_count: u32,
     index_count: u32,
     material_count: u32,
-    instance_count: u32,
     primitive_ranges: Vec<PrimitiveRange>,
-    instance_transforms: Vec<[f32; 12]>,
+    current_transforms: Vec<glam::Mat4>,
     instance_primitive_indices: Vec<usize>,
     upload_buffers: Vec<ID3D12Resource>,
+    instance_data: Vec<InstanceGpu>,
+    base_transforms: Vec<glam::Mat4>,
+    previous_transforms: Vec<glam::Mat4>,
+    animated_instance_indices: Vec<usize>,
 }
 
 /// 保持 BLAS、TLAS 及其构建依赖资源存活。
@@ -43,7 +46,54 @@ pub struct AccelerationStructures {
     pub tlas: ID3D12Resource,
     _blas: Vec<ID3D12Resource>,
     build_scratch: Option<ID3D12Resource>,
-    _instance_buffer: Option<ID3D12Resource>,
+    frame_data: Vec<FrameInstanceData>,
+}
+
+const FRAME_CONTEXT_COUNT: usize = 3;
+
+struct FrameInstanceData {
+    instance_descs: MappedUpload,
+    instance_gpu: MappedUpload,
+}
+
+struct MappedUpload {
+    resource: ID3D12Resource,
+    mapped: NonNull<u8>,
+    byte_size: usize,
+}
+
+impl MappedUpload {
+    fn new<T: Copy>(device: &ID3D12Device, values: &[T], name: &str) -> Result<Self> {
+        let resource = create_upload_buffer(device, values, name)?;
+        let mut mapped = std::ptr::null_mut::<c_void>();
+        unsafe { resource.Map(0, None, Some(&mut mapped))? };
+        Ok(Self {
+            resource,
+            mapped: NonNull::new(mapped.cast()).unwrap(),
+            byte_size: size_of_val(values),
+        })
+    }
+
+    fn write<T: Copy>(&self, values: &[T]) {
+        let byte_size = size_of_val(values);
+        assert!(
+            byte_size <= self.byte_size,
+            "Frame-local upload buffer is too small"
+        );
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                values.as_ptr().cast::<u8>(),
+                self.mapped.as_ptr(),
+                byte_size,
+            );
+        }
+    }
+}
+
+impl Drop for MappedUpload {
+    fn drop(&mut self) {
+        unsafe { self.resource.Unmap(0, None) };
+    }
 }
 
 impl SceneGeometry {
@@ -82,8 +132,7 @@ impl SceneGeometry {
         let instances = scene
             .instances
             .iter()
-            .enumerate()
-            .map(|(index, instance)| {
+            .map(|instance| {
                 let range = primitive_ranges[instance.primitive_index];
                 InstanceGpu {
                     previous_object_to_world_row0: matrix_rows(instance.previous_world)[0],
@@ -93,21 +142,25 @@ impl SceneGeometry {
                     index_offset: range.index_offset,
                     material_index: scene.primitives[instance.primitive_index].material_index
                         as u32,
-                    stable_surface_id: instance.stable_id.max(index as u32),
+                    stable_surface_id: instance.stable_id,
                 }
             })
             .collect::<Vec<_>>();
-        let instance_transforms = scene
+        let current_transforms = scene
             .instances
             .iter()
-            .map(|instance| matrix_rows(instance.current_world))
-            .map(|rows| {
-                [
-                    rows[0][0], rows[0][1], rows[0][2], rows[0][3], rows[1][0], rows[1][1],
-                    rows[1][2], rows[1][3], rows[2][0], rows[2][1], rows[2][2], rows[2][3],
-                ]
-            })
-            .collect();
+            .map(|instance| instance.current_world)
+            .collect::<Vec<_>>();
+        let base_transforms = scene
+            .instances
+            .iter()
+            .map(|instance| instance.base_world)
+            .collect::<Vec<_>>();
+        let previous_transforms = scene
+            .instances
+            .iter()
+            .map(|instance| instance.previous_world)
+            .collect::<Vec<_>>();
         let instance_primitive_indices = scene
             .instances
             .iter()
@@ -119,26 +172,21 @@ impl SceneGeometry {
             create_static_buffer(device, command_list, &indices, "Cornell Box 索引")?;
         let (material_buffer, material_upload) =
             create_static_buffer(device, command_list, &materials, "场景材质")?;
-        let (instance_buffer, instance_upload) =
-            create_static_buffer(device, command_list, &instances, "场景实例元数据")?;
         Ok(Self {
             vertex_buffer,
             index_buffer,
             material_buffer,
-            instance_buffer,
             vertex_count: vertices.len() as u32,
             index_count: indices.len() as u32,
             material_count: materials.len() as u32,
-            instance_count: instances.len() as u32,
             primitive_ranges,
-            instance_transforms,
+            current_transforms,
             instance_primitive_indices,
-            upload_buffers: vec![
-                vertex_upload,
-                index_upload,
-                material_upload,
-                instance_upload,
-            ],
+            upload_buffers: vec![vertex_upload, index_upload, material_upload],
+            instance_data: instances,
+            base_transforms,
+            previous_transforms,
+            animated_instance_indices: scene.animated_root_instances.clone(),
         })
     }
 
@@ -189,10 +237,6 @@ impl SceneGeometry {
         &self.material_buffer
     }
 
-    pub fn instance_buffer(&self) -> &ID3D12Resource {
-        &self.instance_buffer
-    }
-
     pub fn vertex_count(&self) -> u32 {
         self.vertex_count
     }
@@ -205,10 +249,6 @@ impl SceneGeometry {
         self.material_count
     }
 
-    pub fn instance_count(&self) -> u32 {
-        self.instance_count
-    }
-
     pub fn primitive_count(&self) -> usize {
         self.primitive_ranges.len()
     }
@@ -217,11 +257,11 @@ impl SceneGeometry {
         &self,
         blas: &[ID3D12Resource],
     ) -> Vec<D3D12_RAYTRACING_INSTANCE_DESC> {
-        self.instance_transforms
+        self.current_transforms
             .iter()
             .enumerate()
             .map(|(index, transform)| D3D12_RAYTRACING_INSTANCE_DESC {
-                Transform: *transform,
+                Transform: matrix_to_d3d12_transform(*transform),
                 _bitfield1: (index as u32 & 0x00FF_FFFF) | (0xFF << 24),
                 _bitfield2: 0,
                 AccelerationStructure: unsafe {
@@ -230,6 +270,41 @@ impl SceneGeometry {
             })
             .collect()
     }
+
+    pub fn instance_gpu_data(&self) -> &[InstanceGpu] {
+        &self.instance_data
+    }
+
+    pub fn prepare_animation(&mut self, elapsed: Duration, animate_model: bool) {
+        if !animate_model || self.animated_instance_indices.is_empty() {
+            return;
+        }
+        let rotation = glam::Mat4::from_rotation_y(elapsed.as_secs_f32() * 0.35);
+        for &index in &self.animated_instance_indices {
+            self.current_transforms[index] = rotation * self.base_transforms[index];
+            let rows = matrix_rows(self.previous_transforms[index]);
+            self.instance_data[index].previous_object_to_world_row0 = rows[0];
+            self.instance_data[index].previous_object_to_world_row1 = rows[1];
+            self.instance_data[index].previous_object_to_world_row2 = rows[2];
+        }
+    }
+
+    pub fn commit_animation(&mut self, animate_model: bool) {
+        if !animate_model || self.animated_instance_indices.is_empty() {
+            return;
+        }
+        for &index in &self.animated_instance_indices {
+            self.previous_transforms[index] = self.current_transforms[index];
+        }
+    }
+}
+
+fn matrix_to_d3d12_transform(matrix: glam::Mat4) -> [f32; 12] {
+    let rows = matrix_rows(matrix);
+    [
+        rows[0][0], rows[0][1], rows[0][2], rows[0][3], rows[1][0], rows[1][1], rows[1][2],
+        rows[1][3], rows[2][0], rows[2][1], rows[2][2], rows[2][3],
+    ]
 }
 
 fn matrix_rows(matrix: glam::Mat4) -> [[f32; 4]; 4] {
@@ -301,7 +376,22 @@ impl AccelerationStructures {
             )?);
         }
         let instance_descs = geometry.instance_descriptors(&blas);
-        let instance_buffer = create_upload_buffer(device, &instance_descs, "DXR 场景实例")?;
+        let mut frame_data = Vec::with_capacity(FRAME_CONTEXT_COUNT);
+        for frame_index in 0..FRAME_CONTEXT_COUNT {
+            frame_data.push(FrameInstanceData {
+                instance_descs: MappedUpload::new(
+                    device,
+                    &instance_descs,
+                    &format!("Frame {frame_index} TLAS 实例"),
+                )?,
+                instance_gpu: MappedUpload::new(
+                    device,
+                    geometry.instance_gpu_data(),
+                    &format!("Frame {frame_index} InstanceGpu"),
+                )?,
+            });
+        }
+        let instance_buffer = &frame_data[0].instance_descs.resource;
         let tlas_inputs = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS {
             Type: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL,
             Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE
@@ -366,14 +456,62 @@ impl AccelerationStructures {
             tlas,
             _blas: blas,
             build_scratch: Some(scratch),
-            _instance_buffer: Some(instance_buffer),
+            frame_data,
         })
+    }
+
+    pub fn update(
+        &mut self,
+        command_list: &ID3D12GraphicsCommandList,
+        frame_index: usize,
+        geometry: &SceneGeometry,
+    ) -> Result<()> {
+        let frame = &self.frame_data[frame_index % FRAME_CONTEXT_COUNT];
+        let instance_descs = geometry.instance_descriptors(&self._blas);
+        frame.instance_descs.write(&instance_descs);
+        frame.instance_gpu.write(geometry.instance_gpu_data());
+        let scratch = self.build_scratch.as_ref().ok_or_else(|| {
+            windows::core::Error::new(
+                windows::core::HRESULT(0x80004005_u32 as i32),
+                "TLAS update scratch 已被释放",
+            )
+        })?;
+        let inputs = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS {
+            Type: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL,
+            Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE
+                | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE
+                | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE,
+            NumDescs: instance_descs.len() as u32,
+            DescsLayout: D3D12_ELEMENTS_LAYOUT_ARRAY,
+            Anonymous: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_0 {
+                InstanceDescs: unsafe { frame.instance_descs.resource.GetGPUVirtualAddress() },
+            },
+        };
+        let build = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC {
+            DestAccelerationStructureData: unsafe { self.tlas.GetGPUVirtualAddress() },
+            Inputs: inputs,
+            SourceAccelerationStructureData: unsafe { self.tlas.GetGPUVirtualAddress() },
+            ScratchAccelerationStructureData: unsafe { scratch.GetGPUVirtualAddress() },
+        };
+        let command_list4: ID3D12GraphicsCommandList4 = command_list.cast()?;
+        unsafe { command_list4.BuildRaytracingAccelerationStructure(&build, None) };
+        uav_barrier(command_list, &self.tlas);
+        Ok(())
+    }
+
+    pub fn instance_gpu_address(&self, frame_index: usize) -> u64 {
+        unsafe {
+            self.frame_data[frame_index % FRAME_CONTEXT_COUNT]
+                .instance_gpu
+                .resource
+                .GetGPUVirtualAddress()
+        }
     }
 
     /// BLAS scratch is only needed until the initial AS build fence completes;
     /// the instance upload remains alive for the TLAS update path.
     pub fn release_build_resources(&mut self) {
-        self.build_scratch = None;
+        // TLAS update keeps this scratch allocation alive for the renderer lifetime.
     }
 }
 
@@ -662,7 +800,7 @@ fn create_raytracing_root_signature(device: &ID3D12Device) -> Result<ID3D12RootS
     let ranges = [
         D3D12_DESCRIPTOR_RANGE {
             RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
-            NumDescriptors: 5,
+            NumDescriptors: 4,
             BaseShaderRegister: 0,
             RegisterSpace: 0,
             OffsetInDescriptorsFromTableStart: 0,
@@ -672,7 +810,7 @@ fn create_raytracing_root_signature(device: &ID3D12Device) -> Result<ID3D12RootS
             NumDescriptors: 9,
             BaseShaderRegister: 0,
             RegisterSpace: 0,
-            OffsetInDescriptorsFromTableStart: 5,
+            OffsetInDescriptorsFromTableStart: 4,
         },
     ];
     let parameters = [
@@ -693,6 +831,16 @@ fn create_raytracing_root_signature(device: &ID3D12Device) -> Result<ID3D12RootS
                     ShaderRegister: 0,
                     RegisterSpace: 0,
                     Num32BitValues: 16,
+                },
+            },
+            ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+        },
+        D3D12_ROOT_PARAMETER {
+            ParameterType: D3D12_ROOT_PARAMETER_TYPE_SRV,
+            Anonymous: D3D12_ROOT_PARAMETER_0 {
+                Descriptor: D3D12_ROOT_DESCRIPTOR {
+                    ShaderRegister: 4,
+                    RegisterSpace: 0,
                 },
             },
             ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
