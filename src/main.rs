@@ -10,6 +10,7 @@ mod entity;
 mod material;
 mod realtime;
 mod renderer;
+mod resolution;
 mod scene;
 mod settings;
 mod some_math;
