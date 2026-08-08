@@ -20,6 +20,7 @@ use winit::{
 use crate::{
     as_policy::AccelerationStructureStats,
     realtime::{AtrousMode, CommandRecordingMode, RealtimeConfig},
+    resolution::Extent2D,
     scene::{MAX_SCENE_SAMPLERS, SceneAsset, gltf_loader},
 };
 
@@ -28,6 +29,7 @@ use self::{
     memory::{VideoMemorySnapshot, VideoMemoryStatus, VideoMemoryTelemetry},
     pipeline::ComputePipeline,
     profiler::{CommandRecordingFrameStats, GpuPass, GpuProfiler},
+    render_resources::RenderResourceGeneration,
     resource::{BarrierSubmissionMode, TrackedResource, TransitionBatch},
     shader::{ReloadedShaders, ShaderReloader},
     texture::{DXR_UAV_BASE, TextureSet},
@@ -40,6 +42,7 @@ mod pipeline;
 mod pix;
 pub(crate) mod profiler;
 mod raytracing;
+mod render_resources;
 mod resource;
 mod shader;
 mod texture;
@@ -81,32 +84,6 @@ struct CameraConstants {
     reset_history: u32,
 }
 
-struct DenoiseHistory {
-    diffuse: TrackedResource,
-    specular: TrackedResource,
-    moments: TrackedResource,
-    normal_roughness: TrackedResource,
-    depth: TrackedResource,
-    length: TrackedResource,
-    id: TrackedResource,
-    world_position: TrackedResource,
-    hit_distance: TrackedResource,
-}
-
-impl DenoiseHistory {
-    fn collect_all(&mut self, batch: &mut TransitionBatch, state: D3D12_RESOURCE_STATES) {
-        self.diffuse.collect_transition(batch, state);
-        self.specular.collect_transition(batch, state);
-        self.moments.collect_transition(batch, state);
-        self.normal_roughness.collect_transition(batch, state);
-        self.depth.collect_transition(batch, state);
-        self.length.collect_transition(batch, state);
-        self.id.collect_transition(batch, state);
-        self.world_position.collect_transition(batch, state);
-        self.hit_distance.collect_transition(batch, state);
-    }
-}
-
 /// 阶段 1 的最小 DX12 后端：三缓冲交换链、清屏和逐帧 Fence。
 pub struct Dx12Renderer {
     device: ID3D12Device,
@@ -115,24 +92,8 @@ pub struct Dx12Renderer {
     command_queue: ID3D12CommandQueue,
     swap_chain: IDXGISwapChain3,
     rtv_heap: DescriptorHeap,
-    shader_heap: DescriptorHeap,
     render_targets: [Option<TrackedResource>; FRAME_COUNT],
-    display_output: Option<TrackedResource>,
-    raw_diffuse: Option<TrackedResource>,
-    raw_specular: Option<TrackedResource>,
-    gbuffer_albedo: Option<TrackedResource>,
-    gbuffer_normal_roughness: Option<TrackedResource>,
-    gbuffer_depth: Option<TrackedResource>,
-    gbuffer_motion: Option<TrackedResource>,
-    gbuffer_id: Option<TrackedResource>,
-    gbuffer_world_position: Option<TrackedResource>,
-    gbuffer_hit_distance: Option<TrackedResource>,
-    histories: [Option<DenoiseHistory>; 2],
-    filter_diffuse_ping: Option<TrackedResource>,
-    filter_diffuse_pong: Option<TrackedResource>,
-    filter_specular_ping: Option<TrackedResource>,
-    filter_specular_pong: Option<TrackedResource>,
-    rejection_mask: Option<TrackedResource>,
+    active_generation: RenderResourceGeneration,
     gpu_profiler: GpuProfiler,
     memory_telemetry: VideoMemoryTelemetry,
     shader_status: String,
@@ -241,13 +202,6 @@ impl Dx12Renderer {
             let rtv_heap =
                 DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, FRAME_COUNT, false)
                     .map_err(|error| dx_error("创建 RTV 描述符堆", error))?;
-            let shader_heap = DescriptorHeap::new(
-                &device,
-                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-                SHADER_DESCRIPTOR_COUNT,
-                true,
-            )
-            .map_err(|error| dx_error("创建 Shader 描述符堆", error))?;
             let sampler_heap = DescriptorHeap::new(
                 &device,
                 D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
@@ -310,31 +264,6 @@ impl Dx12Renderer {
                 config.animate_model,
             )
             .map_err(|error| dx_error("构建 DXR 加速结构 Phase A", error))?;
-            create_structured_srv(
-                &device,
-                &shader_heap,
-                1,
-                scene_geometry.vertex_buffer(),
-                scene_geometry.vertex_count(),
-                48,
-            );
-            create_structured_srv(
-                &device,
-                &shader_heap,
-                2,
-                scene_geometry.index_buffer(),
-                scene_geometry.index_count(),
-                4,
-            );
-            create_structured_srv(
-                &device,
-                &shader_heap,
-                3,
-                scene_geometry.material_buffer(),
-                scene_geometry.material_count(),
-                64,
-            );
-            texture_set.write_srvs(&device, &shader_heap);
             let raytracing_pipeline = RaytracingPipeline::new(&device, STAGE3_SHADER)
                 .map_err(|error| dx_error("创建 DXR State Object", error))?;
             let temporal_pipeline =
@@ -375,17 +304,6 @@ impl Dx12Renderer {
             command_queue.Signal(&fence, 2)?;
             fence.SetEventOnCompletion(2, fence_event)?;
             WaitForSingleObject(fence_event, INFINITE);
-            let tlas_view = D3D12_SHADER_RESOURCE_VIEW_DESC {
-                Format: DXGI_FORMAT_UNKNOWN,
-                ViewDimension: D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE,
-                Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
-                Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
-                    RaytracingAccelerationStructure: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_SRV {
-                        Location: acceleration_structures.tlas.GetGPUVirtualAddress(),
-                    },
-                },
-            };
-            device.CreateShaderResourceView(None, Some(&tlas_view), shader_heap.cpu_handle(0));
             scene_geometry.release_uploads();
             texture_set.release_uploads();
             let as_stats = acceleration_structures.stats();
@@ -401,6 +319,17 @@ impl Dx12Renderer {
                 as_stats.retained_update_scratch_allocation_bytes / 1024,
             );
             acceleration_structures.release_build_resources();
+            let output_extent = Extent2D { width, height };
+            let active_generation = RenderResourceGeneration::new(
+                &device,
+                &texture_set,
+                &scene_geometry,
+                &acceleration_structures,
+                output_extent,
+                output_extent,
+                1,
+            )
+            .map_err(|error| dx_error("创建初始渲染资源代际", error))?;
             let mut renderer = Self {
                 device,
                 _adapter: adapter,
@@ -408,24 +337,8 @@ impl Dx12Renderer {
                 command_queue,
                 swap_chain,
                 rtv_heap,
-                shader_heap,
                 render_targets: [None, None, None],
-                display_output: None,
-                raw_diffuse: None,
-                raw_specular: None,
-                gbuffer_albedo: None,
-                gbuffer_normal_roughness: None,
-                gbuffer_depth: None,
-                gbuffer_motion: None,
-                gbuffer_id: None,
-                gbuffer_world_position: None,
-                gbuffer_hit_distance: None,
-                histories: [None, None],
-                filter_diffuse_ping: None,
-                filter_diffuse_pong: None,
-                filter_specular_ping: None,
-                filter_specular_pong: None,
-                rejection_mask: None,
+                active_generation,
                 gpu_profiler,
                 memory_telemetry,
                 shader_status: format!(
@@ -480,13 +393,6 @@ impl Dx12Renderer {
             renderer
                 .create_render_targets()
                 .map_err(|error| dx_error("创建交换链渲染目标", error))?;
-            renderer
-                .create_frame_resources()
-                .map_err(|error| dx_error("创建帧资源", error))?;
-            renderer
-                .create_denoise_resources()
-                .map_err(|error| dx_error("创建时空降噪资源", error))?;
-            renderer.create_shader_views();
             Ok(renderer)
         }
     }
@@ -543,7 +449,7 @@ impl Dx12Renderer {
             self.gpu_profiler.end_event(&self.command_list);
 
             self.command_list.SetDescriptorHeaps(&[
-                Some(self.shader_heap.heap().clone()),
+                Some(self.active_generation.shader_heap.heap().clone()),
                 Some(self._sampler_heap.heap().clone()),
             ]);
             let command_list4: ID3D12GraphicsCommandList4 = self.command_list.cast()?;
@@ -554,8 +460,12 @@ impl Dx12Renderer {
             self.collect_frame_input_transitions(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             self.submit_transition_batch(&mut command_recording_stats);
             command_list4.SetComputeRootSignature(&self.raytracing_pipeline.root_signature);
-            command_list4
-                .SetComputeRootDescriptorTable(0, self.shader_heap.gpu_handle(DXR_TABLE_BASE));
+            command_list4.SetComputeRootDescriptorTable(
+                0,
+                self.active_generation
+                    .shader_heap
+                    .gpu_handle(DXR_TABLE_BASE),
+            );
             command_list4.SetComputeRootDescriptorTable(3, self._sampler_heap.gpu_handle(0));
             command_list4.SetComputeRootShaderResourceView(
                 2,
@@ -599,21 +509,15 @@ impl Dx12Renderer {
             self.collect_frame_input_transitions(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             let current_history = self.history_index;
             let previous_history = 1 - current_history;
-            self.histories[previous_history]
-                .as_mut()
-                .unwrap()
-                .collect_all(
-                    &mut self.transition_batch,
-                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                );
-            self.histories[current_history]
-                .as_mut()
-                .unwrap()
-                .collect_all(
-                    &mut self.transition_batch,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                );
-            self.rejection_mask.as_mut().unwrap().collect_transition(
+            self.active_generation.histories[previous_history].collect_all(
+                &mut self.transition_batch,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            );
+            self.active_generation.histories[current_history].collect_all(
+                &mut self.transition_batch,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            );
+            self.active_generation.rejection_mask.collect_transition(
                 &mut self.transition_batch,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             );
@@ -627,7 +531,8 @@ impl Dx12Renderer {
                 .begin_event(&self.command_list, GpuPass::Temporal);
             self.temporal_pipeline.bind(
                 &self.command_list,
-                self.shader_heap
+                self.active_generation
+                    .shader_heap
                     .gpu_handle(TEMPORAL_TABLE_BASES[current_history]),
                 &[u32::from(self.reset_history)],
             );
@@ -635,14 +540,11 @@ impl Dx12Renderer {
             self.gpu_profiler
                 .end(&self.command_list, frame_index, GpuPass::Temporal);
             self.gpu_profiler.end_event(&self.command_list);
-            self.histories[current_history]
-                .as_mut()
-                .unwrap()
-                .collect_all(
-                    &mut self.transition_batch,
-                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                );
-            self.rejection_mask.as_mut().unwrap().collect_transition(
+            self.active_generation.histories[current_history].collect_all(
+                &mut self.transition_batch,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            );
+            self.active_generation.rejection_mask.collect_transition(
                 &mut self.transition_batch,
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
             );
@@ -653,16 +555,14 @@ impl Dx12Renderer {
             self.gpu_profiler
                 .begin_event(&self.command_list, GpuPass::Atrous);
             let mut atrous_pipeline_identity: Option<*const ComputePipeline> = None;
-            self.filter_diffuse_ping
-                .as_mut()
-                .unwrap()
+            self.active_generation
+                .filter_diffuse_ping
                 .collect_transition(
                     &mut self.transition_batch,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 );
-            self.filter_specular_ping
-                .as_mut()
-                .unwrap()
+            self.active_generation
+                .filter_specular_ping
                 .collect_transition(
                     &mut self.transition_batch,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -670,7 +570,8 @@ impl Dx12Renderer {
             self.submit_transition_batch(&mut command_recording_stats);
             self.bind_atrous_arguments(
                 1,
-                self.shader_heap
+                self.active_generation
+                    .shader_heap
                     .gpu_handle(ATROUS_HISTORY_TABLE_BASES[current_history]),
                 &[1, 0],
                 &mut atrous_pipeline_identity,
@@ -684,31 +585,27 @@ impl Dx12Renderer {
             self.gpu_profiler
                 .end(&self.command_list, frame_index, GpuPass::Atrous0);
             self.gpu_profiler.end_event(&self.command_list);
-            self.filter_diffuse_ping
-                .as_mut()
-                .unwrap()
+            self.active_generation
+                .filter_diffuse_ping
                 .collect_transition(
                     &mut self.transition_batch,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 );
-            self.filter_specular_ping
-                .as_mut()
-                .unwrap()
+            self.active_generation
+                .filter_specular_ping
                 .collect_transition(
                     &mut self.transition_batch,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 );
 
-            self.filter_diffuse_pong
-                .as_mut()
-                .unwrap()
+            self.active_generation
+                .filter_diffuse_pong
                 .collect_transition(
                     &mut self.transition_batch,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 );
-            self.filter_specular_pong
-                .as_mut()
-                .unwrap()
+            self.active_generation
+                .filter_specular_pong
                 .collect_transition(
                     &mut self.transition_batch,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -716,7 +613,8 @@ impl Dx12Renderer {
             self.submit_transition_batch(&mut command_recording_stats);
             self.bind_atrous_arguments(
                 2,
-                self.shader_heap
+                self.active_generation
+                    .shader_heap
                     .gpu_handle(ATROUS_PING_TO_PONG_BASES[current_history]),
                 &[2, 1],
                 &mut atrous_pipeline_identity,
@@ -730,31 +628,27 @@ impl Dx12Renderer {
             self.gpu_profiler
                 .end(&self.command_list, frame_index, GpuPass::Atrous1);
             self.gpu_profiler.end_event(&self.command_list);
-            self.filter_diffuse_pong
-                .as_mut()
-                .unwrap()
+            self.active_generation
+                .filter_diffuse_pong
                 .collect_transition(
                     &mut self.transition_batch,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 );
-            self.filter_specular_pong
-                .as_mut()
-                .unwrap()
+            self.active_generation
+                .filter_specular_pong
                 .collect_transition(
                     &mut self.transition_batch,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 );
 
-            self.filter_diffuse_ping
-                .as_mut()
-                .unwrap()
+            self.active_generation
+                .filter_diffuse_ping
                 .collect_transition(
                     &mut self.transition_batch,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 );
-            self.filter_specular_ping
-                .as_mut()
-                .unwrap()
+            self.active_generation
+                .filter_specular_ping
                 .collect_transition(
                     &mut self.transition_batch,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -762,7 +656,8 @@ impl Dx12Renderer {
             self.submit_transition_batch(&mut command_recording_stats);
             self.bind_atrous_arguments(
                 4,
-                self.shader_heap
+                self.active_generation
+                    .shader_heap
                     .gpu_handle(ATROUS_PONG_TO_PING_BASES[current_history]),
                 &[4, 2],
                 &mut atrous_pipeline_identity,
@@ -776,31 +671,27 @@ impl Dx12Renderer {
             self.gpu_profiler
                 .end(&self.command_list, frame_index, GpuPass::Atrous2);
             self.gpu_profiler.end_event(&self.command_list);
-            self.filter_diffuse_ping
-                .as_mut()
-                .unwrap()
+            self.active_generation
+                .filter_diffuse_ping
                 .collect_transition(
                     &mut self.transition_batch,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 );
-            self.filter_specular_ping
-                .as_mut()
-                .unwrap()
+            self.active_generation
+                .filter_specular_ping
                 .collect_transition(
                     &mut self.transition_batch,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 );
 
-            self.filter_diffuse_pong
-                .as_mut()
-                .unwrap()
+            self.active_generation
+                .filter_diffuse_pong
                 .collect_transition(
                     &mut self.transition_batch,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 );
-            self.filter_specular_pong
-                .as_mut()
-                .unwrap()
+            self.active_generation
+                .filter_specular_pong
                 .collect_transition(
                     &mut self.transition_batch,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -808,7 +699,8 @@ impl Dx12Renderer {
             self.submit_transition_batch(&mut command_recording_stats);
             self.bind_atrous_arguments(
                 8,
-                self.shader_heap
+                self.active_generation
+                    .shader_heap
                     .gpu_handle(ATROUS_PING_TO_PONG_BASES[current_history]),
                 &[8, 3],
                 &mut atrous_pipeline_identity,
@@ -822,16 +714,14 @@ impl Dx12Renderer {
             self.gpu_profiler
                 .end(&self.command_list, frame_index, GpuPass::Atrous3);
             self.gpu_profiler.end_event(&self.command_list);
-            self.filter_diffuse_pong
-                .as_mut()
-                .unwrap()
+            self.active_generation
+                .filter_diffuse_pong
                 .collect_transition(
                     &mut self.transition_batch,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 );
-            self.filter_specular_pong
-                .as_mut()
-                .unwrap()
+            self.active_generation
+                .filter_specular_pong
                 .collect_transition(
                     &mut self.transition_batch,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -845,10 +735,11 @@ impl Dx12Renderer {
                 .begin(&self.command_list, frame_index, GpuPass::ToneMap);
             self.gpu_profiler
                 .begin_event(&self.command_list, GpuPass::ToneMap);
-            let display_output = self.display_output.as_mut().unwrap();
+            let display_output = &mut self.active_generation.display_output;
             self.tonemap_pipeline.bind(
                 &self.command_list,
-                self.shader_heap
+                self.active_generation
+                    .shader_heap
                     .gpu_handle(TONEMAP_TABLE_BASES[current_history]),
                 &[self.debug_view, 1.0_f32.to_bits()],
             );
@@ -870,13 +761,13 @@ impl Dx12Renderer {
                 .collect_transition(&mut self.transition_batch, D3D12_RESOURCE_STATE_COPY_DEST);
             self.submit_transition_batch(&mut command_recording_stats);
 
-            let display_output = self.display_output.as_ref().unwrap();
+            let display_output = &self.active_generation.display_output;
             let render_target = self.render_targets[frame_index].as_mut().unwrap();
             self.command_list
                 .CopyResource(render_target.resource(), display_output.resource());
             render_target
                 .collect_transition(&mut self.transition_batch, D3D12_RESOURCE_STATE_PRESENT);
-            self.display_output.as_mut().unwrap().collect_transition(
+            self.active_generation.display_output.collect_transition(
                 &mut self.transition_batch,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             );
@@ -934,22 +825,6 @@ impl Dx12Renderer {
                 None::<&ID3D12PipelineState>,
             )?;
             self.command_list.Close()?;
-            self.display_output = None;
-            self.raw_diffuse = None;
-            self.raw_specular = None;
-            self.gbuffer_albedo = None;
-            self.gbuffer_normal_roughness = None;
-            self.gbuffer_depth = None;
-            self.gbuffer_motion = None;
-            self.gbuffer_id = None;
-            self.gbuffer_world_position = None;
-            self.gbuffer_hit_distance = None;
-            self.histories = [None, None];
-            self.filter_diffuse_ping = None;
-            self.filter_diffuse_pong = None;
-            self.filter_specular_ping = None;
-            self.filter_specular_pong = None;
-            self.rejection_mask = None;
             self.render_targets = [None, None, None];
             self.swap_chain.ResizeBuffers(
                 FRAME_COUNT as u32,
@@ -972,10 +847,17 @@ impl Dx12Renderer {
             self.previous_camera_position = self.camera_position;
             self.previous_camera_yaw = self.camera_yaw;
             self.previous_camera_pitch = self.camera_pitch;
+            let output_extent = Extent2D { width, height };
+            self.active_generation = RenderResourceGeneration::new(
+                &self.device,
+                &self._textures,
+                &self._scene_geometry,
+                &self._acceleration_structures,
+                output_extent,
+                output_extent,
+                self.active_generation.id.saturating_add(1),
+            )?;
             self.create_render_targets()?;
-            self.create_frame_resources()?;
-            self.create_denoise_resources()?;
-            self.create_shader_views();
             Ok(())
         }
     }
@@ -1307,6 +1189,7 @@ impl Dx12Renderer {
         Ok(())
     }
 
+    #[cfg(any())]
     fn create_uav_texture(
         &self,
         format: DXGI_FORMAT,
@@ -1323,6 +1206,7 @@ impl Dx12Renderer {
         )
     }
 
+    #[cfg(any())]
     fn create_frame_resources(&mut self) -> Result<()> {
         self.display_output =
             Some(self.create_uav_texture(DXGI_FORMAT_R8G8B8A8_UNORM, "Tone Map 显示输出")?);
@@ -1350,6 +1234,7 @@ impl Dx12Renderer {
         Ok(())
     }
 
+    #[cfg(any())]
     fn create_history(&self, index: usize) -> Result<DenoiseHistory> {
         let label = |value: &str| format!("历史 {index} {value}");
         Ok(DenoiseHistory {
@@ -1372,6 +1257,7 @@ impl Dx12Renderer {
         })
     }
 
+    #[cfg(any())]
     fn create_denoise_resources(&mut self) -> Result<()> {
         self.histories = [Some(self.create_history(0)?), Some(self.create_history(1)?)];
         self.filter_diffuse_ping =
@@ -1387,6 +1273,7 @@ impl Dx12Renderer {
         Ok(())
     }
 
+    #[cfg(any())]
     unsafe fn create_shader_views(&self) {
         unsafe {
             self._textures.write_srvs(&self.device, &self.shader_heap);
@@ -1554,41 +1441,33 @@ impl Dx12Renderer {
     }
 
     fn collect_frame_input_transitions(&mut self, state: D3D12_RESOURCE_STATES) {
-        self.raw_diffuse
-            .as_mut()
-            .unwrap()
+        let generation = &mut self.active_generation;
+        generation
+            .raw_diffuse
             .collect_transition(&mut self.transition_batch, state);
-        self.raw_specular
-            .as_mut()
-            .unwrap()
+        generation
+            .raw_specular
             .collect_transition(&mut self.transition_batch, state);
-        self.gbuffer_albedo
-            .as_mut()
-            .unwrap()
+        generation
+            .gbuffer_albedo
             .collect_transition(&mut self.transition_batch, state);
-        self.gbuffer_normal_roughness
-            .as_mut()
-            .unwrap()
+        generation
+            .gbuffer_normal_roughness
             .collect_transition(&mut self.transition_batch, state);
-        self.gbuffer_depth
-            .as_mut()
-            .unwrap()
+        generation
+            .gbuffer_depth
             .collect_transition(&mut self.transition_batch, state);
-        self.gbuffer_motion
-            .as_mut()
-            .unwrap()
+        generation
+            .gbuffer_motion
             .collect_transition(&mut self.transition_batch, state);
-        self.gbuffer_id
-            .as_mut()
-            .unwrap()
+        generation
+            .gbuffer_id
             .collect_transition(&mut self.transition_batch, state);
-        self.gbuffer_world_position
-            .as_mut()
-            .unwrap()
+        generation
+            .gbuffer_world_position
             .collect_transition(&mut self.transition_batch, state);
-        self.gbuffer_hit_distance
-            .as_mut()
-            .unwrap()
+        generation
+            .gbuffer_hit_distance
             .collect_transition(&mut self.transition_batch, state);
     }
 
