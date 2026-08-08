@@ -440,19 +440,19 @@ cargo run --release -- --model assets/gltf/BoxTextured/BoxTextured.gltf --animat
 
 ## 9. 测试矩阵
 
-| 类型 | 必测内容 | 失败意义 |
-| --- | --- | --- |
-| CLI | 默认实时、CPU 参考、`--model`、`--animate-model`、冲突参数 | 入口契约回归 |
-| glTF 语法 | glTF/GLB、indexed/non-indexed、default scene、unsupported extension | loader 容错或报错不可靠 |
-| 几何 | normal 生成、绕序、UV、tangent、多 primitive | 黑面、法线错或越界 |
-| 矩阵 | TRS/matrix、层级、左/右手转换、非均匀缩放 | 实例位置或法线错 |
-| 数据布局 | Vertex 48 B、Material 64 B、Instance 64 B、root constants | Rust/HLSL 读错但可能不立即崩溃 |
-| Descriptor | 表不重叠、fallback 全初始化、texture limit | GPU validation/device removed |
-| 加速结构 | BLAS 共享、TLAS initial/update、scratch 生命周期 | 随机崩溃或每帧重建过慢 |
-| 时域 | stable ID、current/previous transform、遮挡显露 | 鬼影、抹除或整屏历史失效 |
-| 纹理 | sRGB/linear、G/B 通道、fallback、normal TBN | 颜色过暗/过亮或材质错乱 |
-| PBR | roughness/metallic 极值、PDF finite、MIS、信号拆分 | 爆亮、黑斑、偏色或降噪串色 |
-| 同步 | 三帧连续 update、resize、最小化/恢复 | CPU 覆写 GPU 正在使用的实例数据 |
+| 类型       | 必测内容                                                            | 失败意义                        |
+| ---------- | ------------------------------------------------------------------- | ------------------------------- |
+| CLI        | 默认实时、CPU 参考、`--model`、`--animate-model`、冲突参数          | 入口契约回归                    |
+| glTF 语法  | glTF/GLB、indexed/non-indexed、default scene、unsupported extension | loader 容错或报错不可靠         |
+| 几何       | normal 生成、绕序、UV、tangent、多 primitive                        | 黑面、法线错或越界              |
+| 矩阵       | TRS/matrix、层级、左/右手转换、非均匀缩放                           | 实例位置或法线错                |
+| 数据布局   | Vertex 48 B、Material 64 B、Instance 64 B、root constants           | Rust/HLSL 读错但可能不立即崩溃  |
+| Descriptor | 表不重叠、fallback 全初始化、texture limit                          | GPU validation/device removed   |
+| 加速结构   | BLAS 共享、TLAS initial/update、scratch 生命周期                    | 随机崩溃或每帧重建过慢          |
+| 时域       | stable ID、current/previous transform、遮挡显露                     | 鬼影、抹除或整屏历史失效        |
+| 纹理       | sRGB/linear、G/B 通道、fallback、normal TBN                         | 颜色过暗/过亮或材质错乱         |
+| PBR        | roughness/metallic 极值、PDF finite、MIS、信号拆分                  | 爆亮、黑斑、偏色或降噪串色      |
+| 同步       | 三帧连续 update、resize、最小化/恢复                                | CPU 覆写 GPU 正在使用的实例数据 |
 
 ## 10. 风险和防错规则
 
@@ -495,45 +495,3 @@ cargo run --release -- --model assets/gltf/BoxTextured/BoxTextured.gltf --animat
 - Khronos glTF Sample Assets：<https://github.com/KhronosGroup/glTF-Sample-Assets>
 - `gltf` Rust crate：<https://docs.rs/gltf/latest/gltf/>
 - `glam::Mat4`：<https://docs.rs/glam/latest/glam/f32/struct.Mat4.html>
-
-## 13. 可直接交给 Luna 的提示词
-
-```text
-你在 C:\zjk\projects\RayTracingDemo 仓库中工作。请实现“阶段 7：动态场景与 glTF”。
-
-必须先完整阅读：
-1. docs\阶段7动态场景与glTF执行计划.md
-2. docs\实时DXR渲染器实施方案.md
-3. README.md
-4. src\renderer\d3d12.rs
-5. src\renderer\d3d12\raytracing.rs
-6. shaders 中当前的 DXR/Temporal/À-Trous/ToneMap Shader
-
-以阶段 7 计划文档为实现和验收的唯一主契约，严格按 7A -> 7G 的顺序完成。这不是单 commit 任务：按工作包创建多个中文 commit，如果某个工作包过大可继续拆分。每个 commit 必须保持可编译、测试通过和默认 Cornell Box 可运行，不要把所有改动挤成一个巨大 commit。
-
-关键约束：
-- 保留阶段 6 的独立 DXR/Temporal/À-Trous/ToneMap Pass、资源状态、降噪信号语义和调试视图。
-- 不得每帧 wait_for_gpu；动态实例数据必须用 Frame Context/fence 分片保护。
-- 同 mesh 多 node 必须共享 BLAS；刚体动画只 update TLAS，不重建静态 BLAS。
-- 运动矢量必须使用当前/前帧物体变换，普通物体运动不得全屏 reset_history。
-- 严格区分 sRGB 和线性纹理，使用 glTF metallic-roughness 的 G/B 通道。
-- 对不支持的 alpha、skin、morph、animation channel 和 required extension 给出清晰错误，不静默渲染错误结果。
-- 不实现阶段 8/9/10 内容，不顺手接 DLSS/NRD、重写 UI 或引入通用动画系统。
-- 不覆盖用户现有改动，不使用 git reset --hard。
-
-每个 commit 前至少运行：
-cargo fmt -- --check
-cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
-
-GPU 改动还要在 NVIDIA GeForce RTX 4060 Laptop GPU 上运行 Debug GPU-Based Validation 冒烟测试。最终按计划文档的 7G 执行 Release 构建、静态/动态 glTF、F1 调试视图、resize 和分辨率性能验收。
-
-完成后汇报：
-1. 所有 commit 哈希和每个 commit 的作用；
-2. 测试、Clippy、Release 和 GPU Validation 结果；
-3. 720p/900p/1080p 的 Total/AS/Path Trace/Temporal/À-Trous 实测；
-4. 已支持和明确未支持的 glTF 特性；
-5. 任何尚未达到的验收条件，不得把部分完成报告成阶段 7 已完成。
-
-如果时间或上下文无法一次完成 7A–7G，只提交已完成且验证通过的工作包，保持工作区可继续，然后明确说明下一步应从哪个工作包继续。
-```
