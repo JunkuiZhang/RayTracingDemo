@@ -12,7 +12,8 @@ use gltf::{
 };
 
 use super::{
-    ImageAsset, MaterialAsset, MaterialKind, MeshPrimitive, SceneAsset, SceneInstance, VertexAsset,
+    ImageAsset, MaterialAsset, MaterialKind, MeshPrimitive, RigidAnimationGroup, SceneAsset,
+    SceneInstance, VertexAsset,
 };
 
 const MAX_VERTICES: usize = 4_000_000;
@@ -168,20 +169,24 @@ pub fn load(path: impl AsRef<Path>) -> Result<SceneAsset, GltfLoadError> {
         ));
     }
 
-    let placement = calculate_placement(&primitives, &instances, path)?;
+    let (placement, source_pivot) = calculate_placement(&primitives, &instances, path)?;
+    let pivot_world = placement.transform_point3(source_pivot).to_array();
     for instance in &mut instances {
         let world = placement * instance.base_world;
         instance.base_world = world;
         instance.current_world = world;
         instance.previous_world = world;
     }
-    let animated_root_instances = (0..instances.len()).collect();
+    let animated_instance_indices = (0..instances.len()).collect();
     let scene_asset = SceneAsset {
         primitives,
         materials,
         images,
         instances,
-        animated_root_instances,
+        rigid_animation_groups: vec![RigidAnimationGroup {
+            instance_indices: animated_instance_indices,
+            pivot_world,
+        }],
     };
     scene_asset
         .validate()
@@ -595,7 +600,7 @@ fn calculate_placement(
     primitives: &[MeshPrimitive],
     instances: &[SceneInstance],
     path: &Path,
-) -> Result<Mat4, GltfLoadError> {
+) -> Result<(Mat4, Vec3), GltfLoadError> {
     let mut minimum = Vec3::splat(f32::INFINITY);
     let mut maximum = Vec3::splat(f32::NEG_INFINITY);
     for instance in instances {
@@ -625,7 +630,10 @@ fn calculate_placement(
         -1.0 - minimum.y * scale + 0.001,
         1.0 - center.z * scale,
     );
-    Ok(Mat4::from_translation(translation) * Mat4::from_scale(Vec3::splat(scale)))
+    Ok((
+        Mat4::from_translation(translation) * Mat4::from_scale(Vec3::splat(scale)),
+        center,
+    ))
 }
 
 fn convert_node_transform(transform: Transform) -> Mat4 {

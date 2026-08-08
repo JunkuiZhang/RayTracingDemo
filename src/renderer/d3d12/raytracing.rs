@@ -26,6 +26,11 @@ struct PrimitiveRange {
     index_count: u32,
 }
 
+struct AnimationGroup {
+    instance_indices: Vec<usize>,
+    pivot_world: glam::Vec3,
+}
+
 /// Cornell Box 的网格资源，包含逐顶点法线和逐三角形材质索引。
 pub struct SceneGeometry {
     vertex_buffer: ID3D12Resource,
@@ -41,7 +46,7 @@ pub struct SceneGeometry {
     instance_data: Vec<InstanceGpu>,
     base_transforms: Vec<glam::Mat4>,
     previous_transforms: Vec<glam::Mat4>,
-    animated_instance_indices: Vec<usize>,
+    animation_groups: Vec<AnimationGroup>,
 }
 
 /// 保持 BLAS、TLAS 及其构建依赖资源存活。
@@ -201,7 +206,14 @@ impl SceneGeometry {
             instance_data: instances,
             base_transforms,
             previous_transforms,
-            animated_instance_indices: scene.animated_root_instances.clone(),
+            animation_groups: scene
+                .rigid_animation_groups
+                .iter()
+                .map(|group| AnimationGroup {
+                    instance_indices: group.instance_indices.clone(),
+                    pivot_world: glam::Vec3::from_array(group.pivot_world),
+                })
+                .collect(),
         })
     }
 
@@ -291,56 +303,67 @@ impl SceneGeometry {
     }
 
     pub fn prepare_animation(&mut self, elapsed: Duration, animate_model: bool) -> bool {
-        if !animate_model || self.animated_instance_indices.is_empty() {
+        if !animate_model || self.animation_groups.is_empty() {
             return false;
         }
-        let rotation = animation_rotation(elapsed);
         let dirty = animation_dirty(
             &self.current_transforms,
             &self.base_transforms,
-            &self.animated_instance_indices,
+            &self.animation_groups,
             elapsed,
             animate_model,
         );
-        for &index in &self.animated_instance_indices {
-            let current = rotation * self.base_transforms[index];
-            self.current_transforms[index] = current;
-            let rows = matrix_rows(self.previous_transforms[index]);
-            self.instance_data[index].previous_object_to_world_row0 = rows[0];
-            self.instance_data[index].previous_object_to_world_row1 = rows[1];
-            self.instance_data[index].previous_object_to_world_row2 = rows[2];
+        for group in &self.animation_groups {
+            let transform = animation_transform_at(group.pivot_world, elapsed);
+            for &index in &group.instance_indices {
+                self.current_transforms[index] = transform * self.base_transforms[index];
+                let rows = matrix_rows(self.previous_transforms[index]);
+                self.instance_data[index].previous_object_to_world_row0 = rows[0];
+                self.instance_data[index].previous_object_to_world_row1 = rows[1];
+                self.instance_data[index].previous_object_to_world_row2 = rows[2];
+            }
         }
         dirty
     }
 
     pub fn commit_animation(&mut self, animate_model: bool) {
-        if !animate_model || self.animated_instance_indices.is_empty() {
+        if !animate_model || self.animation_groups.is_empty() {
             return;
         }
-        for &index in &self.animated_instance_indices {
-            self.previous_transforms[index] = self.current_transforms[index];
+        for group in &self.animation_groups {
+            for &index in &group.instance_indices {
+                self.previous_transforms[index] = self.current_transforms[index];
+            }
         }
     }
 }
 
-fn animation_rotation(elapsed: Duration) -> glam::Mat4 {
-    glam::Mat4::from_rotation_y(elapsed.as_secs_f32() * 0.35)
+fn animation_transform(pivot_world: glam::Vec3, angle: f32) -> glam::Mat4 {
+    let pivot = glam::Mat4::from_translation(pivot_world);
+    pivot * glam::Mat4::from_rotation_y(angle) * glam::Mat4::from_translation(-pivot_world)
+}
+
+fn animation_transform_at(pivot_world: glam::Vec3, elapsed: Duration) -> glam::Mat4 {
+    animation_transform(pivot_world, elapsed.as_secs_f32() * 0.35)
 }
 
 fn animation_dirty(
     current_transforms: &[glam::Mat4],
     base_transforms: &[glam::Mat4],
-    animated_instance_indices: &[usize],
+    animation_groups: &[AnimationGroup],
     elapsed: Duration,
     animate_model: bool,
 ) -> bool {
     if !animate_model {
         return false;
     }
-    let rotation = animation_rotation(elapsed);
-    animated_instance_indices
-        .iter()
-        .any(|&index| current_transforms[index] != rotation * base_transforms[index])
+    animation_groups.iter().any(|group| {
+        let transform = animation_transform_at(group.pivot_world, elapsed);
+        group
+            .instance_indices
+            .iter()
+            .any(|&index| current_transforms[index] != transform * base_transforms[index])
+    })
 }
 
 fn matrix_to_d3d12_transform(matrix: glam::Mat4) -> [f32; 12] {
@@ -1075,19 +1098,43 @@ mod tests {
     #[test]
     fn static_scene_does_not_mark_acceleration_structure_dirty() {
         let base = [glam::Mat4::from_translation(glam::Vec3::new(2.0, 0.0, 0.0))];
+        let groups = [AnimationGroup {
+            instance_indices: vec![0],
+            pivot_world: glam::Vec3::new(2.0, 0.0, 0.0),
+        }];
         assert!(!animation_dirty(
             &base,
             &base,
-            &[0],
+            &groups,
             Duration::from_secs(1),
             false,
         ));
         assert!(animation_dirty(
             &base,
             &base,
-            &[0],
+            &groups,
             Duration::from_secs(1),
             true,
         ));
+    }
+
+    #[test]
+    fn rigid_animation_rotates_in_place_around_world_pivot() {
+        let pivot = glam::Vec3::new(2.0, 0.5, -1.0);
+        let first = pivot + glam::Vec3::new(1.0, 0.0, 0.0);
+        let second = pivot + glam::Vec3::new(0.0, 0.0, 2.0);
+        let original_distance = (first - pivot).length();
+        let original_relative_distance = (first - second).length();
+        for angle in [0.0, 0.5 * std::f32::consts::PI, std::f32::consts::PI] {
+            let transform = animation_transform(pivot, angle);
+            let transformed_first = transform.transform_point3(first);
+            let transformed_second = transform.transform_point3(second);
+            assert!((transformed_first.distance(pivot) - original_distance).abs() < 1.0e-5);
+            assert!(
+                (transformed_first.distance(transformed_second) - original_relative_distance).abs()
+                    < 1.0e-5
+            );
+            assert!((transform.transform_point3(pivot) - pivot).length() < 1.0e-5);
+        }
     }
 }

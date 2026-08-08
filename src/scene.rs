@@ -90,13 +90,19 @@ pub struct SceneInstance {
     pub previous_world: Mat4,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct RigidAnimationGroup {
+    pub instance_indices: Vec<usize>,
+    pub pivot_world: [f32; 3],
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct SceneAsset {
     pub primitives: Vec<MeshPrimitive>,
     pub materials: Vec<MaterialAsset>,
     pub images: Vec<ImageAsset>,
     pub instances: Vec<SceneInstance>,
-    pub animated_root_instances: Vec<usize>,
+    pub rigid_animation_groups: Vec<RigidAnimationGroup>,
 }
 
 #[repr(C)]
@@ -171,17 +177,21 @@ impl SceneAsset {
             instance.primitive_index += primitive_offset;
             instance.stable_id = stable_id_base.saturating_add(local_index as u32);
         }
-        let animated_instances = other
-            .animated_root_instances
-            .iter()
-            .map(|index| index + instance_offset)
+        let animated_groups = other
+            .rigid_animation_groups
+            .into_iter()
+            .map(|mut group| {
+                for index in &mut group.instance_indices {
+                    *index += instance_offset;
+                }
+                group
+            })
             .collect::<Vec<_>>();
         self.primitives.extend(other.primitives);
         self.materials.extend(other.materials);
         self.images.extend(other.images);
         self.instances.extend(other.instances);
-        self.animated_root_instances
-            .extend(animated_instances.iter().copied());
+        self.rigid_animation_groups.extend(animated_groups);
         (instance_offset..self.instances.len()).collect()
     }
 
@@ -283,12 +293,20 @@ impl SceneAsset {
                 }
             }
         }
-        if self
-            .animated_root_instances
-            .iter()
-            .any(|&index| index >= self.instances.len())
-        {
-            return Err("animated_root_instances 包含越界实例索引".to_string());
+        for (group_index, group) in self.rigid_animation_groups.iter().enumerate() {
+            if group.instance_indices.is_empty() {
+                return Err(format!("刚体动画组 {group_index} 没有实例"));
+            }
+            if !group.pivot_world.iter().all(|value| value.is_finite()) {
+                return Err(format!("刚体动画组 {group_index} 的 pivot 包含 NaN/Inf"));
+            }
+            if group
+                .instance_indices
+                .iter()
+                .any(|&index| index >= self.instances.len())
+            {
+                return Err(format!("刚体动画组 {group_index} 包含越界实例索引"));
+            }
         }
         Ok(())
     }
@@ -331,5 +349,25 @@ mod tests {
         scene.materials[0].base_color_texture = Some(0);
         let error = scene.validate().unwrap_err();
         assert!(error.contains("base_color texture 0 越界"));
+    }
+
+    #[test]
+    fn append_offsets_animation_group_indices_but_preserves_world_pivot() {
+        let mut destination = SceneAsset::cornell_box();
+        let mut source = SceneAsset::cornell_box();
+        source.rigid_animation_groups = vec![RigidAnimationGroup {
+            instance_indices: vec![0, 2],
+            pivot_world: [0.25, -0.5, 0.75],
+        }];
+        let offset = destination.instances.len();
+        destination.append(source);
+        assert_eq!(
+            destination.rigid_animation_groups,
+            vec![RigidAnimationGroup {
+                instance_indices: vec![offset, offset + 2],
+                pivot_world: [0.25, -0.5, 0.75],
+            }]
+        );
+        destination.validate().unwrap();
     }
 }

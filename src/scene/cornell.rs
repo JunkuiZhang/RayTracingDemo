@@ -172,7 +172,7 @@ pub fn create() -> SceneAsset {
         materials,
         images: Vec::new(),
         instances,
-        animated_root_instances: Vec::new(),
+        rigid_animation_groups: Vec::new(),
     }
 }
 
