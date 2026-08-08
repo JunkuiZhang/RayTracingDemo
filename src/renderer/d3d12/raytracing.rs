@@ -12,7 +12,8 @@ use windows::{
 
 use crate::scene::{
     GpuMaterial, GpuVertex, InstanceGpu, MATERIAL_FLAG_DOUBLE_SIDED, MATERIAL_FLAG_HAS_TANGENT,
-    MATERIAL_FLAG_LEGACY_DIELECTRIC, MATERIAL_FLAG_LEGACY_METAL, MaterialKind, SceneAsset,
+    MATERIAL_FLAG_LEGACY_DIELECTRIC, MATERIAL_FLAG_LEGACY_EMISSIVE, MATERIAL_FLAG_LEGACY_METAL,
+    MaterialKind, SceneAsset,
 };
 
 use super::texture::TextureSet;
@@ -345,6 +346,9 @@ fn gpu_material(
     }
     if material.kind == MaterialKind::LegacyMetal {
         flags |= MATERIAL_FLAG_LEGACY_METAL;
+    }
+    if material.kind == MaterialKind::Emissive {
+        flags |= MATERIAL_FLAG_LEGACY_EMISSIVE;
     }
     if material.normal_texture.is_some() && has_tangent {
         flags |= MATERIAL_FLAG_HAS_TANGENT;

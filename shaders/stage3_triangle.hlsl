@@ -369,8 +369,8 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
 
     bool legacyDielectric = (material.flags & 4u) != 0u;
     bool legacyMetal = (material.flags & 8u) != 0u;
-    bool emissiveSurface = any(emissive > 0.0);
-    uint kind = legacyDielectric ? 2u : (legacyMetal ? 1u : (emissiveSurface ? 3u : 0u));
+    bool legacyEmissive = (material.flags & 16u) != 0u;
+    uint kind = legacyDielectric ? 2u : (legacyMetal ? 1u : (legacyEmissive ? 3u : 0u));
     float3 hitPosition = mul(ObjectToWorld3x4(), float4(localPosition, 1.0));
     float3 previousHitPosition = PreviousWorldPosition(localPosition, instanceData);
     payload.hitDistance = RayTCurrent();
@@ -410,7 +410,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     }
     if (payload.depth >= 3)
     {
-        payload.radiance = 0;
+        payload.radiance = kind == 0u ? emissive : 0;
         return;
     }
 
@@ -556,7 +556,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     float3 bouncedRadiance = bounceWeight * child.radiance;
     if (payload.depth == 0)
     {
-        payload.rawDiffuse = directDiffuse;
+        payload.rawDiffuse = emissive + directDiffuse;
         payload.rawSpecular = directSpecular;
         if (sampledSpecular)
             payload.rawSpecular += bouncedRadiance;
@@ -565,7 +565,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     }
     if (payload.depth == 0 && sampledSpecular)
         GBufferHitDistance[DispatchRaysIndex().xy] = child.hitDistance;
-    payload.radiance = directDiffuse + directSpecular + bouncedRadiance;
+    payload.radiance = emissive + directDiffuse + directSpecular + bouncedRadiance;
 }
 
 // Kept as a reference while validating the GGX replacement; it is not an
