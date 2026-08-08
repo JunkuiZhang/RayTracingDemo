@@ -31,6 +31,9 @@ struct AnimationGroup {
     pivot_world: glam::Vec3,
 }
 
+const INSTANCE_FLAG_CULL_DISABLE: u32 = 1;
+const INSTANCE_FLAG_FRONT_COUNTER_CLOCKWISE: u32 = 2;
+
 /// Cornell Box 的网格资源，包含逐顶点法线和逐三角形材质索引。
 pub struct SceneGeometry {
     vertex_buffer: ID3D12Resource,
@@ -42,6 +45,7 @@ pub struct SceneGeometry {
     primitive_ranges: Vec<PrimitiveRange>,
     current_transforms: Vec<glam::Mat4>,
     instance_primitive_indices: Vec<usize>,
+    instance_flags: Vec<u32>,
     upload_buffers: Vec<ID3D12Resource>,
     instance_data: Vec<InstanceGpu>,
     base_transforms: Vec<glam::Mat4>,
@@ -186,6 +190,15 @@ impl SceneGeometry {
             .iter()
             .map(|instance| instance.primitive_index)
             .collect();
+        let instance_flags = scene
+            .instances
+            .iter()
+            .map(|instance| {
+                let material =
+                    &scene.materials[scene.primitives[instance.primitive_index].material_index];
+                compute_instance_flags(material, instance.base_world)
+            })
+            .collect();
         let (vertex_buffer, vertex_upload) =
             create_static_buffer(device, command_list, &vertices, "Cornell Box 顶点")?;
         let (index_buffer, index_upload) =
@@ -202,6 +215,7 @@ impl SceneGeometry {
             primitive_ranges,
             current_transforms,
             instance_primitive_indices,
+            instance_flags,
             upload_buffers: vec![vertex_upload, index_upload, material_upload],
             instance_data: instances,
             base_transforms,
@@ -290,7 +304,7 @@ impl SceneGeometry {
             .map(|(index, transform)| D3D12_RAYTRACING_INSTANCE_DESC {
                 Transform: matrix_to_d3d12_transform(*transform),
                 _bitfield1: (index as u32 & 0x00FF_FFFF) | (0xFF << 24),
-                _bitfield2: 0,
+                _bitfield2: self.instance_flags[index] << 24,
                 AccelerationStructure: unsafe {
                     blas[self.instance_primitive_indices[index]].GetGPUVirtualAddress()
                 },
@@ -382,6 +396,17 @@ fn matrix_rows(matrix: glam::Mat4) -> [[f32; 4]; 4] {
         [columns[0][2], columns[1][2], columns[2][2], columns[3][2]],
         [columns[0][3], columns[1][3], columns[2][3], columns[3][3]],
     ]
+}
+
+fn compute_instance_flags(material: &crate::scene::MaterialAsset, transform: glam::Mat4) -> u32 {
+    let mut flags = INSTANCE_FLAG_FRONT_COUNTER_CLOCKWISE;
+    if material.double_sided || material.kind == MaterialKind::LegacyDielectric {
+        flags |= INSTANCE_FLAG_CULL_DISABLE;
+    }
+    if transform.determinant() < 0.0 {
+        flags ^= INSTANCE_FLAG_FRONT_COUNTER_CLOCKWISE;
+    }
+    flags
 }
 
 fn gpu_material(
@@ -1138,5 +1163,29 @@ mod tests {
             );
             assert!((transform.transform_point3(pivot) - pivot).length() < 1.0e-5);
         }
+    }
+
+    #[test]
+    fn instance_flags_distinguish_single_double_and_mirrored_materials() {
+        let material = crate::scene::MaterialAsset::opaque("single", [1.0; 4]);
+        assert_eq!(compute_instance_flags(&material, glam::Mat4::IDENTITY), 2);
+
+        let mut double_sided = material.clone();
+        double_sided.double_sided = true;
+        assert_eq!(
+            compute_instance_flags(&double_sided, glam::Mat4::IDENTITY),
+            3
+        );
+
+        let mut dielectric = material;
+        dielectric.kind = MaterialKind::LegacyDielectric;
+        assert_eq!(compute_instance_flags(&dielectric, glam::Mat4::IDENTITY), 3);
+        assert_eq!(
+            compute_instance_flags(
+                &double_sided,
+                glam::Mat4::from_scale(glam::Vec3::new(-1.0, 1.0, 1.0))
+            ),
+            1
+        );
     }
 }

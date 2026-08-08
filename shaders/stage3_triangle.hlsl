@@ -341,12 +341,15 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         + Vertices[vertex1].texcoord0 * barycentric.y
         + Vertices[vertex2].texcoord0 * barycentric.z;
 
-    float3 geometricNormal = normalize(mul(localNormal, (float3x3)WorldToObject3x4()));
-    bool frontFace = dot(WorldRayDirection(), geometricNormal) < 0.0;
-    float3 normal = frontFace ? geometricNormal : -geometricNormal;
-
     uint materialIndex = instanceData.materialIndex;
     Material material = Materials[materialIndex];
+    float3 geometricNormal = normalize(mul(localNormal, (float3x3)WorldToObject3x4()));
+    bool frontFace = HitKind() == HIT_KIND_TRIANGLE_FRONT_FACE;
+    bool doubleSided = (material.flags & 1u) != 0u
+        || (material.flags & 4u) != 0u;
+    float3 normal = frontFace ? geometricNormal : -geometricNormal;
+    if (!frontFace && !doubleSided)
+        return;
     float4 baseColor = material.baseColorFactor
         * SampleMaterialTexture(material.baseColorTextureAndSampler, texcoord0);
     float4 metallicRoughness = SampleMaterialTexture(
@@ -597,12 +600,11 @@ void LegacyClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttri
     float2 texcoord0 = Vertices[instanceData.vertexOffset + triIndices.x].texcoord0 * barycentric.x
         + Vertices[instanceData.vertexOffset + triIndices.y].texcoord0 * barycentric.y
         + Vertices[instanceData.vertexOffset + triIndices.z].texcoord0 * barycentric.z;
-    float3 geometricNormal = normalize(mul(localNormal, (float3x3)WorldToObject3x4()));
-    bool frontFace = dot(WorldRayDirection(), geometricNormal) < 0.0;
-    float3 normal = frontFace ? geometricNormal : -geometricNormal;
-
     uint materialIndex = instanceData.materialIndex;
     Material material = Materials[materialIndex];
+    float3 geometricNormal = normalize(mul(localNormal, (float3x3)WorldToObject3x4()));
+    bool frontFace = HitKind() == HIT_KIND_TRIANGLE_FRONT_FACE;
+    float3 normal = frontFace ? geometricNormal : -geometricNormal;
     float4 baseColor = material.baseColorFactor
         * SampleMaterialTexture(material.baseColorTextureAndSampler, texcoord0);
     float4 metallicRoughness = SampleMaterialTexture(
