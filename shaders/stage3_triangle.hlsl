@@ -1,6 +1,7 @@
 // Cornell Box DXR path tracer. This pass only traces one independent sample and
-// writes first-hit attributes. Temporal reconstruction and spatial filtering are
-// deliberately performed by separate compute dispatches.
+// writes first-hit attributes. RawDiffuse is albedo-demodulated diffuse only;
+// RawSpecular is the unmodulated specular + emissive signal. Temporal
+// reconstruction and spatial filtering are deliberately separate dispatches.
 RaytracingAccelerationStructure Scene : register(t0);
 
 struct Vertex
@@ -413,7 +414,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         }
         payload.radiance = emissive * weight;
         if (payload.depth == 0)
-            payload.rawDiffuse = payload.radiance;
+            payload.rawSpecular = payload.radiance;
         return;
     }
     if (payload.depth >= 3)
@@ -489,12 +490,15 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
 
     float3 direction = 0;
     float3 bounceWeight = 0;
+    float3 diffuseBounceWeight = 0;
+    float3 specularBounceWeight = 0;
     float samplePdf = 1.0;
     bool sampledSpecular = kind == 1u || kind == 2u;
     if (kind == 1u)
     {
         direction = reflect(WorldRayDirection(), normal);
         bounceWeight = baseColor.xyz;
+        specularBounceWeight = bounceWeight;
     }
     else if (kind == 2u)
     {
@@ -505,6 +509,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
             || Schlick(cosine, etaRatio) > RandomFloat(payload.seed);
         direction = reflectRay ? reflect(WorldRayDirection(), normal) : refracted;
         bounceWeight = baseColor.xyz;
+        specularBounceWeight = bounceWeight;
     }
     else
     {
@@ -524,7 +529,9 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
                 roughness);
             samplePdf = specularProbability * brdf.specularPdf
                 + (1.0 - specularProbability) * brdf.diffusePdf;
-            bounceWeight = (brdf.diffuse + brdf.specular) * NoL / max(samplePdf, 1.0e-6);
+            diffuseBounceWeight = brdf.diffuse * NoL / max(samplePdf, 1.0e-6);
+            specularBounceWeight = brdf.specular * NoL / max(samplePdf, 1.0e-6);
+            bounceWeight = diffuseBounceWeight + specularBounceWeight;
         }
         else
         {
@@ -539,12 +546,18 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
                 roughness);
             samplePdf = (1.0 - specularProbability) * brdf.diffusePdf
                 + specularProbability * brdf.specularPdf;
-            bounceWeight = (brdf.diffuse + brdf.specular) * NoL / max(samplePdf, 1.0e-6);
+            diffuseBounceWeight = brdf.diffuse * NoL / max(samplePdf, 1.0e-6);
+            specularBounceWeight = brdf.specular * NoL / max(samplePdf, 1.0e-6);
+            bounceWeight = diffuseBounceWeight + specularBounceWeight;
         }
     }
 
     if (dot(normal, direction) <= 0.0)
+    {
         bounceWeight = 0;
+        diffuseBounceWeight = 0;
+        specularBounceWeight = 0;
+    }
     RayDesc bounce;
     bounce.Origin = hitPosition + (kind == 2u ? direction : normal) * 0.002;
     bounce.Direction = normalize(direction);
@@ -564,12 +577,10 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     float3 bouncedRadiance = bounceWeight * child.radiance;
     if (payload.depth == 0)
     {
-        payload.rawDiffuse = emissive + directDiffuse;
-        payload.rawSpecular = directSpecular;
-        if (sampledSpecular)
-            payload.rawSpecular += bouncedRadiance;
-        else
-            payload.rawDiffuse += bouncedRadiance;
+        payload.rawDiffuse = directDiffuse + diffuseBounceWeight * child.radiance;
+        payload.rawSpecular = emissive
+            + directSpecular
+            + specularBounceWeight * child.radiance;
     }
     if (payload.depth == 0 && sampledSpecular)
         GBufferHitDistance[DispatchRaysIndex().xy] = child.hitDistance;

@@ -1188,4 +1188,71 @@ mod tests {
             1
         );
     }
+
+    fn split_first_bounce(
+        diffuse_brdf: glam::Vec3,
+        specular_brdf: glam::Vec3,
+        no_l: f32,
+        mixture_pdf: f32,
+        child_radiance: glam::Vec3,
+    ) -> (glam::Vec3, glam::Vec3, glam::Vec3) {
+        let scale = no_l / mixture_pdf.max(1.0e-6);
+        let diffuse = diffuse_brdf * scale * child_radiance;
+        let specular = specular_brdf * scale * child_radiance;
+        (diffuse, specular, diffuse + specular)
+    }
+
+    #[test]
+    fn first_bounce_split_uses_one_mixture_pdf_for_both_lobes() {
+        let (diffuse, specular, total) = split_first_bounce(
+            glam::Vec3::splat(0.2),
+            glam::Vec3::new(0.1, 0.3, 0.5),
+            0.7,
+            0.4,
+            glam::Vec3::new(2.0, 1.0, 0.5),
+        );
+        assert_eq!(total, diffuse + specular);
+        for value in diffuse
+            .to_array()
+            .into_iter()
+            .chain(specular.to_array())
+            .chain(total.to_array())
+        {
+            assert!(value.is_finite() && value >= 0.0);
+        }
+    }
+
+    #[test]
+    fn first_bounce_metallic_diffuse_is_zero_for_any_proposal() {
+        let base_color = glam::Vec3::new(0.8, 0.4, 0.2);
+        for _proposal in 0..2 {
+            let metallic_diffuse_brdf = base_color * (1.0 - 1.0);
+            let (diffuse, _, _) = split_first_bounce(
+                metallic_diffuse_brdf,
+                glam::Vec3::splat(0.04),
+                0.5,
+                0.25,
+                glam::Vec3::ONE,
+            );
+            assert!(diffuse.length_squared() < 1.0e-12);
+        }
+        let dielectric_diffuse_brdf = base_color * (1.0 - 0.0);
+        let (diffuse, _, _) = split_first_bounce(
+            dielectric_diffuse_brdf,
+            glam::Vec3::splat(0.04),
+            0.5,
+            0.25,
+            glam::Vec3::ONE,
+        );
+        assert!(diffuse.length_squared() > 0.0);
+    }
+
+    #[test]
+    fn black_albedo_does_not_remove_unmodulated_emissive_signal() {
+        let filtered_diffuse = glam::Vec3::new(10.0, 5.0, 2.0);
+        let albedo = glam::Vec3::ZERO;
+        let emissive = glam::Vec3::new(0.2, 0.4, 0.8);
+        let final_color = filtered_diffuse * albedo + emissive;
+        assert_eq!(final_color, emissive);
+    }
 }

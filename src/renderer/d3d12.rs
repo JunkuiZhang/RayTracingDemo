@@ -866,8 +866,9 @@ impl Dx12Renderer {
             Some(self.create_uav_texture(DXGI_FORMAT_R8G8B8A8_UNORM, "Tone Map 显示输出")?);
         self.raw_diffuse =
             Some(self.create_uav_texture(DXGI_FORMAT_R16G16B16A16_FLOAT, "原始漫反射辐射亮度")?);
-        self.raw_specular =
-            Some(self.create_uav_texture(DXGI_FORMAT_R16G16B16A16_FLOAT, "原始镜面辐射亮度")?);
+        self.raw_specular = Some(
+            self.create_uav_texture(DXGI_FORMAT_R16G16B16A16_FLOAT, "原始未调制镜面和自发光信号")?,
+        );
         self.gbuffer_albedo = Some(
             self.create_uav_texture(DXGI_FORMAT_R16G16B16A16_FLOAT, "第一交点反照率和材质类别")?,
         );
