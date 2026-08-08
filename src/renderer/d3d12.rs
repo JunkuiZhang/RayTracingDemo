@@ -1,4 +1,4 @@
-use std::{ffi::c_void, mem::size_of, time::Instant};
+use std::{collections::VecDeque, ffi::c_void, mem::size_of, time::Instant};
 
 use windows::{
     Win32::{
@@ -20,7 +20,7 @@ use winit::{
 use crate::{
     as_policy::AccelerationStructureStats,
     realtime::{AtrousMode, CommandRecordingMode, RealtimeConfig},
-    resolution::Extent2D,
+    resolution::{Extent2D, RenderScale, render_extent},
     scene::{MAX_SCENE_SAMPLERS, SceneAsset, gltf_loader},
 };
 
@@ -35,6 +35,11 @@ use self::{
     texture::{DXR_UAV_BASE, TextureSet},
 };
 use raytracing::{AccelerationStructures, RaytracingPipeline, SceneGeometry};
+
+struct RetiredRenderResourceGeneration {
+    retire_fence: u64,
+    resources: RenderResourceGeneration,
+}
 
 mod descriptor;
 mod memory;
@@ -94,6 +99,9 @@ pub struct Dx12Renderer {
     rtv_heap: DescriptorHeap,
     render_targets: [Option<TrackedResource>; FRAME_COUNT],
     active_generation: RenderResourceGeneration,
+    retired_generations: VecDeque<RetiredRenderResourceGeneration>,
+    requested_render_scale: RenderScale,
+    next_generation_id: u64,
     gpu_profiler: GpuProfiler,
     memory_telemetry: VideoMemoryTelemetry,
     shader_status: String,
@@ -320,13 +328,14 @@ impl Dx12Renderer {
             );
             acceleration_structures.release_build_resources();
             let output_extent = Extent2D { width, height };
+            let render_extent = render_extent(output_extent, config.render_scale);
             let active_generation = RenderResourceGeneration::new(
                 &device,
                 &texture_set,
                 &scene_geometry,
                 &acceleration_structures,
                 output_extent,
-                output_extent,
+                render_extent,
                 1,
             )
             .map_err(|error| dx_error("创建初始渲染资源代际", error))?;
@@ -339,6 +348,9 @@ impl Dx12Renderer {
                 rtv_heap,
                 render_targets: [None, None, None],
                 active_generation,
+                retired_generations: VecDeque::new(),
+                requested_render_scale: config.render_scale,
+                next_generation_id: 2,
                 gpu_profiler,
                 memory_telemetry,
                 shader_status: format!(
@@ -403,6 +415,8 @@ impl Dx12Renderer {
             return Ok(());
         }
         self.memory_telemetry.poll(false);
+        let output_extent = self.active_generation.output_extent;
+        let render_extent = self.active_generation.render_extent;
 
         unsafe {
             let frame_index = self.swap_chain.GetCurrentBackBufferIndex() as usize;
@@ -413,6 +427,7 @@ impl Dx12Renderer {
                 previous_fence_value != 0 && self.fence.GetCompletedValue() >= previous_fence_value;
             self.gpu_profiler
                 .collect(frame_index, fence_completed, previous_timing_valid)?;
+            self.reclaim_retired_generations();
             let command_recording_started = Instant::now();
             let mut command_recording_stats = CommandRecordingFrameStats::default();
             let frame = &self.frames[frame_index];
@@ -497,8 +512,8 @@ impl Dx12Renderer {
                 MissShaderTable: self.raytracing_pipeline.miss,
                 HitGroupTable: self.raytracing_pipeline.hit_group,
                 CallableShaderTable: D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE::default(),
-                Width: self.width,
-                Height: self.height,
+                Width: render_extent.width,
+                Height: render_extent.height,
                 Depth: 1,
             };
             command_list4.DispatchRays(&dispatch);
@@ -523,8 +538,10 @@ impl Dx12Renderer {
             );
             self.submit_transition_batch(&mut command_recording_stats);
 
-            let groups_x = self.width.div_ceil(8);
-            let groups_y = self.height.div_ceil(8);
+            let render_groups_x = render_extent.width.div_ceil(8);
+            let render_groups_y = render_extent.height.div_ceil(8);
+            let output_groups_x = output_extent.width.div_ceil(8);
+            let output_groups_y = output_extent.height.div_ceil(8);
             self.gpu_profiler
                 .begin(&self.command_list, frame_index, GpuPass::Temporal);
             self.gpu_profiler
@@ -536,7 +553,8 @@ impl Dx12Renderer {
                     .gpu_handle(TEMPORAL_TABLE_BASES[current_history]),
                 &[u32::from(self.reset_history)],
             );
-            self.command_list.Dispatch(groups_x, groups_y, 1);
+            self.command_list
+                .Dispatch(render_groups_x, render_groups_y, 1);
             self.gpu_profiler
                 .end(&self.command_list, frame_index, GpuPass::Temporal);
             self.gpu_profiler.end_event(&self.command_list);
@@ -581,7 +599,8 @@ impl Dx12Renderer {
                 .begin(&self.command_list, frame_index, GpuPass::Atrous0);
             self.gpu_profiler
                 .begin_event(&self.command_list, GpuPass::Atrous0);
-            self.command_list.Dispatch(groups_x, groups_y, 1);
+            self.command_list
+                .Dispatch(render_groups_x, render_groups_y, 1);
             self.gpu_profiler
                 .end(&self.command_list, frame_index, GpuPass::Atrous0);
             self.gpu_profiler.end_event(&self.command_list);
@@ -624,7 +643,8 @@ impl Dx12Renderer {
                 .begin(&self.command_list, frame_index, GpuPass::Atrous1);
             self.gpu_profiler
                 .begin_event(&self.command_list, GpuPass::Atrous1);
-            self.command_list.Dispatch(groups_x, groups_y, 1);
+            self.command_list
+                .Dispatch(render_groups_x, render_groups_y, 1);
             self.gpu_profiler
                 .end(&self.command_list, frame_index, GpuPass::Atrous1);
             self.gpu_profiler.end_event(&self.command_list);
@@ -667,7 +687,8 @@ impl Dx12Renderer {
                 .begin(&self.command_list, frame_index, GpuPass::Atrous2);
             self.gpu_profiler
                 .begin_event(&self.command_list, GpuPass::Atrous2);
-            self.command_list.Dispatch(groups_x, groups_y, 1);
+            self.command_list
+                .Dispatch(render_groups_x, render_groups_y, 1);
             self.gpu_profiler
                 .end(&self.command_list, frame_index, GpuPass::Atrous2);
             self.gpu_profiler.end_event(&self.command_list);
@@ -710,7 +731,8 @@ impl Dx12Renderer {
                 .begin(&self.command_list, frame_index, GpuPass::Atrous3);
             self.gpu_profiler
                 .begin_event(&self.command_list, GpuPass::Atrous3);
-            self.command_list.Dispatch(groups_x, groups_y, 1);
+            self.command_list
+                .Dispatch(render_groups_x, render_groups_y, 1);
             self.gpu_profiler
                 .end(&self.command_list, frame_index, GpuPass::Atrous3);
             self.gpu_profiler.end_event(&self.command_list);
@@ -743,7 +765,8 @@ impl Dx12Renderer {
                     .gpu_handle(TONEMAP_TABLE_BASES[current_history]),
                 &[self.debug_view, 1.0_f32.to_bits()],
             );
-            self.command_list.Dispatch(groups_x, groups_y, 1);
+            self.command_list
+                .Dispatch(output_groups_x, output_groups_y, 1);
             self.gpu_profiler
                 .end(&self.command_list, frame_index, GpuPass::ToneMap);
             self.gpu_profiler.end_event(&self.command_list);
@@ -792,6 +815,7 @@ impl Dx12Renderer {
             self.command_queue.Signal(&self.fence, fence_value)?;
             self.frames[frame_index].fence_value = fence_value;
             self.frames[frame_index].timing_valid = !self.reset_history;
+            self.active_generation.last_used_fence = fence_value;
             self._scene_geometry.commit_animation(self.animate_model);
             self.frame_number = self.frame_number.wrapping_add(1);
             self.accumulated_frames = self.accumulated_frames.saturating_add(1);
@@ -848,17 +872,100 @@ impl Dx12Renderer {
             self.previous_camera_yaw = self.camera_yaw;
             self.previous_camera_pitch = self.camera_pitch;
             let output_extent = Extent2D { width, height };
-            self.active_generation = RenderResourceGeneration::new(
+            let new_render_extent = render_extent(output_extent, self.requested_render_scale);
+            let generation_id = self.next_generation_id;
+            let new_generation = RenderResourceGeneration::new(
                 &self.device,
                 &self._textures,
                 &self._scene_geometry,
                 &self._acceleration_structures,
                 output_extent,
-                output_extent,
-                self.active_generation.id.saturating_add(1),
+                new_render_extent,
+                generation_id,
             )?;
+            self.next_generation_id = self.next_generation_id.saturating_add(1);
+            self.active_generation = new_generation;
+            self.retired_generations.clear();
             self.create_render_targets()?;
             Ok(())
+        }
+    }
+
+    /// Request a fixed internal scale at a frame boundary. New resources and
+    /// descriptors are fully built before the active generation is replaced;
+    /// the old generation remains owned until its submission fence completes.
+    pub fn set_render_scale(&mut self, requested: RenderScale) -> Result<()> {
+        let output_extent = self.active_generation.output_extent;
+        let new_render_extent = render_extent(output_extent, requested);
+        self.requested_render_scale = requested;
+        if new_render_extent == self.active_generation.render_extent {
+            return Ok(());
+        }
+
+        let generation_id = self.next_generation_id;
+        let new_generation = RenderResourceGeneration::new(
+            &self.device,
+            &self._textures,
+            &self._scene_geometry,
+            &self._acceleration_structures,
+            output_extent,
+            new_render_extent,
+            generation_id,
+        )
+        .map_err(|error| {
+            WindowsError::new(
+                windows::core::HRESULT(0x80004005_u32 as i32),
+                format!(
+                    "创建 render generation {generation_id}（{}x{}）失败：{error}",
+                    new_render_extent.width, new_render_extent.height
+                ),
+            )
+        })?;
+        self.next_generation_id = self.next_generation_id.saturating_add(1);
+        let previous = std::mem::replace(&mut self.active_generation, new_generation);
+        if previous.last_used_fence != 0 {
+            self.retired_generations
+                .push_back(RetiredRenderResourceGeneration {
+                    retire_fence: previous.last_used_fence,
+                    resources: previous,
+                });
+        }
+        self.render_extent_change_count = self.render_extent_change_count.saturating_add(1);
+        self.request_history_reset();
+        self.accumulated_frames = 0;
+        self.previous_camera_position = self.camera_position;
+        self.previous_camera_yaw = self.camera_yaw;
+        self.previous_camera_pitch = self.camera_pitch;
+        self.reclaim_retired_generations();
+        Ok(())
+    }
+
+    pub fn cycle_render_scale(&mut self) -> Result<()> {
+        let profiles = [
+            RenderScale::NATIVE,
+            RenderScale::new(0.83).expect("固定 F2 档位必须有效"),
+            RenderScale::new(0.75).expect("固定 F2 档位必须有效"),
+            RenderScale::new(0.67).expect("固定 F2 档位必须有效"),
+        ];
+        let next = profiles
+            .iter()
+            .position(|profile| *profile == self.requested_render_scale)
+            .map_or(RenderScale::NATIVE, |index| {
+                profiles[(index + 1) % profiles.len()]
+            });
+        self.set_render_scale(next)
+    }
+
+    fn reclaim_retired_generations(&mut self) {
+        let completed = unsafe { self.fence.GetCompletedValue() };
+        while self
+            .retired_generations
+            .front()
+            .is_some_and(|generation| generation.retire_fence <= completed)
+        {
+            if let Some(retired) = self.retired_generations.pop_front() {
+                drop(retired.resources);
+            }
         }
     }
 
@@ -938,12 +1045,36 @@ impl Dx12Renderer {
         self.height
     }
 
+    pub fn render_width(&self) -> u32 {
+        self.active_generation.render_extent.width
+    }
+
+    pub fn render_height(&self) -> u32 {
+        self.active_generation.render_extent.height
+    }
+
+    pub fn render_scale(&self) -> f32 {
+        self.requested_render_scale.get()
+    }
+
+    pub fn render_generation_id(&self) -> u64 {
+        self.active_generation.id
+    }
+
+    pub fn retired_generation_count(&self) -> usize {
+        self.retired_generations.len()
+    }
+
     pub fn benchmark_json(&self, duration_seconds: u64, warmup_valid_frames: u32) -> String {
         benchmark_json_line(
             BenchmarkJsonContext {
                 gpu_name: &self.gpu_name,
                 width: self.width,
                 height: self.height,
+                render_width: self.render_width(),
+                render_height: self.render_height(),
+                render_scale_requested: self.render_scale(),
+                render_generation_id: self.render_generation_id(),
                 duration_seconds,
                 warmup_valid_frames,
                 pix_events_available: self.gpu_profiler.pix_events_available(),
@@ -990,6 +1121,10 @@ struct BenchmarkJsonContext<'a> {
     gpu_name: &'a str,
     width: u32,
     height: u32,
+    render_width: u32,
+    render_height: u32,
+    render_scale_requested: f32,
+    render_generation_id: u64,
     duration_seconds: u64,
     warmup_valid_frames: u32,
     pix_events_available: bool,
@@ -1010,6 +1145,10 @@ fn benchmark_json_line(
         gpu_name,
         width,
         height,
+        render_width,
+        render_height,
+        render_scale_requested,
+        render_generation_id,
         duration_seconds,
         warmup_valid_frames,
         pix_events_available,
@@ -1044,13 +1183,17 @@ fn benchmark_json_line(
         "gpu_name": gpu_name,
         "output_width": width,
         "output_height": height,
-        "render_width": width,
-        "render_height": height,
-        "render_min_width": width,
-        "render_min_height": height,
-        "render_max_width": width,
-        "render_max_height": height,
+        "render_width": render_width,
+        "render_height": render_height,
+        "render_min_width": render_width,
+        "render_min_height": render_height,
+        "render_max_width": render_width,
+        "render_max_height": render_height,
         "resolution_mode": "fixed",
+        "render_scale_requested": render_scale_requested,
+        "render_scale_effective_x": render_width as f64 / width as f64,
+        "render_scale_effective_y": render_height as f64 / height as f64,
+        "render_generation_id": render_generation_id,
         "atrous_mode": atrous_mode,
         "command_recording": {
             "mode": command_recording_mode,
@@ -1977,6 +2120,10 @@ mod tests {
                 gpu_name: "RTX 4060 \"Laptop\"",
                 width: 1280,
                 height: 720,
+                render_width: 1280,
+                render_height: 720,
+                render_scale_requested: 1.0,
+                render_generation_id: 1,
                 duration_seconds: 30,
                 warmup_valid_frames: 120,
                 pix_events_available: true,
@@ -2013,6 +2160,8 @@ mod tests {
         assert_eq!(value["schema_version"], 1);
         assert_eq!(value["gpu_name"], "RTX 4060 \"Laptop\"");
         assert_eq!(value["resolution_mode"], "fixed");
+        assert_eq!(value["render_scale_requested"], 1.0);
+        assert_eq!(value["render_generation_id"], 1);
         assert_eq!(value["atrous_mode"], "shared");
         assert_eq!(value["command_recording"]["mode"], "optimized");
         assert_eq!(value["command_recording"]["cpu_ms"]["p95_ms"], 0.61);

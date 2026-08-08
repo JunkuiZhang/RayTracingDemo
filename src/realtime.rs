@@ -1,5 +1,7 @@
 use std::{error::Error, path::PathBuf};
 
+use crate::resolution::RenderScale;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RealtimeConfig {
     pub model_path: Option<PathBuf>,
@@ -7,6 +9,7 @@ pub struct RealtimeConfig {
     pub benchmark_seconds: Option<u32>,
     pub atrous_mode: AtrousMode,
     pub output_size: Option<(u32, u32)>,
+    pub render_scale: RenderScale,
     pub command_recording_mode: CommandRecordingMode,
     pub acceleration_structure_mode: AccelerationStructureMode,
 }

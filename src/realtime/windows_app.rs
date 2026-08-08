@@ -184,13 +184,18 @@ impl ApplicationHandler for RealtimeApplication {
                     if elapsed >= Duration::from_millis(500) {
                         let fps = self.frames_since_stats as f64 / elapsed.as_secs_f64();
                         window.set_title(&format!(
-                            "RayTracingDemo - 阶段 8 | Cmd {} | FPS {:.0} | GPU {:.2} ms (p95 {:.2}) | 输出 {}x{} | VRAM {} | AS {:.2} PT {:.2} T {:.2} A {:.2} ({}) | SPP {} | 视图 {} | {} | {}",
+                            "RayTracingDemo - 阶段 8 | Cmd {} | FPS {:.0} | GPU {:.2} ms (p95 {:.2}) | 输出 {}x{} | 内部 {}x{} ({:.2}) | Gen {} / retired {} | VRAM {} | AS {:.2} PT {:.2} T {:.2} A {:.2} ({}) | SPP {} | 视图 {} | {} | {}",
                             renderer.command_recording_mode_name(),
                             fps,
                             renderer.gpu_time_ms(),
                             renderer.gpu_time_p95_ms(),
                             renderer.output_width(),
                             renderer.output_height(),
+                            renderer.render_width(),
+                            renderer.render_height(),
+                            renderer.render_scale(),
+                            renderer.render_generation_id(),
+                            renderer.retired_generation_count(),
                             renderer.video_memory_title(),
                             renderer.gpu_pass_time_ms(GpuPass::AccelerationStructure),
                             renderer.gpu_pass_time_ms(GpuPass::PathTrace),
@@ -230,6 +235,12 @@ impl ApplicationHandler for RealtimeApplication {
                         PhysicalKey::Code(KeyCode::ArrowUp) => renderer.rotate_camera(0.0, 0.04),
                         PhysicalKey::Code(KeyCode::ArrowDown) => renderer.rotate_camera(0.0, -0.04),
                         PhysicalKey::Code(KeyCode::F1) => renderer.cycle_debug_view(),
+                        PhysicalKey::Code(KeyCode::F2) => {
+                            if let Err(error) = renderer.cycle_render_scale() {
+                                return self
+                                    .fail(event_loop, format!("切换固定 render scale：{error}"));
+                            }
+                        }
                         _ => {}
                     }
                 }

@@ -6,8 +6,22 @@ pub struct Extent2D {
     pub height: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub struct RenderScale(f32);
+
+impl PartialEq for RenderScale {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+
+impl Eq for RenderScale {}
+
+impl Default for RenderScale {
+    fn default() -> Self {
+        Self::NATIVE
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderScaleError {

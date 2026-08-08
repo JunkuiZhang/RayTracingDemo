@@ -42,6 +42,82 @@ float3 RejectionColor(uint mask)
     return saturate(color);
 }
 
+float2 SourcePosition(uint2 outputPixel, uint2 outputSize, uint2 renderSize)
+{
+    return (float2(outputPixel) + 0.5) * float2(renderSize) / float2(outputSize) - 0.5;
+}
+
+void BilinearCoordinates(
+    uint2 outputPixel,
+    uint2 outputSize,
+    uint2 renderSize,
+    out int2 p00,
+    out int2 p10,
+    out int2 p01,
+    out int2 p11,
+    out float2 fraction)
+{
+    float2 source = SourcePosition(outputPixel, outputSize, renderSize);
+    float2 base = floor(source);
+    fraction = frac(source);
+    int2 basePixel = int2(base);
+    int2 maximum = int2(renderSize) - 1;
+    p00 = clamp(basePixel, int2(0, 0), maximum);
+    p10 = clamp(basePixel + int2(1, 0), int2(0, 0), maximum);
+    p01 = clamp(basePixel + int2(0, 1), int2(0, 0), maximum);
+    p11 = clamp(basePixel + int2(1, 1), int2(0, 0), maximum);
+}
+
+float4 LoadBilinear(
+    Texture2D<float4> source,
+    uint2 outputPixel,
+    uint2 outputSize,
+    uint2 renderSize)
+{
+    int2 p00, p10, p01, p11;
+    float2 fraction;
+    BilinearCoordinates(outputPixel, outputSize, renderSize, p00, p10, p01, p11, fraction);
+    float4 row0 = lerp(source.Load(int3(p00, 0)), source.Load(int3(p10, 0)), fraction.x);
+    float4 row1 = lerp(source.Load(int3(p01, 0)), source.Load(int3(p11, 0)), fraction.x);
+    return lerp(row0, row1, fraction.y);
+}
+
+float2 LoadBilinear(
+    Texture2D<float2> source,
+    uint2 outputPixel,
+    uint2 outputSize,
+    uint2 renderSize)
+{
+    int2 p00, p10, p01, p11;
+    float2 fraction;
+    BilinearCoordinates(outputPixel, outputSize, renderSize, p00, p10, p01, p11, fraction);
+    float2 row0 = lerp(source.Load(int3(p00, 0)), source.Load(int3(p10, 0)), fraction.x);
+    float2 row1 = lerp(source.Load(int3(p01, 0)), source.Load(int3(p11, 0)), fraction.x);
+    return lerp(row0, row1, fraction.y);
+}
+
+float LoadBilinear(
+    Texture2D<float> source,
+    uint2 outputPixel,
+    uint2 outputSize,
+    uint2 renderSize)
+{
+    int2 p00, p10, p01, p11;
+    float2 fraction;
+    BilinearCoordinates(outputPixel, outputSize, renderSize, p00, p10, p01, p11, fraction);
+    float row0 = lerp(source.Load(int3(p00, 0)), source.Load(int3(p10, 0)), fraction.x);
+    float row1 = lerp(source.Load(int3(p01, 0)), source.Load(int3(p11, 0)), fraction.x);
+    return lerp(row0, row1, fraction.y);
+}
+
+uint2 DiscreteSourcePixel(uint2 outputPixel, uint2 outputSize, uint2 renderSize)
+{
+    uint2 numerator = uint2(
+        2u * outputPixel.x + 1u,
+        2u * outputPixel.y + 1u) * renderSize;
+    return min(numerator / (2u * outputSize), renderSize - 1u);
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
@@ -49,64 +125,100 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     Output.GetDimensions(size.x, size.y);
     if (any(dispatchThreadId.xy >= size))
         return;
-    int2 pixel = int2(dispatchThreadId.xy);
+    uint2 pixel = dispatchThreadId.xy;
+    uint2 renderSize;
+    FilteredDiffuse.GetDimensions(renderSize.x, renderSize.y);
+    bool nativeSize = all(size == renderSize);
 
     float3 color;
     if (DebugMode == 0u)
     {
-        float3 diffuse = FilteredDiffuse.Load(int3(pixel, 0)).xyz
-            * Albedo.Load(int3(pixel, 0)).xyz;
-        color = ToneMap(diffuse + FilteredSpecular.Load(int3(pixel, 0)).xyz);
+        float3 diffuse = (nativeSize
+            ? FilteredDiffuse.Load(int3(pixel, 0))
+            : LoadBilinear(FilteredDiffuse, pixel, size, renderSize)).xyz
+            * (nativeSize
+                ? Albedo.Load(int3(pixel, 0))
+                : LoadBilinear(Albedo, pixel, size, renderSize)).xyz;
+        float3 specular = (nativeSize
+            ? FilteredSpecular.Load(int3(pixel, 0))
+            : LoadBilinear(FilteredSpecular, pixel, size, renderSize)).xyz;
+        color = ToneMap(diffuse + specular);
     }
     else if (DebugMode == 1u)
     {
-        color = ToneMap(RawDiffuse.Load(int3(pixel, 0)).xyz
-            + RawSpecular.Load(int3(pixel, 0)).xyz);
+        float3 diffuse = (nativeSize
+            ? RawDiffuse.Load(int3(pixel, 0))
+            : LoadBilinear(RawDiffuse, pixel, size, renderSize)).xyz;
+        float3 specular = (nativeSize
+            ? RawSpecular.Load(int3(pixel, 0))
+            : LoadBilinear(RawSpecular, pixel, size, renderSize)).xyz;
+        color = ToneMap(diffuse + specular);
     }
     else if (DebugMode == 2u)
     {
-        color = Albedo.Load(int3(pixel, 0)).xyz;
+        color = (nativeSize
+            ? Albedo.Load(int3(pixel, 0))
+            : LoadBilinear(Albedo, pixel, size, renderSize)).xyz;
     }
     else if (DebugMode == 3u)
     {
-        color = NormalRoughness.Load(int3(pixel, 0)).xyz;
+        color = (nativeSize
+            ? NormalRoughness.Load(int3(pixel, 0))
+            : LoadBilinear(NormalRoughness, pixel, size, renderSize)).xyz;
     }
     else if (DebugMode == 4u)
     {
-        float depth = Depth.Load(int3(pixel, 0));
+        float depth = nativeSize
+            ? Depth.Load(int3(pixel, 0))
+            : LoadBilinear(Depth, pixel, size, renderSize);
         color = depth > 0.0 ? 1.0 - exp(-depth.xxx * 0.5) : 0;
     }
     else if (DebugMode == 5u)
     {
-        float2 motion = Motion.Load(int3(pixel, 0));
+        float2 motion = nativeSize
+            ? Motion.Load(int3(pixel, 0))
+            : LoadBilinear(Motion, pixel, size, renderSize);
         color = float3(saturate(abs(motion) * 0.05), 0.0);
     }
     else if (DebugMode == 6u)
     {
-        float4 moments = Moments.Load(int3(pixel, 0));
+        float4 moments = nativeSize
+            ? Moments.Load(int3(pixel, 0))
+            : LoadBilinear(Moments, pixel, size, renderSize);
         float variance = max(0.0, moments.y - moments.x * moments.x)
             + max(0.0, moments.w - moments.z * moments.z);
         color = saturate(log2(1.0 + variance) / 4.0).xxx;
     }
     else if (DebugMode == 7u)
     {
-        color = RejectionColor(RejectionMask.Load(int3(pixel, 0)));
+        uint2 sourcePixel = nativeSize
+            ? pixel
+            : DiscreteSourcePixel(pixel, size, renderSize);
+        color = RejectionColor(RejectionMask.Load(int3(sourcePixel, 0)));
     }
     else if (DebugMode == 8u)
     {
-        uint2 length = HistoryLength.Load(int3(pixel, 0));
+        uint2 sourcePixel = nativeSize
+            ? pixel
+            : DiscreteSourcePixel(pixel, size, renderSize);
+        uint2 length = HistoryLength.Load(int3(sourcePixel, 0));
         color = float3(saturate(float(length.x) / 64.0), saturate(float(length.y) / 32.0), 0);
     }
     else if (DebugMode == 9u)
     {
-        uint id = Id.Load(int3(pixel, 0));
+        uint2 sourcePixel = nativeSize
+            ? pixel
+            : DiscreteSourcePixel(pixel, size, renderSize);
+        uint id = Id.Load(int3(sourcePixel, 0));
         color = id == 0xFFFFFFFFu
             ? 0
             : frac(float3(0.1031, 0.11369, 0.13787) * float(id + 1u));
     }
     else
     {
-        float hitDistance = HitDistance.Load(int3(pixel, 0));
+        float hitDistance = nativeSize
+            ? HitDistance.Load(int3(pixel, 0))
+            : LoadBilinear(HitDistance, pixel, size, renderSize);
         color = (1.0 - exp(-hitDistance * 0.25)).xxx;
     }
     Output[pixel] = float4(color, 1.0);
