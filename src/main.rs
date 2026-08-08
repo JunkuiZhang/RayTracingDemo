@@ -2,6 +2,8 @@ use std::{env, path::PathBuf, process::ExitCode};
 
 use cpu_reference::CpuReferenceConfig;
 
+#[expect(dead_code)]
+mod as_policy;
 mod camera;
 mod cpu_reference;
 mod data;
@@ -72,11 +74,12 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                 | "--atrous-mode"
                 | "--output-size"
                 | "--command-recording-mode"
+                | "--acceleration-structure-mode"
         )
     });
     if cpu_reference_requested && realtime_requested {
         return Err(
-            "--cpu-reference 不能与实时渲染选项（--model、--animate-model、--benchmark-seconds、--atrous-mode、--output-size、--command-recording-mode）同时使用"
+            "--cpu-reference 不能与实时渲染选项（--model、--animate-model、--benchmark-seconds、--atrous-mode、--output-size、--command-recording-mode、--acceleration-structure-mode）同时使用"
                 .to_string(),
         );
     }
@@ -112,6 +115,12 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                         .next()
                         .ok_or("--command-recording-mode 缺少模式")?;
                     config.command_recording_mode = parse_command_recording_mode(&value)?;
+                }
+                "--acceleration-structure-mode" => {
+                    let value = arguments
+                        .next()
+                        .ok_or("--acceleration-structure-mode 缺少模式")?;
+                    config.acceleration_structure_mode = parse_acceleration_structure_mode(&value)?;
                 }
                 _ => return Err(format!("未知参数：{argument}")),
             }
@@ -212,12 +221,24 @@ fn parse_command_recording_mode(value: &str) -> Result<realtime::CommandRecordin
     }
 }
 
+fn parse_acceleration_structure_mode(
+    value: &str,
+) -> Result<realtime::AccelerationStructureMode, String> {
+    match value {
+        "baseline" => Ok(realtime::AccelerationStructureMode::Baseline),
+        "optimized" => Ok(realtime::AccelerationStructureMode::Optimized),
+        _ => Err(format!(
+            "无效的加速结构模式：{value}（仅支持 baseline 或 optimized）"
+        )),
+    }
+}
+
 fn print_help() {
     println!(
         "RayTracingDemo\n\n\
          用法：\n  \
          cargo run --release                 启动实时 DX12 窗口\n  \
-         cargo run --release -- --model <路径> [--animate-model] [--benchmark-seconds <秒>] [--atrous-mode <模式>] [--output-size <宽x高>] [--command-recording-mode <模式>]\n  \
+         cargo run --release -- --model <路径> [--animate-model] [--benchmark-seconds <秒>] [--atrous-mode <模式>] [--output-size <宽x高>] [--command-recording-mode <模式>] [--acceleration-structure-mode <模式>]\n  \
          cargo run --release -- --cpu-reference [选项]\n\n\
          选项：\n  \
          --samples <数量>       每像素采样数，默认 1\n  \
@@ -228,6 +249,7 @@ fn print_help() {
          --atrous-mode <模式>      À-Trous 路径：baseline 或 shared，默认 baseline\n  \
          --output-size <宽x高>     窗口物理像素尺寸，范围 320x180..7680x4320\n  \
          --command-recording-mode <模式> 命令记录：baseline 或 optimized，默认 optimized\n  \
+         --acceleration-structure-mode <模式> AS 策略：baseline 或 optimized，默认 baseline\n  \
          --help, -h             显示帮助"
     );
 }
@@ -352,5 +374,41 @@ mod tests {
         assert!(parse_command_recording_mode("baseline").is_ok());
         assert!(parse_command_recording_mode("other").is_err());
         assert!(parse_arguments(["--command-recording-mode".to_string()]).is_err());
+    }
+
+    #[test]
+    fn acceleration_structure_mode_defaults_to_baseline_and_parses() {
+        assert!(matches!(
+            parse_arguments(Vec::<String>::new()),
+            Ok(Command::Realtime(RealtimeConfig {
+                acceleration_structure_mode: crate::realtime::AccelerationStructureMode::Baseline,
+                command_recording_mode: crate::realtime::CommandRecordingMode::Optimized,
+                ..
+            }))
+        ));
+        let command = parse_arguments([
+            "--acceleration-structure-mode".to_string(),
+            "optimized".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            command,
+            Command::Realtime(RealtimeConfig {
+                acceleration_structure_mode: crate::realtime::AccelerationStructureMode::Optimized,
+                ..
+            })
+        ));
+        assert!(parse_acceleration_structure_mode("unknown").is_err());
+        assert!(parse_arguments(["--acceleration-structure-mode".to_string()]).is_err());
+    }
+
+    #[test]
+    fn acceleration_structure_mode_conflicts_with_cpu_reference() {
+        let result = parse_arguments([
+            "--cpu-reference".to_string(),
+            "--acceleration-structure-mode".to_string(),
+            "baseline".to_string(),
+        ]);
+        assert!(matches!(result, Err(message) if message.contains("不能与")));
     }
 }

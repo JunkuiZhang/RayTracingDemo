@@ -8,6 +8,24 @@ pub struct RealtimeConfig {
     pub atrous_mode: AtrousMode,
     pub output_size: Option<(u32, u32)>,
     pub command_recording_mode: CommandRecordingMode,
+    pub acceleration_structure_mode: AccelerationStructureMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AccelerationStructureMode {
+    #[default]
+    Baseline,
+    Optimized,
+}
+
+impl AccelerationStructureMode {
+    #[expect(dead_code)]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Baseline => "baseline",
+            Self::Optimized => "optimized",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
