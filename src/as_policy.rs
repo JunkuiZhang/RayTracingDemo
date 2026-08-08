@@ -143,6 +143,13 @@ pub struct BlasAllocationRecord {
     pub decision: CompactionDecision,
 }
 
+pub fn final_blas_primitive_order(records: &[BlasAllocationRecord]) -> Vec<usize> {
+    records
+        .iter()
+        .map(|record| record.primitive_index)
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AccelerationStructureStats {
     pub mode: AccelerationStructureMode,
@@ -335,5 +342,32 @@ mod tests {
         assert_eq!(stats.allocation_saving_ratio, Some(0.25));
         assert_eq!(stats.blas[0].primitive_index, 0);
         assert_eq!(stats.blas[1].primitive_index, 1);
+    }
+
+    #[test]
+    fn mixed_compaction_keeps_final_blas_primitive_order() {
+        let records = [
+            BlasAllocationRecord {
+                primitive_index: 0,
+                original_result_bytes: 1024,
+                reported_compacted_bytes: 512,
+                original_allocation_bytes: 1024,
+                candidate_allocation_bytes: 512,
+                final_result_bytes: 512,
+                final_allocation_bytes: 512,
+                decision: CompactionDecision::Compacted,
+            },
+            BlasAllocationRecord {
+                primitive_index: 1,
+                original_result_bytes: 1024,
+                reported_compacted_bytes: 0,
+                original_allocation_bytes: 1024,
+                candidate_allocation_bytes: 0,
+                final_result_bytes: 1024,
+                final_allocation_bytes: 1024,
+                decision: CompactionDecision::InvalidSize,
+            },
+        ];
+        assert_eq!(final_blas_primitive_order(&records), vec![0, 1]);
     }
 }

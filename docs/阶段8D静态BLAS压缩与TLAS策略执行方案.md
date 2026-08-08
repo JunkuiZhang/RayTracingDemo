@@ -434,6 +434,18 @@ Cornell 1600x900：AS baseline / optimized
 
 如果没有可代表的大 BLAS、compacted count 为 0、画面对比未做或任一门槛失败：保留 `baseline` 默认和 optimized A/B 路径，记录结果，交给 Codex review；不要为了“完成 8D”修改门槛。
 
+## 12.4 本次实现状态（2026-08-09）
+
+已实现 baseline/optimized AS mode、Phase A/CPU decision/Phase B 初始化、BLAS postbuild
+compaction query、真实 committed allocation 比较、最终 BLAS GPU VA 重建 TLAS、静态/动态
+TLAS scratch 策略和稳定 benchmark JSON 遥测。RTX 4060 Laptop 的 Cornell、NonIndexedMultiNode
+静态和动画小场景 Release 1600×900 三次 A/B 均显示 `compacted_blas_count=0`、真实 allocation
+节省为 0；仓库没有达到采纳门槛所需的代表性大 BLAS，因此默认保持 baseline。
+
+四项 Debug + GPU-Based Validation（Cornell baseline/optimized、静态 glTF、动画 glTF）均为
+exit code 0 且 `D3D12 Debug InfoQueue：0 条消息`。F1 全视图、resize、最小化/恢复、截图
+diff 和代表性大模型实测尚未完成，不能把 8D 或阶段 8 标记为完成。
+
 ## 13. Review 高风险清单
 
 Codex review 会重点检查：

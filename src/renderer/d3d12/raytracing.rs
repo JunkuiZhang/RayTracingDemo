@@ -803,6 +803,10 @@ impl PendingAccelerationStructures {
                 0
             },
         );
+        debug_assert_eq!(
+            crate::as_policy::final_blas_primitive_order(&telemetry.blas),
+            (0..final_blas.len()).collect::<Vec<_>>()
+        );
         Ok(AccelerationStructures {
             tlas,
             blas: final_blas,
