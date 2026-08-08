@@ -3,6 +3,7 @@
 use glam::Mat4;
 
 pub mod cornell;
+pub mod gltf_loader;
 
 pub const MATERIAL_FLAG_DOUBLE_SIDED: u32 = 1 << 0;
 pub const MATERIAL_FLAG_HAS_TANGENT: u32 = 1 << 1;
