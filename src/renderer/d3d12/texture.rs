@@ -489,3 +489,29 @@ fn set_resource_name(resource: &ID3D12Resource, name: &str) -> Result<()> {
     let wide = name.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
     unsafe { resource.SetName(PCWSTR(wide.as_ptr())) }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sampler_descriptor_preserves_independent_filter_and_wrap_axes() {
+        let description = sampler_description(SamplerKey {
+            min_filter: FilterMode::Nearest,
+            mag_filter: FilterMode::Linear,
+            wrap_u: WrapMode::Mirror,
+            wrap_v: WrapMode::Clamp,
+        });
+        assert_eq!(
+            description.Filter,
+            D3D12_FILTER_MIN_POINT_MAG_LINEAR_MIP_POINT
+        );
+        assert_eq!(description.AddressU, D3D12_TEXTURE_ADDRESS_MODE_MIRROR);
+        assert_eq!(description.AddressV, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+
+        let linear = sampler_description(SamplerKey::default());
+        assert_eq!(linear.Filter, D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT);
+        assert_eq!(linear.AddressU, D3D12_TEXTURE_ADDRESS_MODE_WRAP);
+        assert_eq!(linear.AddressV, D3D12_TEXTURE_ADDRESS_MODE_WRAP);
+    }
+}

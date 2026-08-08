@@ -1,6 +1,7 @@
 Texture2D<float4> FilteredDiffuse : register(t0);
 Texture2D<float4> FilteredSpecular : register(t1);
 Texture2D<float4> RawDiffuse : register(t2);
+// RawSpecular is unmodulated and must not be multiplied by albedo.
 Texture2D<float4> RawSpecular : register(t3);
 Texture2D<float4> Albedo : register(t4);
 Texture2D<float4> NormalRoughness : register(t5);

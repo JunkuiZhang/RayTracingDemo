@@ -876,6 +876,50 @@ mod tests {
     }
 
     #[test]
+    fn loads_shared_image_with_distinct_sampler_bindings() {
+        let scene = load(fixture("TextureSampler/TextureSampler.gltf")).unwrap();
+        assert_eq!(
+            scene.images.len(),
+            1,
+            "同一 image 只应在 CPU 场景中出现一次"
+        );
+        assert_eq!(scene.samplers.len(), 3, "缺省 sampler 加两个显式 sampler");
+        let first = scene.materials[0].base_color_texture.unwrap();
+        let second = scene.materials[1].base_color_texture.unwrap();
+        assert_eq!(first.image_index, second.image_index);
+        assert_ne!(first.sampler_index, second.sampler_index);
+        assert_eq!(first.texcoord_set, 0);
+        assert_eq!(second.texcoord_set, 0);
+        assert_eq!(
+            scene.samplers[first.sampler_index].min_filter,
+            FilterMode::Nearest
+        );
+        assert_eq!(scene.samplers[first.sampler_index].wrap_u, WrapMode::Repeat);
+        assert_eq!(scene.samplers[first.sampler_index].wrap_v, WrapMode::Clamp);
+        assert_eq!(
+            scene.samplers[second.sampler_index].min_filter,
+            FilterMode::Linear
+        );
+        assert_eq!(
+            scene.samplers[second.sampler_index].wrap_u,
+            WrapMode::Mirror
+        );
+        assert_eq!(scene.samplers[second.sampler_index].wrap_v, WrapMode::Clamp);
+    }
+
+    #[test]
+    fn rejects_nonzero_texcoord_and_textured_primitive_without_uv0() {
+        let texcoord_error = load(fixture("TextureSampler/TexCoord1.gltf"))
+            .unwrap_err()
+            .to_string();
+        assert!(texcoord_error.contains("texCoord 1"));
+        let uv_error = load(fixture("TextureSampler/TextureNoUv.gltf"))
+            .unwrap_err()
+            .to_string();
+        assert!(uv_error.contains("缺少 TEXCOORD_0"));
+    }
+
+    #[test]
     fn rejects_required_extension_and_alpha_blend() {
         let required = fixture("Triangle/UnsupportedRequiredExtension.gltf");
         let error = load(&required).unwrap_err().to_string();

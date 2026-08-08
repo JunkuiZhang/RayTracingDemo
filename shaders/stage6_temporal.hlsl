@@ -1,4 +1,5 @@
 Texture2D<float4> RawDiffuse : register(t0);
+// RawSpecular is the unmodulated specular + emissive signal.
 Texture2D<float4> RawSpecular : register(t1);
 Texture2D<float4> Albedo : register(t2);
 Texture2D<float4> NormalRoughness : register(t3);

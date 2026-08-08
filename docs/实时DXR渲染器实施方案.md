@@ -791,7 +791,7 @@ Rust 只传递稳定的句柄、枚举和 POD 结构，禁止跨 FFI 传递 Rust
 
 详细实施、分提交顺序和数据契约见 [`阶段7动态场景与glTF执行计划.md`](./阶段7动态场景与glTF执行计划.md)。阶段 7 代码评审发现的问题、修复工作包和新版 Luna 提示词见 [`阶段7评审问题修复执行方案.md`](./阶段7评审问题修复执行方案.md)。
 
-**实现状态（2026-08-08）：7A–7F 已提交；后续代码评审确认仍有 TLAS update scratch、动画 pivot、glTF sampler/双面语义和 PBR 信号分离等 R1–R8 问题，必须先按修复方案关闭。7G 已完成基础自动化冒烟和 Release 计时，但公开 PBR 资产、30 秒动画和逐调试视图图像核验仍未完成，不能据此宣称阶段 7 完成。**
+**实现状态（2026-08-08）：7A–7F 已提交，阶段 7 评审 R1–R8 已在 7R-A–7R-F 工作包中修复并通过离线自动化检查。阶段 7 仍未完成最终验收：公开 PBR 资产、30 秒动画、全部 F1 视图图像核验和完整 Debug GPU-Based Validation resize 矩阵尚未全部关闭。**
 
 工作内容：
 
@@ -813,12 +813,16 @@ Rust 只传递稳定的句柄、枚举和 POD 结构，禁止跨 FFI 传递 Rust
 | Debug GPU-Based Validation + RTX 4060 Laptop GPU + Cornell | 启动运行约 12 秒，无 D3D12 验证错误 |
 | Debug GPU-Based Validation + 静态 Triangle | 启动运行约 12 秒，无验证错误；仅输出缺少 tangent 的预期警告 |
 | Debug GPU-Based Validation + 动画 Triangle | 启动运行约 15 秒，无验证错误；仅输出缺少 tangent 的预期警告 |
+| Debug GPU-Based Validation + 7R shader/材质修复 | Cornell 与动画 Triangle 各运行约 15 秒，进程保持运行，无观察到设备移除或验证错误；Debug 初始化期间尚未进入稳定标题计时 |
+| Release TextureSampler 静态 glTF | 运行 15 秒，进程持续运行；Total 约 2.84–2.98 ms，AS 0.00 ms |
+| Release TextureSampler 动态 glTF | 连续运行 30 秒，进程持续运行；Total 约 2.82–3.07 ms，AS 0.01–0.02 ms |
+| Release F1/resize/最小化恢复 | 11 个 F1 视图逐一采集到标题；UI resize client 1587×864，最小化/恢复后继续渲染；独立分辨率计时覆盖 1280×720、1600×900、1920×1080 |
 | Debug UI 序列 | resize、3 次 F1、最小化/恢复运行，无验证错误 |
-| Release 1280×720 | Total 约 10.6–11.1 ms；AS 0.01；Path Trace 约 5.2–5.9；Temporal 约 1.5–1.6；À-Trous 约 3.4–4.0 ms |
-| Release 1600×900 | Total 约 11.1–11.8 ms；AS 0.01；Path Trace 约 5.6–5.9；Temporal 约 1.6–1.7；À-Trous 约 3.8–4.1 ms |
-| Release 1907×1044（屏幕工作区限制） | Total 约 23.2–23.8 ms；AS 0.01；Path Trace 约 11.4–11.7；Temporal 约 3.4；À-Trous 约 8.0–8.2 ms |
+| Release Cornell 1280×720（静态） | Total 10.87 ms；AS 0.00；Path Trace 5.25；Temporal 1.73；À-Trous 3.70 ms |
+| Release Cornell 1600×900（静态） | Total 16.51 ms；AS 0.00；Path Trace 7.66；Temporal 2.61；À-Trous 5.93 ms |
+| Release Cornell 1920×1080（静态） | Total 24.45 ms；AS 0.00；Path Trace 11.48；Temporal 3.69；À-Trous 8.83 ms |
 
-尚未达到的条件：仓库没有可离线验收的 Khronos `BoxTextured` 或 `DamagedHelmet.glb`，因此未完成公开 PBR 资产的纹理方向/法线图人工截图；未执行 30 秒连续动画、逐个 F1 视图的图像对比和 720p/900p/1080p 全套 Debug Validation 长时序列。上述限制必须在补齐资产和测试时间后再关闭。
+尚未达到的条件：仓库没有可离线验收的 Khronos `BoxTextured` 或 `DamagedHelmet.glb`，因此未完成公开 PBR 资产的纹理方向/法线图人工截图；尚未完成 30 秒连续动画、逐个 F1 视图的图像对比和 720p/900p/1080p 全套 Debug Validation 长时序列（含 resize、最小化/恢复）。因此这里仍不能写“阶段 7 完成”。
 
 ### 阶段 8：性能优化
 

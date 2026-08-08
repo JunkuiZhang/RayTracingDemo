@@ -126,7 +126,13 @@ cargo run --release -- --model assets/gltf/NonIndexedMultiNode/NonIndexedMultiNo
 
 材质使用 glTF 的 base color、metallic-roughness、normal 和 emissive factor/texture。base color/emissive 使用 sRGB SRV，metallic-roughness/normal 使用线性 SRV，metallic-roughness 严格读取 G=roughness、B=metallic。缺失纹理使用预初始化 fallback；normal texture 但 primitive 缺少 tangent 时禁用 normal map并输出警告。
 
+纹理 binding 保留 image、sampler 和 texCoord 语义。本阶段只使用 `TEXCOORD_0`：非零 `texCoord` 或有纹理但 primitive 缺少 UV0 会明确报错。sampler 支持 U/V 独立 Repeat、ClampToEdge、MirroredRepeat，以及 nearest/linear min/mag filter；sampler descriptor table 上限为 64，材质 texture/sampler index 在 CPU 侧做有界打包检查。`doubleSided=false` 的 glTF primitive 使用 DXR 背面剔除，`doubleSided=true` 和 legacy dielectric 允许双面命中，并使用 DXR HitKind 判断 front/back。
+
+`RawDiffuse` 仅表示可按 base color 重调制的 diffuse 信号；`RawSpecular` 表示未调制的 specular + emissive 信号。first-bounce 的两个 lobe 使用同一个 mixture PDF 分别拆分，黑色 base color 不会抹掉自发光。
+
 当前明确不支持并会报错：非 OPAQUE alpha、skin、morph target、animation channel、非 TRIANGLES primitive 和 `extensionsRequired`。压缩纹理、运行时网络下载、完整动画系统、阶段 8/9/10 优化也不在本阶段范围内。
+
+仓库内的 `assets/gltf/TextureSampler` 是项目内生成的离线回归夹具；公开 Khronos `BoxTextured`/`DamagedHelmet` 资产不随仓库自动下载。
 
 ## 检查项目
 
