@@ -9,85 +9,135 @@ use windows::{
     core::{Interface, PCWSTR, Result},
 };
 
-use crate::scene::SceneAsset;
+use crate::scene::{
+    GpuMaterial, GpuVertex, InstanceGpu, MATERIAL_FLAG_DOUBLE_SIDED,
+    MATERIAL_FLAG_LEGACY_DIELECTRIC, MaterialKind, SceneAsset,
+};
 
-#[repr(C)]
 #[derive(Clone, Copy)]
-struct Vertex {
-    position: [f32; 3],
-    normal: [f32; 3],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Material {
-    albedo: [f32; 4],
-    emission_and_kind: [f32; 4],
+struct PrimitiveRange {
+    vertex_offset: u32,
+    index_offset: u32,
+    vertex_count: u32,
+    index_count: u32,
 }
 
 /// Cornell Box 的网格资源，包含逐顶点法线和逐三角形材质索引。
 pub struct SceneGeometry {
     vertex_buffer: ID3D12Resource,
     index_buffer: ID3D12Resource,
-    material_index_buffer: ID3D12Resource,
-    object_index_buffer: ID3D12Resource,
     material_buffer: ID3D12Resource,
+    instance_buffer: ID3D12Resource,
     vertex_count: u32,
     index_count: u32,
+    material_count: u32,
+    instance_count: u32,
+    primitive_ranges: Vec<PrimitiveRange>,
+    instance_transforms: Vec<[f32; 12]>,
+    instance_primitive_indices: Vec<usize>,
     upload_buffers: Vec<ID3D12Resource>,
 }
 
 /// 保持 BLAS、TLAS 及其构建依赖资源存活。
 pub struct AccelerationStructures {
     pub tlas: ID3D12Resource,
-    _blas: ID3D12Resource,
+    _blas: Vec<ID3D12Resource>,
     build_scratch: Option<ID3D12Resource>,
-    instance_buffer: Option<ID3D12Resource>,
+    _instance_buffer: Option<ID3D12Resource>,
 }
 
 impl SceneGeometry {
-    pub fn new(device: &ID3D12Device, command_list: &ID3D12GraphicsCommandList) -> Result<Self> {
-        let scene = SceneAsset::cornell_box();
+    pub fn new(
+        device: &ID3D12Device,
+        command_list: &ID3D12GraphicsCommandList,
+        scene: &SceneAsset,
+    ) -> Result<Self> {
         scene.validate().map_err(|error| {
             windows::core::Error::new(
                 windows::core::HRESULT(0x80004005_u32 as i32),
                 format!("验证 Cornell Box CPU 场景：{error}"),
             )
         })?;
-        let (vertices, indices, material_indices, object_indices) = flatten_scene(&scene);
-        let materials = create_materials();
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let mut primitive_ranges = Vec::with_capacity(scene.primitives.len());
+        for primitive in &scene.primitives {
+            let vertex_offset = vertices.len() as u32;
+            let index_offset = indices.len() as u32;
+            vertices.extend(primitive.vertices.iter().map(|vertex| GpuVertex {
+                position: vertex.position,
+                normal: vertex.normal,
+                tangent: vertex.tangent,
+                texcoord0: vertex.texcoord0,
+            }));
+            indices.extend(primitive.indices.iter().copied());
+            primitive_ranges.push(PrimitiveRange {
+                vertex_offset,
+                index_offset,
+                vertex_count: primitive.vertices.len() as u32,
+                index_count: primitive.indices.len() as u32,
+            });
+        }
+        let materials = scene.materials.iter().map(gpu_material).collect::<Vec<_>>();
+        let instances = scene
+            .instances
+            .iter()
+            .enumerate()
+            .map(|(index, instance)| {
+                let range = primitive_ranges[instance.primitive_index];
+                InstanceGpu {
+                    previous_object_to_world_row0: matrix_rows(instance.previous_world)[0],
+                    previous_object_to_world_row1: matrix_rows(instance.previous_world)[1],
+                    previous_object_to_world_row2: matrix_rows(instance.previous_world)[2],
+                    vertex_offset: range.vertex_offset,
+                    index_offset: range.index_offset,
+                    material_index: scene.primitives[instance.primitive_index].material_index
+                        as u32,
+                    stable_surface_id: instance.stable_id.max(index as u32),
+                }
+            })
+            .collect::<Vec<_>>();
+        let instance_transforms = scene
+            .instances
+            .iter()
+            .map(|instance| matrix_rows(instance.current_world))
+            .map(|rows| {
+                [
+                    rows[0][0], rows[0][1], rows[0][2], rows[0][3], rows[1][0], rows[1][1],
+                    rows[1][2], rows[1][3], rows[2][0], rows[2][1], rows[2][2], rows[2][3],
+                ]
+            })
+            .collect();
+        let instance_primitive_indices = scene
+            .instances
+            .iter()
+            .map(|instance| instance.primitive_index)
+            .collect();
         let (vertex_buffer, vertex_upload) =
             create_static_buffer(device, command_list, &vertices, "Cornell Box 顶点")?;
         let (index_buffer, index_upload) =
             create_static_buffer(device, command_list, &indices, "Cornell Box 索引")?;
-        let (material_index_buffer, material_index_upload) = create_static_buffer(
-            device,
-            command_list,
-            &material_indices,
-            "Cornell Box 材质索引",
-        )?;
         let (material_buffer, material_upload) =
-            create_static_buffer(device, command_list, &materials, "Cornell Box 材质")?;
-        let (object_index_buffer, object_index_upload) = create_static_buffer(
-            device,
-            command_list,
-            &object_indices,
-            "Cornell Box 物体索引",
-        )?;
+            create_static_buffer(device, command_list, &materials, "场景材质")?;
+        let (instance_buffer, instance_upload) =
+            create_static_buffer(device, command_list, &instances, "场景实例元数据")?;
         Ok(Self {
             vertex_buffer,
             index_buffer,
-            material_index_buffer,
-            object_index_buffer,
             material_buffer,
+            instance_buffer,
             vertex_count: vertices.len() as u32,
             index_count: indices.len() as u32,
+            material_count: materials.len() as u32,
+            instance_count: instances.len() as u32,
+            primitive_ranges,
+            instance_transforms,
+            instance_primitive_indices,
             upload_buffers: vec![
                 vertex_upload,
                 index_upload,
-                material_index_upload,
                 material_upload,
-                object_index_upload,
+                instance_upload,
             ],
         })
     }
@@ -98,7 +148,8 @@ impl SceneGeometry {
     }
 
     /// 返回构建 BLAS 时使用的三角形描述。
-    pub fn geometry_desc(&self) -> D3D12_RAYTRACING_GEOMETRY_DESC {
+    pub fn geometry_desc(&self, primitive_index: usize) -> D3D12_RAYTRACING_GEOMETRY_DESC {
+        let range = self.primitive_ranges[primitive_index];
         let (index_buffer, vertex_buffer) = unsafe {
             (
                 self.index_buffer.GetGPUVirtualAddress(),
@@ -113,12 +164,13 @@ impl SceneGeometry {
                     Transform3x4: 0,
                     IndexFormat: DXGI_FORMAT_R32_UINT,
                     VertexFormat: DXGI_FORMAT_R32G32B32_FLOAT,
-                    IndexCount: self.index_count,
-                    VertexCount: self.vertex_count,
-                    IndexBuffer: index_buffer,
+                    IndexCount: range.index_count,
+                    VertexCount: range.vertex_count,
+                    IndexBuffer: index_buffer + range.index_offset as u64 * size_of::<u32>() as u64,
                     VertexBuffer: D3D12_GPU_VIRTUAL_ADDRESS_AND_STRIDE {
-                        StartAddress: vertex_buffer,
-                        StrideInBytes: size_of::<Vertex>() as u64,
+                        StartAddress: vertex_buffer
+                            + range.vertex_offset as u64 * size_of::<GpuVertex>() as u64,
+                        StrideInBytes: size_of::<GpuVertex>() as u64,
                     },
                 },
             },
@@ -133,16 +185,12 @@ impl SceneGeometry {
         &self.index_buffer
     }
 
-    pub fn material_index_buffer(&self) -> &ID3D12Resource {
-        &self.material_index_buffer
-    }
-
     pub fn material_buffer(&self) -> &ID3D12Resource {
         &self.material_buffer
     }
 
-    pub fn object_index_buffer(&self) -> &ID3D12Resource {
-        &self.object_index_buffer
+    pub fn instance_buffer(&self) -> &ID3D12Resource {
+        &self.instance_buffer
     }
 
     pub fn vertex_count(&self) -> u32 {
@@ -152,67 +200,69 @@ impl SceneGeometry {
     pub fn index_count(&self) -> u32 {
         self.index_count
     }
-}
 
-fn flatten_scene(scene: &SceneAsset) -> (Vec<Vertex>, Vec<u32>, Vec<u32>, Vec<u32>) {
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
-    let mut material_indices = Vec::new();
-    let mut object_indices = Vec::new();
-    for instance in &scene.instances {
-        let primitive = &scene.primitives[instance.primitive_index];
-        let base_vertex = vertices.len() as u32;
-        vertices.extend(primitive.vertices.iter().map(|vertex| Vertex {
-            position: vertex.position,
-            normal: vertex.normal,
-        }));
-        indices.extend(primitive.indices.iter().map(|index| base_vertex + index));
-        material_indices.extend(std::iter::repeat_n(
-            primitive.material_index as u32,
-            primitive.indices.len() / 3,
-        ));
-        let object_index = if instance.primitive_index < 6 {
-            instance.primitive_index as u32
-        } else if instance.primitive_index < 12 {
-            6
-        } else {
-            7
-        };
-        object_indices.extend(std::iter::repeat_n(
-            object_index,
-            primitive.indices.len() / 3,
-        ));
+    pub fn material_count(&self) -> u32 {
+        self.material_count
     }
-    (vertices, indices, material_indices, object_indices)
+
+    pub fn instance_count(&self) -> u32 {
+        self.instance_count
+    }
+
+    pub fn primitive_count(&self) -> usize {
+        self.primitive_ranges.len()
+    }
+
+    pub fn instance_descriptors(
+        &self,
+        blas: &[ID3D12Resource],
+    ) -> Vec<D3D12_RAYTRACING_INSTANCE_DESC> {
+        self.instance_transforms
+            .iter()
+            .enumerate()
+            .map(|(index, transform)| D3D12_RAYTRACING_INSTANCE_DESC {
+                Transform: *transform,
+                _bitfield1: (index as u32 & 0x00FF_FFFF) | (0xFF << 24),
+                _bitfield2: 0,
+                AccelerationStructure: unsafe {
+                    blas[self.instance_primitive_indices[index]].GetGPUVirtualAddress()
+                },
+            })
+            .collect()
+    }
 }
 
-fn create_materials() -> [Material; 6] {
+fn matrix_rows(matrix: glam::Mat4) -> [[f32; 4]; 4] {
+    let columns = matrix.to_cols_array_2d();
     [
-        Material {
-            albedo: [0.75, 0.75, 0.75, 1.0],
-            emission_and_kind: [0.0, 0.0, 0.0, 0.0],
-        },
-        Material {
-            albedo: [0.65, 0.05, 0.05, 1.0],
-            emission_and_kind: [0.0, 0.0, 0.0, 0.0],
-        },
-        Material {
-            albedo: [0.12, 0.45, 0.15, 1.0],
-            emission_and_kind: [0.0, 0.0, 0.0, 0.0],
-        },
-        Material {
-            albedo: [1.0, 1.0, 1.0, 1.0],
-            emission_and_kind: [7.0, 7.0, 7.0, 3.0],
-        },
-        Material {
-            albedo: [0.82, 0.85, 0.9, 1.0],
-            emission_and_kind: [0.0, 0.0, 0.0, 1.0],
-        },
-        Material {
-            albedo: [0.98, 0.98, 0.98, 1.0],
-            emission_and_kind: [0.0, 0.0, 0.0, 2.0],
-        },
+        [columns[0][0], columns[1][0], columns[2][0], columns[3][0]],
+        [columns[0][1], columns[1][1], columns[2][1], columns[3][1]],
+        [columns[0][2], columns[1][2], columns[2][2], columns[3][2]],
+        [columns[0][3], columns[1][3], columns[2][3], columns[3][3]],
     ]
+}
+
+fn gpu_material(material: &crate::scene::MaterialAsset) -> GpuMaterial {
+    let mut flags = 0;
+    if material.double_sided {
+        flags |= MATERIAL_FLAG_DOUBLE_SIDED;
+    }
+    if material.kind == MaterialKind::LegacyDielectric {
+        flags |= MATERIAL_FLAG_LEGACY_DIELECTRIC;
+    }
+    GpuMaterial {
+        base_color_factor: material.base_color_factor,
+        emissive_factor: material.emissive_factor,
+        metallic_factor: material.metallic_factor,
+        roughness_factor: material.roughness_factor,
+        normal_scale: material.normal_scale,
+        ior: material.ior,
+        flags,
+        base_color_texture_and_sampler: 0,
+        metallic_roughness_texture_and_sampler: 0,
+        normal_texture_and_sampler: 0,
+        emissive_texture_and_sampler: 0,
+    }
 }
 
 impl AccelerationStructures {
@@ -223,39 +273,40 @@ impl AccelerationStructures {
     ) -> Result<Self> {
         let device5: ID3D12Device5 = device.cast()?;
         let command_list4: ID3D12GraphicsCommandList4 = command_list.cast()?;
-        let geometry_desc = geometry.geometry_desc();
-        let blas_inputs = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS {
-            Type: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL,
-            Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE,
-            NumDescs: 1,
-            DescsLayout: D3D12_ELEMENTS_LAYOUT_ARRAY,
-            Anonymous: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_0 {
-                pGeometryDescs: &geometry_desc,
-            },
-        };
-        let mut blas_info = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO::default();
-        unsafe {
-            device5.GetRaytracingAccelerationStructurePrebuildInfo(&blas_inputs, &mut blas_info);
+        let mut blas = Vec::with_capacity(geometry.primitive_count());
+        let mut blas_infos = Vec::with_capacity(geometry.primitive_count());
+        let mut scratch_size = 0_u64;
+        for primitive_index in 0..geometry.primitive_count() {
+            let geometry_desc = geometry.geometry_desc(primitive_index);
+            let blas_inputs = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS {
+                Type: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL,
+                Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE,
+                NumDescs: 1,
+                DescsLayout: D3D12_ELEMENTS_LAYOUT_ARRAY,
+                Anonymous: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_0 {
+                    pGeometryDescs: &geometry_desc,
+                },
+            };
+            let mut info = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO::default();
+            unsafe {
+                device5.GetRaytracingAccelerationStructurePrebuildInfo(&blas_inputs, &mut info);
+            }
+            scratch_size = scratch_size.max(info.ScratchDataSizeInBytes);
+            blas_infos.push(info);
+            blas.push(create_default_buffer(
+                device,
+                info.ResultDataMaxSizeInBytes,
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
+            )?);
         }
-        let blas = create_default_buffer(
-            device,
-            blas_info.ResultDataMaxSizeInBytes,
-            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-            D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
-        )?;
-
-        let instance = D3D12_RAYTRACING_INSTANCE_DESC {
-            Transform: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            _bitfield1: 0xFF << 24,
-            _bitfield2: 0,
-            AccelerationStructure: unsafe { blas.GetGPUVirtualAddress() },
-        };
-        let instance_buffer =
-            create_upload_buffer(device, std::slice::from_ref(&instance), "DXR 场景实例")?;
+        let instance_descs = geometry.instance_descriptors(&blas);
+        let instance_buffer = create_upload_buffer(device, &instance_descs, "DXR 场景实例")?;
         let tlas_inputs = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS {
             Type: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL,
-            Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE,
-            NumDescs: 1,
+            Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE
+                | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE,
+            NumDescs: instance_descs.len() as u32,
             DescsLayout: D3D12_ELEMENTS_LAYOUT_ARRAY,
             Anonymous: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_0 {
                 InstanceDescs: unsafe { instance_buffer.GetGPUVirtualAddress() },
@@ -271,9 +322,7 @@ impl AccelerationStructures {
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
         )?;
-        let scratch_size = blas_info
-            .ScratchDataSizeInBytes
-            .max(tlas_info.ScratchDataSizeInBytes);
+        scratch_size = scratch_size.max(tlas_info.ScratchDataSizeInBytes);
         let scratch = create_default_buffer(
             device,
             scratch_size,
@@ -281,16 +330,28 @@ impl AccelerationStructures {
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
         )?;
 
-        let blas_build = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC {
-            DestAccelerationStructureData: unsafe { blas.GetGPUVirtualAddress() },
-            Inputs: blas_inputs,
-            SourceAccelerationStructureData: 0,
-            ScratchAccelerationStructureData: unsafe { scratch.GetGPUVirtualAddress() },
-        };
-        unsafe {
-            command_list4.BuildRaytracingAccelerationStructure(&blas_build, None);
+        for (primitive_index, blas_resource) in blas.iter().enumerate() {
+            let geometry_desc = geometry.geometry_desc(primitive_index);
+            let blas_inputs = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS {
+                Type: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL,
+                Flags: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE,
+                NumDescs: 1,
+                DescsLayout: D3D12_ELEMENTS_LAYOUT_ARRAY,
+                Anonymous: D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS_0 {
+                    pGeometryDescs: &geometry_desc,
+                },
+            };
+            let blas_build = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC {
+                DestAccelerationStructureData: unsafe { blas_resource.GetGPUVirtualAddress() },
+                Inputs: blas_inputs,
+                SourceAccelerationStructureData: 0,
+                ScratchAccelerationStructureData: unsafe { scratch.GetGPUVirtualAddress() },
+            };
+            unsafe {
+                command_list4.BuildRaytracingAccelerationStructure(&blas_build, None);
+            }
+            uav_barrier(command_list, blas_resource);
         }
-        uav_barrier(command_list, &blas);
         let tlas_build = D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC {
             DestAccelerationStructureData: unsafe { tlas.GetGPUVirtualAddress() },
             Inputs: tlas_inputs,
@@ -305,14 +366,14 @@ impl AccelerationStructures {
             tlas,
             _blas: blas,
             build_scratch: Some(scratch),
-            instance_buffer: Some(instance_buffer),
+            _instance_buffer: Some(instance_buffer),
         })
     }
 
-    /// Scratch and instance inputs are only needed until the AS build fence completes.
+    /// BLAS scratch is only needed until the initial AS build fence completes;
+    /// the instance upload remains alive for the TLAS update path.
     pub fn release_build_resources(&mut self) {
         self.build_scratch = None;
-        self.instance_buffer = None;
     }
 }
 
@@ -601,7 +662,7 @@ fn create_raytracing_root_signature(device: &ID3D12Device) -> Result<ID3D12RootS
     let ranges = [
         D3D12_DESCRIPTOR_RANGE {
             RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
-            NumDescriptors: 6,
+            NumDescriptors: 5,
             BaseShaderRegister: 0,
             RegisterSpace: 0,
             OffsetInDescriptorsFromTableStart: 0,
@@ -611,7 +672,7 @@ fn create_raytracing_root_signature(device: &ID3D12Device) -> Result<ID3D12RootS
             NumDescriptors: 9,
             BaseShaderRegister: 0,
             RegisterSpace: 0,
-            OffsetInDescriptorsFromTableStart: 6,
+            OffsetInDescriptorsFromTableStart: 5,
         },
     ];
     let parameters = [
@@ -673,24 +734,54 @@ mod tests {
 
     #[test]
     fn cornell_box_geometry_has_consistent_primitive_metadata() {
-        let (vertices, indices, materials, object_indices) =
-            flatten_scene(&SceneAsset::cornell_box());
-        assert_eq!(vertices.len(), 72);
-        assert_eq!(indices.len(), 108);
-        assert_eq!(materials.len(), indices.len() / 3);
-        assert_eq!(object_indices.len(), indices.len() / 3);
-        assert!(indices.iter().all(|&index| index < vertices.len() as u32));
-
-        let object_counts = (0_u32..8)
-            .map(|id| object_indices.iter().filter(|&&value| value == id).count())
+        let scene = SceneAsset::cornell_box();
+        scene.validate().unwrap();
+        assert_eq!(
+            scene
+                .primitives
+                .iter()
+                .map(|primitive| primitive.vertices.len())
+                .sum::<usize>(),
+            72
+        );
+        assert_eq!(
+            scene
+                .primitives
+                .iter()
+                .map(|primitive| primitive.indices.len())
+                .sum::<usize>(),
+            108
+        );
+        let object_counts = (0_usize..8)
+            .map(|id| {
+                scene
+                    .instances
+                    .iter()
+                    .filter(|instance| {
+                        let object_id = if instance.primitive_index < 6 {
+                            instance.primitive_index
+                        } else if instance.primitive_index < 12 {
+                            6
+                        } else {
+                            7
+                        };
+                        object_id == id
+                    })
+                    .map(|instance| scene.primitives[instance.primitive_index].indices.len() / 3)
+                    .sum::<usize>()
+            })
             .collect::<Vec<_>>();
         assert_eq!(object_counts, [2, 2, 2, 2, 2, 2, 12, 12]);
     }
 
     #[test]
     fn cornell_box_normals_stay_normalized_after_rotation() {
-        let (vertices, _, _, _) = flatten_scene(&SceneAsset::cornell_box());
-        for vertex in vertices {
+        let scene = SceneAsset::cornell_box();
+        for vertex in scene
+            .primitives
+            .iter()
+            .flat_map(|primitive| &primitive.vertices)
+        {
             let length_squared = vertex.normal.iter().map(|value| value * value).sum::<f32>();
             assert!((length_squared - 1.0).abs() < 1.0e-5);
         }

@@ -110,8 +110,12 @@ pub struct GpuVertex {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GpuMaterial {
     pub base_color_factor: [f32; 4],
-    pub emissive_factor_and_metallic: [f32; 4],
-    pub roughness_normal_scale_ior_flags: [f32; 4],
+    pub emissive_factor: [f32; 3],
+    pub metallic_factor: f32,
+    pub roughness_factor: f32,
+    pub normal_scale: f32,
+    pub ior: f32,
+    pub flags: u32,
     pub base_color_texture_and_sampler: u32,
     pub metallic_roughness_texture_and_sampler: u32,
     pub normal_texture_and_sampler: u32,
@@ -133,6 +137,44 @@ pub struct InstanceGpu {
 impl SceneAsset {
     pub fn cornell_box() -> Self {
         cornell::create()
+    }
+
+    pub fn append(&mut self, mut other: Self) -> Vec<usize> {
+        let primitive_offset = self.primitives.len();
+        let material_offset = self.materials.len();
+        let image_offset = self.images.len();
+        for material in &mut other.materials {
+            for texture in [
+                &mut material.base_color_texture,
+                &mut material.metallic_roughness_texture,
+                &mut material.normal_texture,
+                &mut material.emissive_texture,
+            ] {
+                if let Some(index) = texture.as_mut() {
+                    *index += image_offset;
+                }
+            }
+        }
+        for primitive in &mut other.primitives {
+            primitive.material_index += material_offset;
+        }
+        let instance_offset = self.instances.len();
+        for instance in &mut other.instances {
+            instance.primitive_index += primitive_offset;
+            instance.stable_id += instance_offset as u32;
+        }
+        let animated_instances = other
+            .animated_root_instances
+            .iter()
+            .map(|index| index + instance_offset)
+            .collect::<Vec<_>>();
+        self.primitives.extend(other.primitives);
+        self.materials.extend(other.materials);
+        self.images.extend(other.images);
+        self.instances.extend(other.instances);
+        self.animated_root_instances
+            .extend(animated_instances.iter().copied());
+        (instance_offset..self.instances.len()).collect()
     }
 
     pub fn validate(&self) -> Result<(), String> {

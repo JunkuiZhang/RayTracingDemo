@@ -7,20 +7,40 @@ struct Vertex
 {
     float3 position;
     float3 normal;
+    float4 tangent;
+    float2 texcoord0;
 };
 
 struct Material
 {
-    float4 albedo;
-    // xyz: emission, w: 0 diffuse, 1 metal, 2 dielectric, 3 emissive.
-    float4 emissionAndKind;
+    float4 baseColorFactor;
+    float3 emissiveFactor;
+    float metallicFactor;
+    float roughnessFactor;
+    float normalScale;
+    float ior;
+    uint flags;
+    uint baseColorTextureAndSampler;
+    uint metallicRoughnessTextureAndSampler;
+    uint normalTextureAndSampler;
+    uint emissiveTextureAndSampler;
+};
+
+struct InstanceGpu
+{
+    float4 previousObjectToWorldRow0;
+    float4 previousObjectToWorldRow1;
+    float4 previousObjectToWorldRow2;
+    uint vertexOffset;
+    uint indexOffset;
+    uint materialIndex;
+    uint stableSurfaceId;
 };
 
 StructuredBuffer<Vertex> Vertices : register(t1);
 StructuredBuffer<uint> Indices : register(t2);
-StructuredBuffer<uint> MaterialIndices : register(t3);
-StructuredBuffer<Material> Materials : register(t4);
-StructuredBuffer<uint> ObjectIndices : register(t5);
+StructuredBuffer<Material> Materials : register(t3);
+StructuredBuffer<InstanceGpu> Instances : register(t4);
 
 RWTexture2D<float4> RawDiffuse : register(u0);
 RWTexture2D<float4> RawSpecular : register(u1);
@@ -116,6 +136,15 @@ float2 ProjectToPreviousUv(float3 worldPosition, uint2 size)
     return float2(screen.x / aspect, screen.y) * 0.5 + 0.5;
 }
 
+float3 PreviousWorldPosition(float3 localPosition, InstanceGpu instanceData)
+{
+    float3x4 previousObjectToWorld = float3x4(
+        instanceData.previousObjectToWorldRow0,
+        instanceData.previousObjectToWorldRow1,
+        instanceData.previousObjectToWorldRow2);
+    return mul(previousObjectToWorld, float4(localPosition, 1.0));
+}
+
 [shader("raygeneration")]
 void RayGen()
 {
@@ -178,40 +207,48 @@ void ShadowMiss(inout Payload payload)
 void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes attributes)
 {
     uint primitive = PrimitiveIndex();
+    InstanceGpu instanceData = Instances[InstanceID()];
     uint3 triIndices = uint3(
-        Indices[primitive * 3],
-        Indices[primitive * 3 + 1],
-        Indices[primitive * 3 + 2]);
+        Indices[instanceData.indexOffset + primitive * 3],
+        Indices[instanceData.indexOffset + primitive * 3 + 1],
+        Indices[instanceData.indexOffset + primitive * 3 + 2]);
     float3 barycentric = float3(
         1.0 - attributes.barycentrics.x - attributes.barycentrics.y,
         attributes.barycentrics.x,
         attributes.barycentrics.y);
-    float3 geometricNormal = normalize(
-        Vertices[triIndices.x].normal * barycentric.x
-        + Vertices[triIndices.y].normal * barycentric.y
-        + Vertices[triIndices.z].normal * barycentric.z);
+    float3 localPosition = Vertices[instanceData.vertexOffset + triIndices.x].position * barycentric.x
+        + Vertices[instanceData.vertexOffset + triIndices.y].position * barycentric.y
+        + Vertices[instanceData.vertexOffset + triIndices.z].position * barycentric.z;
+    float3 localNormal = normalize(
+        Vertices[instanceData.vertexOffset + triIndices.x].normal * barycentric.x
+        + Vertices[instanceData.vertexOffset + triIndices.y].normal * barycentric.y
+        + Vertices[instanceData.vertexOffset + triIndices.z].normal * barycentric.z);
+    float3 geometricNormal = normalize(mul(localNormal, (float3x3)WorldToObject3x4()));
     bool frontFace = dot(WorldRayDirection(), geometricNormal) < 0.0;
     float3 normal = frontFace ? geometricNormal : -geometricNormal;
 
-    uint materialIndex = MaterialIndices[primitive];
+    uint materialIndex = instanceData.materialIndex;
     Material material = Materials[materialIndex];
-    uint kind = uint(material.emissionAndKind.w + 0.5);
-    float3 hitPosition = WorldRayOrigin() + RayTCurrent() * WorldRayDirection();
+    uint kind = (material.flags & 4u) != 0u
+        ? 2u
+        : (any(material.emissiveFactor > 0.0) ? 3u : (material.metallicFactor > 0.5 ? 1u : 0u));
+    float3 hitPosition = mul(ObjectToWorld3x4(), float4(localPosition, 1.0));
+    float3 previousHitPosition = PreviousWorldPosition(localPosition, instanceData);
     payload.hitDistance = RayTCurrent();
 
     if (payload.depth == 0)
     {
         uint2 pixel = DispatchRaysIndex().xy;
         uint2 size = DispatchRaysDimensions().xy;
-        float roughness = kind == 0u ? 1.0 : (kind == 1u ? 0.05 : 0.0);
+        float roughness = saturate(material.roughnessFactor);
         payload.firstKind = kind;
-        GBufferAlbedo[pixel] = float4(material.albedo.xyz, float(kind));
+        GBufferAlbedo[pixel] = float4(material.baseColorFactor.xyz, float(kind));
         GBufferNormalRoughness[pixel] = float4(normal * 0.5 + 0.5, roughness);
         GBufferDepth[pixel] = RayTCurrent();
-        GBufferId[pixel] = (InstanceID() << 24u) | (ObjectIndices[primitive] << 8u) | materialIndex;
+        GBufferId[pixel] = instanceData.stableSurfaceId;
         GBufferWorldPosition[pixel] = float4(hitPosition, 1.0);
         float2 currentUv = (float2(pixel) + 0.5) / float2(size);
-        float2 previousUv = ProjectToPreviousUv(hitPosition, size);
+        float2 previousUv = ProjectToPreviousUv(previousHitPosition, size);
         GBufferMotion[pixel] = ResetHistory != 0u
             ? 0
             : (currentUv - previousUv) * float2(size);
@@ -228,7 +265,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
             float bsdfSquared = payload.lastPdf * payload.lastPdf;
             weight = bsdfSquared / (bsdfSquared + lightPdf * lightPdf);
         }
-        payload.radiance = material.emissionAndKind.xyz * weight;
+        payload.radiance = material.emissiveFactor * weight;
         return;
     }
     if (payload.depth >= 3)
@@ -289,7 +326,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
             float bsdfPdf = surfaceCosine / 3.14159265359;
             float lightSquared = lightPdf * lightPdf;
             float misWeight = lightSquared / (lightSquared + bsdfPdf * bsdfPdf);
-            directLighting = shadow.radiance * material.albedo.xyz * Materials[3].emissionAndKind.xyz
+            directLighting = shadow.radiance * material.baseColorFactor.xyz * Materials[3].emissiveFactor
                 * (surfaceCosine / 3.14159265359) * misWeight / lightPdf;
         }
         direction = SampleCosineHemisphere(normal, payload.seed);
@@ -313,5 +350,5 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     payload.seed = child.seed;
     if (payload.depth == 0 && (kind == 1u || kind == 2u))
         GBufferHitDistance[DispatchRaysIndex().xy] = child.hitDistance;
-    payload.radiance = directLighting + material.albedo.xyz * child.radiance;
+    payload.radiance = directLighting + material.baseColorFactor.xyz * child.radiance;
 }

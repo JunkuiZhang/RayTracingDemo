@@ -17,7 +17,10 @@ use winit::{
     window::Window,
 };
 
-use crate::realtime::RealtimeConfig;
+use crate::{
+    realtime::RealtimeConfig,
+    scene::{SceneAsset, gltf_loader},
+};
 
 use self::{
     descriptor::DescriptorHeap,
@@ -157,12 +160,6 @@ pub struct Dx12Renderer {
 impl Dx12Renderer {
     pub fn new(window: &Window, width: u32, height: u32, config: &RealtimeConfig) -> Result<Self> {
         unsafe {
-            if config.model_path.is_some() || config.animate_model {
-                return Err(WindowsError::new(
-                    windows::core::HRESULT(0x80004005_u32 as i32),
-                    "阶段 7A 已注册 --model/--animate-model 参数；glTF 加载将在阶段 7B 实现",
-                ));
-            }
             enable_debug_interfaces();
 
             let factory_flags = if cfg!(debug_assertions) {
@@ -246,8 +243,26 @@ impl Dx12Renderer {
                 &frames[0].allocator,
                 None::<&ID3D12PipelineState>,
             )?;
-            let mut scene_geometry = SceneGeometry::new(&device, &command_list)
-                .map_err(|error| dx_error("创建 Cornell Box 网格", error))?;
+            let mut scene = SceneAsset::cornell_box();
+            if let Some(model_path) = &config.model_path {
+                let imported = gltf_loader::load(model_path).map_err(|error| {
+                    dx_error(
+                        "加载 glTF 场景",
+                        WindowsError::new(
+                            windows::core::HRESULT(0x80004005_u32 as i32),
+                            error.to_string(),
+                        ),
+                    )
+                })?;
+                scene.append(imported);
+            } else if config.animate_model {
+                return Err(WindowsError::new(
+                    windows::core::HRESULT(0x80004005_u32 as i32),
+                    "--animate-model 需要同时提供 --model <path>",
+                ));
+            }
+            let mut scene_geometry = SceneGeometry::new(&device, &command_list, &scene)
+                .map_err(|error| dx_error("创建场景网格", error))?;
             let mut acceleration_structures =
                 AccelerationStructures::build(&device, &command_list, &scene_geometry)
                     .map_err(|error| dx_error("构建 DXR 加速结构", error))?;
@@ -268,7 +283,7 @@ impl Dx12Renderer {
                 1,
                 scene_geometry.vertex_buffer(),
                 scene_geometry.vertex_count(),
-                24,
+                48,
             );
             create_structured_srv(
                 &device,
@@ -282,25 +297,17 @@ impl Dx12Renderer {
                 &device,
                 &shader_heap,
                 3,
-                scene_geometry.material_index_buffer(),
-                scene_geometry.index_count() / 3,
-                4,
-            );
-            create_structured_srv(
-                &device,
-                &shader_heap,
-                4,
                 scene_geometry.material_buffer(),
-                6,
-                32,
+                scene_geometry.material_count(),
+                64,
             );
             create_structured_srv(
                 &device,
                 &shader_heap,
-                5,
-                scene_geometry.object_index_buffer(),
-                scene_geometry.index_count() / 3,
                 4,
+                scene_geometry.instance_buffer(),
+                scene_geometry.instance_count(),
+                64,
             );
             let raytracing_pipeline = RaytracingPipeline::new(&device, STAGE3_SHADER)
                 .map_err(|error| dx_error("创建 DXR State Object", error))?;
@@ -895,7 +902,7 @@ impl Dx12Renderer {
             hit_distance,
         ];
         for (offset, resource) in dxr_uavs.into_iter().enumerate() {
-            unsafe { create_texture_uav(&self.device, &self.shader_heap, 6 + offset, resource) };
+            unsafe { create_texture_uav(&self.device, &self.shader_heap, 5 + offset, resource) };
         }
 
         for current_index in 0..2 {
@@ -1371,7 +1378,7 @@ mod tests {
 
     #[test]
     fn descriptor_tables_do_not_overlap_and_fit_the_heap() {
-        let mut ranges = vec![(DXR_TABLE_BASE, DXR_TABLE_BASE + 15)];
+        let mut ranges = vec![(DXR_TABLE_BASE, DXR_TABLE_BASE + 14)];
         for base in TEMPORAL_TABLE_BASES {
             ranges.push((base, base + 28));
         }
