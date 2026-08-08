@@ -10,6 +10,39 @@ pub const MATERIAL_FLAG_HAS_TANGENT: u32 = 1 << 1;
 pub const MATERIAL_FLAG_LEGACY_DIELECTRIC: u32 = 1 << 2;
 pub const MATERIAL_FLAG_LEGACY_METAL: u32 = 1 << 3;
 pub const MATERIAL_FLAG_LEGACY_EMISSIVE: u32 = 1 << 4;
+pub const MAX_SCENE_SAMPLERS: usize = 64;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum FilterMode {
+    Nearest,
+    Linear,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum WrapMode {
+    Repeat,
+    Clamp,
+    Mirror,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SamplerKey {
+    pub min_filter: FilterMode,
+    pub mag_filter: FilterMode,
+    pub wrap_u: WrapMode,
+    pub wrap_v: WrapMode,
+}
+
+impl Default for SamplerKey {
+    fn default() -> Self {
+        Self {
+            min_filter: FilterMode::Linear,
+            mag_filter: FilterMode::Linear,
+            wrap_u: WrapMode::Repeat,
+            wrap_v: WrapMode::Repeat,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaterialKind {
@@ -17,6 +50,13 @@ pub enum MaterialKind {
     LegacyMetal,
     LegacyDielectric,
     Emissive,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TextureBindingAsset {
+    pub image_index: usize,
+    pub sampler_index: usize,
+    pub texcoord_set: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -30,10 +70,10 @@ pub struct MaterialAsset {
     pub ior: f32,
     pub kind: MaterialKind,
     pub double_sided: bool,
-    pub base_color_texture: Option<usize>,
-    pub metallic_roughness_texture: Option<usize>,
-    pub normal_texture: Option<usize>,
-    pub emissive_texture: Option<usize>,
+    pub base_color_texture: Option<TextureBindingAsset>,
+    pub metallic_roughness_texture: Option<TextureBindingAsset>,
+    pub normal_texture: Option<TextureBindingAsset>,
+    pub emissive_texture: Option<TextureBindingAsset>,
 }
 
 impl MaterialAsset {
@@ -79,6 +119,7 @@ pub struct MeshPrimitive {
     pub vertices: Vec<VertexAsset>,
     pub indices: Vec<u32>,
     pub material_index: usize,
+    pub has_texcoord0: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -101,6 +142,7 @@ pub struct SceneAsset {
     pub primitives: Vec<MeshPrimitive>,
     pub materials: Vec<MaterialAsset>,
     pub images: Vec<ImageAsset>,
+    pub samplers: Vec<SamplerKey>,
     pub instances: Vec<SceneInstance>,
     pub rigid_animation_groups: Vec<RigidAnimationGroup>,
 }
@@ -151,6 +193,7 @@ impl SceneAsset {
         let primitive_offset = self.primitives.len();
         let material_offset = self.materials.len();
         let image_offset = self.images.len();
+        let sampler_offset = self.samplers.len();
         for material in &mut other.materials {
             for texture in [
                 &mut material.base_color_texture,
@@ -158,8 +201,9 @@ impl SceneAsset {
                 &mut material.normal_texture,
                 &mut material.emissive_texture,
             ] {
-                if let Some(index) = texture.as_mut() {
-                    *index += image_offset;
+                if let Some(binding) = texture.as_mut() {
+                    binding.image_index += image_offset;
+                    binding.sampler_index += sampler_offset;
                 }
             }
         }
@@ -190,6 +234,7 @@ impl SceneAsset {
         self.primitives.extend(other.primitives);
         self.materials.extend(other.materials);
         self.images.extend(other.images);
+        self.samplers.extend(other.samplers);
         self.instances.extend(other.instances);
         self.rigid_animation_groups.extend(animated_groups);
         (instance_offset..self.instances.len()).collect()
@@ -202,6 +247,15 @@ impl SceneAsset {
         if self.materials.is_empty() {
             return Err("场景没有材质".to_string());
         }
+        if self.samplers.is_empty() {
+            return Err("场景没有 sampler（至少需要缺省 sampler）".to_string());
+        }
+        if self.samplers.len() > MAX_SCENE_SAMPLERS {
+            return Err(format!(
+                "场景 sampler 数 {} 超过上限 {MAX_SCENE_SAMPLERS}",
+                self.samplers.len()
+            ));
+        }
         for (material_index, material) in self.materials.iter().enumerate() {
             for (texture_name, texture_index) in [
                 ("base_color", material.base_color_texture),
@@ -209,12 +263,30 @@ impl SceneAsset {
                 ("normal", material.normal_texture),
                 ("emissive", material.emissive_texture),
             ] {
-                if let Some(texture_index) = texture_index
-                    && texture_index >= self.images.len()
+                if let Some(binding) = texture_index
+                    && binding.image_index >= self.images.len()
                 {
                     return Err(format!(
-                        "material {material_index} 的 {texture_name} texture {texture_index} 越界（图片数 {}）",
+                        "material {material_index} 的 {texture_name} image {} 越界（图片数 {}）",
+                        binding.image_index,
                         self.images.len()
+                    ));
+                }
+                if let Some(binding) = texture_index
+                    && binding.sampler_index >= self.samplers.len()
+                {
+                    return Err(format!(
+                        "material {material_index} 的 {texture_name} sampler {} 越界（sampler 数 {}）",
+                        binding.sampler_index,
+                        self.samplers.len()
+                    ));
+                }
+                if let Some(binding) = texture_index
+                    && binding.texcoord_set != 0
+                {
+                    return Err(format!(
+                        "material {material_index} 的 {texture_name} 使用不支持的 texCoord {}，本阶段只支持 TEXCOORD_0",
+                        binding.texcoord_set
                     ));
                 }
             }
@@ -234,6 +306,21 @@ impl SceneAsset {
                     "primitive {primitive_index} 引用越界材质 {}（材质数 {}）",
                     primitive.material_index,
                     self.materials.len()
+                ));
+            }
+            let material = &self.materials[primitive.material_index];
+            if !primitive.has_texcoord0
+                && [
+                    material.base_color_texture,
+                    material.metallic_roughness_texture,
+                    material.normal_texture,
+                    material.emissive_texture,
+                ]
+                .into_iter()
+                .any(|binding| binding.is_some())
+            {
+                return Err(format!(
+                    "primitive {primitive_index} 的材质引用纹理但缺少 TEXCOORD_0"
                 ));
             }
             for (vertex_index, vertex) in primitive.vertices.iter().enumerate() {
@@ -346,9 +433,13 @@ mod tests {
     #[test]
     fn scene_validation_rejects_out_of_range_texture_reference() {
         let mut scene = SceneAsset::cornell_box();
-        scene.materials[0].base_color_texture = Some(0);
+        scene.materials[0].base_color_texture = Some(TextureBindingAsset {
+            image_index: 0,
+            sampler_index: 0,
+            texcoord_set: 0,
+        });
         let error = scene.validate().unwrap_err();
-        assert!(error.contains("base_color texture 0 越界"));
+        assert!(error.contains("base_color image 0 越界"));
     }
 
     #[test]
@@ -369,5 +460,49 @@ mod tests {
             }]
         );
         destination.validate().unwrap();
+    }
+
+    #[test]
+    fn scene_validation_rejects_nonzero_texcoord_set() {
+        let mut scene = SceneAsset::cornell_box();
+        scene.images.push(ImageAsset {
+            name: "test".to_string(),
+            width: 1,
+            height: 1,
+            rgba8: vec![255; 4],
+        });
+        scene.materials[0].base_color_texture = Some(TextureBindingAsset {
+            image_index: 0,
+            sampler_index: 0,
+            texcoord_set: 1,
+        });
+        let error = scene.validate().unwrap_err();
+        assert!(error.contains("texCoord 1"));
+    }
+
+    #[test]
+    fn scene_validation_rejects_textured_primitive_without_uv0() {
+        let mut scene = SceneAsset::cornell_box();
+        scene.images.push(ImageAsset {
+            name: "test".to_string(),
+            width: 1,
+            height: 1,
+            rgba8: vec![255; 4],
+        });
+        scene.primitives[0].has_texcoord0 = false;
+        scene.materials[0].base_color_texture = Some(TextureBindingAsset {
+            image_index: 0,
+            sampler_index: 0,
+            texcoord_set: 0,
+        });
+        let error = scene.validate().unwrap_err();
+        assert!(error.contains("缺少 TEXCOORD_0"));
+    }
+
+    #[test]
+    fn factor_only_primitive_without_uv0_remains_valid() {
+        let mut scene = SceneAsset::cornell_box();
+        scene.primitives[0].has_texcoord0 = false;
+        scene.validate().unwrap();
     }
 }

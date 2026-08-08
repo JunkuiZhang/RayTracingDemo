@@ -12,8 +12,8 @@ use gltf::{
 };
 
 use super::{
-    ImageAsset, MaterialAsset, MaterialKind, MeshPrimitive, RigidAnimationGroup, SceneAsset,
-    SceneInstance, VertexAsset,
+    FilterMode, ImageAsset, MaterialAsset, MaterialKind, MeshPrimitive, RigidAnimationGroup,
+    SamplerKey, SceneAsset, SceneInstance, TextureBindingAsset, VertexAsset, WrapMode,
 };
 
 const MAX_VERTICES: usize = 4_000_000;
@@ -23,6 +23,7 @@ const MAX_IMAGE_BYTES: usize = 512 * 1024 * 1024;
 
 struct ImportState<'a> {
     buffers: &'a [gltf::buffer::Data],
+    materials: &'a [MaterialAsset],
     path: &'a Path,
     default_material: usize,
     primitive_map: HashMap<(usize, usize), usize>,
@@ -112,7 +113,8 @@ pub fn load(path: impl AsRef<Path>) -> Result<SceneAsset, GltfLoadError> {
         }
     }
 
-    let mut materials = load_materials(&document, path)?;
+    let mut samplers = vec![SamplerKey::default()];
+    let mut materials = load_materials(&document, path, &mut samplers)?;
     let default_material = materials.len();
     materials.push(MaterialAsset::opaque("glTF default material", [1.0; 4]));
     let images = load_images(&imported_images, path)?;
@@ -123,6 +125,7 @@ pub fn load(path: impl AsRef<Path>) -> Result<SceneAsset, GltfLoadError> {
 
     let mut state = ImportState {
         buffers: &buffers,
+        materials: &materials,
         path,
         default_material,
         primitive_map: HashMap::new(),
@@ -182,6 +185,7 @@ pub fn load(path: impl AsRef<Path>) -> Result<SceneAsset, GltfLoadError> {
         primitives,
         materials,
         images,
+        samplers,
         instances,
         rigid_animation_groups: vec![RigidAnimationGroup {
             instance_indices: animated_instance_indices,
@@ -197,6 +201,7 @@ pub fn load(path: impl AsRef<Path>) -> Result<SceneAsset, GltfLoadError> {
 fn load_materials(
     document: &gltf::Document,
     path: &Path,
+    samplers: &mut Vec<SamplerKey>,
 ) -> Result<Vec<MaterialAsset>, GltfLoadError> {
     let mut materials = Vec::new();
     for material in document.materials() {
@@ -212,33 +217,137 @@ fn load_materials(
             ));
         }
         let pbr = material.pbr_metallic_roughness();
-        let normal_texture = material.normal_texture();
+        let normal_texture_info = material.normal_texture();
+        let normal_scale = normal_texture_info
+            .as_ref()
+            .map_or(1.0, gltf::material::NormalTexture::scale);
+        let material_index = material.index().unwrap_or(0);
+        let base_color_texture = pbr
+            .base_color_texture()
+            .map(|info| texture_binding(info, samplers, path, material_index, "base_color"))
+            .transpose()?;
+        let metallic_roughness_texture = pbr
+            .metallic_roughness_texture()
+            .map(|info| texture_binding(info, samplers, path, material_index, "metallic_roughness"))
+            .transpose()?;
+        let normal_texture = normal_texture_info
+            .as_ref()
+            .map(|info| {
+                texture_binding_with_texcoord(
+                    info.texture(),
+                    info.tex_coord(),
+                    samplers,
+                    path,
+                    material_index,
+                    "normal",
+                )
+            })
+            .transpose()?;
+        let emissive_texture = material
+            .emissive_texture()
+            .map(|info| texture_binding(info, samplers, path, material_index, "emissive"))
+            .transpose()?;
         let asset = MaterialAsset {
             name: material.name().unwrap_or("glTF material").to_string(),
             base_color_factor: pbr.base_color_factor(),
             metallic_factor: pbr.metallic_factor(),
             roughness_factor: pbr.roughness_factor(),
-            normal_scale: normal_texture
-                .as_ref()
-                .map_or(1.0, gltf::material::NormalTexture::scale),
+            normal_scale,
             emissive_factor: material.emissive_factor(),
             ior: 1.5,
             kind: MaterialKind::Opaque,
             double_sided: material.double_sided(),
-            base_color_texture: pbr
-                .base_color_texture()
-                .map(|info| info.texture().source().index()),
-            metallic_roughness_texture: pbr
-                .metallic_roughness_texture()
-                .map(|info| info.texture().source().index()),
-            normal_texture: normal_texture.map(|info| info.texture().source().index()),
-            emissive_texture: material
-                .emissive_texture()
-                .map(|info| info.texture().source().index()),
+            base_color_texture,
+            metallic_roughness_texture,
+            normal_texture,
+            emissive_texture,
         };
         materials.push(asset);
     }
     Ok(materials)
+}
+
+fn texture_binding(
+    info: gltf::texture::Info<'_>,
+    samplers: &mut Vec<SamplerKey>,
+    path: &Path,
+    material_index: usize,
+    role: &str,
+) -> Result<TextureBindingAsset, GltfLoadError> {
+    texture_binding_with_texcoord(
+        info.texture(),
+        info.tex_coord(),
+        samplers,
+        path,
+        material_index,
+        role,
+    )
+}
+
+fn texture_binding_with_texcoord(
+    texture: gltf::texture::Texture<'_>,
+    texcoord_set: u32,
+    samplers: &mut Vec<SamplerKey>,
+    path: &Path,
+    material_index: usize,
+    role: &str,
+) -> Result<TextureBindingAsset, GltfLoadError> {
+    if texcoord_set != 0 {
+        return Err(GltfLoadError::new(
+            path,
+            format!(
+                "材质 {material_index} 的 {role} texture 使用不支持的 texCoord {texcoord_set}，本阶段只支持 TEXCOORD_0"
+            ),
+        ));
+    }
+    let sampler = sampler_key(texture.sampler());
+    let sampler_index = if let Some(index) = samplers.iter().position(|key| *key == sampler) {
+        index
+    } else {
+        if samplers.len() >= super::MAX_SCENE_SAMPLERS {
+            return Err(GltfLoadError::new(
+                path,
+                format!(
+                    "材质 {material_index} 的 {role} 需要超过 {} 个 sampler descriptor",
+                    super::MAX_SCENE_SAMPLERS
+                ),
+            ));
+        }
+        samplers.push(sampler);
+        samplers.len() - 1
+    };
+    Ok(TextureBindingAsset {
+        image_index: texture.source().index(),
+        sampler_index,
+        texcoord_set,
+    })
+}
+
+fn sampler_key(sampler: gltf::texture::Sampler<'_>) -> SamplerKey {
+    let min_filter = match sampler.min_filter() {
+        Some(gltf::texture::MinFilter::Nearest)
+        | Some(gltf::texture::MinFilter::NearestMipmapNearest)
+        | Some(gltf::texture::MinFilter::NearestMipmapLinear) => FilterMode::Nearest,
+        Some(gltf::texture::MinFilter::Linear)
+        | Some(gltf::texture::MinFilter::LinearMipmapNearest)
+        | Some(gltf::texture::MinFilter::LinearMipmapLinear)
+        | None => FilterMode::Linear,
+    };
+    let mag_filter = match sampler.mag_filter() {
+        Some(gltf::texture::MagFilter::Nearest) => FilterMode::Nearest,
+        Some(gltf::texture::MagFilter::Linear) | None => FilterMode::Linear,
+    };
+    let wrap = |mode| match mode {
+        gltf::texture::WrappingMode::ClampToEdge => WrapMode::Clamp,
+        gltf::texture::WrappingMode::MirroredRepeat => WrapMode::Mirror,
+        gltf::texture::WrappingMode::Repeat => WrapMode::Repeat,
+    };
+    SamplerKey {
+        min_filter,
+        mag_filter,
+        wrap_u: wrap(sampler.wrap_s()),
+        wrap_v: wrap(sampler.wrap_t()),
+    }
 }
 
 fn load_images(
@@ -381,6 +490,13 @@ fn visit_node(
                     material_index,
                     state.path,
                     mesh.index(),
+                )?;
+                validate_texture_uvs(
+                    &value,
+                    &state.materials[material_index],
+                    state.path,
+                    mesh.index(),
+                    primitive.index(),
                 )?;
                 let index = state.primitives.len();
                 state.primitive_map.insert(key, index);
@@ -548,7 +664,36 @@ fn read_primitive(
         vertices,
         indices,
         material_index,
+        has_texcoord0: has_texcoords,
     })
+}
+
+fn validate_texture_uvs(
+    primitive: &MeshPrimitive,
+    material: &MaterialAsset,
+    path: &Path,
+    mesh_index: usize,
+    primitive_index: usize,
+) -> Result<(), GltfLoadError> {
+    if primitive.has_texcoord0 {
+        return Ok(());
+    }
+    let Some((role, _)) = [
+        ("base_color", material.base_color_texture),
+        ("metallic_roughness", material.metallic_roughness_texture),
+        ("normal", material.normal_texture),
+        ("emissive", material.emissive_texture),
+    ]
+    .into_iter()
+    .find(|(_, binding)| binding.is_some()) else {
+        return Ok(());
+    };
+    Err(GltfLoadError::new(
+        path,
+        format!(
+            "mesh {mesh_index} primitive {primitive_index} 的材质 {role} 引用纹理但缺少 TEXCOORD_0"
+        ),
+    ))
 }
 
 fn generate_normals(

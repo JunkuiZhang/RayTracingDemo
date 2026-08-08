@@ -5,7 +5,7 @@ use windows::{
     core::{PCWSTR, Result},
 };
 
-use crate::scene::{ImageAsset, MaterialAsset};
+use crate::scene::{ImageAsset, MaterialAsset, TextureBindingAsset};
 
 /// t5 的 bindless 纹理数组预留的描述符数量。
 pub const MAX_TEXTURE_VIEWS: usize = 128;
@@ -93,17 +93,17 @@ impl TextureSet {
     }
 
     fn ensure_material_views(&mut self, material: &MaterialAsset) -> Result<()> {
-        if let Some(image) = material.base_color_texture {
-            self.ensure_image_view(image, true)?;
+        if let Some(binding) = material.base_color_texture {
+            self.ensure_image_view(binding.image_index, true)?;
         }
-        if let Some(image) = material.metallic_roughness_texture {
-            self.ensure_image_view(image, false)?;
+        if let Some(binding) = material.metallic_roughness_texture {
+            self.ensure_image_view(binding.image_index, false)?;
         }
-        if let Some(image) = material.normal_texture {
-            self.ensure_image_view(image, false)?;
+        if let Some(binding) = material.normal_texture {
+            self.ensure_image_view(binding.image_index, false)?;
         }
-        if let Some(image) = material.emissive_texture {
-            self.ensure_image_view(image, true)?;
+        if let Some(binding) = material.emissive_texture {
+            self.ensure_image_view(binding.image_index, true)?;
         }
         Ok(())
     }
@@ -155,12 +155,17 @@ impl TextureSet {
         ]
     }
 
-    fn lookup_or_fallback(&self, image_index: Option<usize>, srgb: bool, fallback: usize) -> u32 {
-        image_index
-            .and_then(|image_index| {
+    fn lookup_or_fallback(
+        &self,
+        binding: Option<TextureBindingAsset>,
+        srgb: bool,
+        fallback: usize,
+    ) -> u32 {
+        binding
+            .and_then(|binding| {
                 self.lookup
                     .get(&TextureView {
-                        image_index: image_index + FALLBACK_COUNT,
+                        image_index: binding.image_index + FALLBACK_COUNT,
                         srgb,
                     })
                     .copied()

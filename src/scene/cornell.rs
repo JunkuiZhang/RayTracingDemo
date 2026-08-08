@@ -1,6 +1,8 @@
 use glam::Mat4;
 
-use super::{MaterialAsset, MaterialKind, MeshPrimitive, SceneAsset, SceneInstance, VertexAsset};
+use super::{
+    MaterialAsset, MaterialKind, MeshPrimitive, SamplerKey, SceneAsset, SceneInstance, VertexAsset,
+};
 
 pub fn create() -> SceneAsset {
     let materials = vec![
@@ -73,6 +75,7 @@ pub fn create() -> SceneAsset {
                     .collect(),
                 indices: vec![0, 1, 2, 0, 2, 3],
                 material_index,
+                has_texcoord0: true,
             });
             let matrix = Mat4::IDENTITY;
             instances.push(SceneInstance {
@@ -171,6 +174,7 @@ pub fn create() -> SceneAsset {
         primitives,
         materials,
         images: Vec::new(),
+        samplers: vec![SamplerKey::default()],
         instances,
         rigid_animation_groups: Vec::new(),
     }
