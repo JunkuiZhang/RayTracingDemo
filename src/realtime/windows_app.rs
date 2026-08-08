@@ -237,8 +237,7 @@ impl ApplicationHandler for RealtimeApplication {
                         PhysicalKey::Code(KeyCode::F1) => renderer.cycle_debug_view(),
                         PhysicalKey::Code(KeyCode::F2) => {
                             if let Err(error) = renderer.cycle_render_scale() {
-                                return self
-                                    .fail(event_loop, format!("切换固定 render scale：{error}"));
+                                self.fail(event_loop, format!("切换固定 render scale：{error}"));
                             }
                         }
                         _ => {}
