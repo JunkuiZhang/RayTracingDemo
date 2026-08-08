@@ -26,6 +26,10 @@ fn main() {
     for (source, _, _) in shaders {
         println!("cargo:rerun-if-changed={source}");
     }
+    // Shared .hlsli files are dependencies of every DXIL entry point. Watching
+    // the directory keeps build-time shader recompilation in sync with the
+    // debug runtime hot-reload path.
+    println!("cargo:rerun-if-changed=shaders");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
@@ -40,7 +44,7 @@ fn main() {
 
 fn compile_shader(dxc: &Path, source: &str, output: &Path, target: &str) {
     let mut command = Command::new(dxc);
-    command.args([source, "-T", target, "-HV", "2021", "-Fo"]);
+    command.args([source, "-I", "shaders", "-T", target, "-HV", "2021", "-Fo"]);
     command.arg(output);
     if env::var("PROFILE").as_deref() == Ok("release") {
         command.arg("-O3");

@@ -28,6 +28,7 @@ use self::{
     profiler::{GpuPass, GpuProfiler},
     resource::TrackedResource,
     shader::{ReloadedShaders, ShaderReloader},
+    texture::{DXR_UAV_BASE, TextureSet},
 };
 use raytracing::{AccelerationStructures, RaytracingPipeline, SceneGeometry};
 
@@ -37,20 +38,21 @@ pub(crate) mod profiler;
 mod raytracing;
 mod resource;
 mod shader;
+mod texture;
 
 const FRAME_COUNT: usize = 3;
-const SHADER_DESCRIPTOR_COUNT: usize = 160;
+const SHADER_DESCRIPTOR_COUNT: usize = 320;
 const STAGE3_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage3_triangle.dxil"));
 const TEMPORAL_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage6_temporal.dxil"));
 const ATROUS_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage6_atrous.dxil"));
 const TONEMAP_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage6_tonemap.dxil"));
 
 const DXR_TABLE_BASE: usize = 0;
-const TEMPORAL_TABLE_BASES: [usize; 2] = [16, 44];
-const ATROUS_HISTORY_TABLE_BASES: [usize; 2] = [72, 82];
-const ATROUS_PING_TO_PONG_BASES: [usize; 2] = [92, 102];
-const ATROUS_PONG_TO_PING_BASES: [usize; 2] = [112, 122];
-const TONEMAP_TABLE_BASES: [usize; 2] = [132, 146];
+const TEMPORAL_TABLE_BASES: [usize; 2] = [144, 176];
+const ATROUS_HISTORY_TABLE_BASES: [usize; 2] = [208, 220];
+const ATROUS_PING_TO_PONG_BASES: [usize; 2] = [232, 244];
+const ATROUS_PONG_TO_PING_BASES: [usize; 2] = [256, 268];
+const TONEMAP_TABLE_BASES: [usize; 2] = [280, 296];
 
 struct FrameContext {
     allocator: ID3D12CommandAllocator,
@@ -129,6 +131,7 @@ pub struct Dx12Renderer {
     gpu_profiler: GpuProfiler,
     shader_status: String,
     raytracing_status: String,
+    _textures: TextureSet,
     _scene_geometry: SceneGeometry,
     _acceleration_structures: AccelerationStructures,
     raytracing_pipeline: RaytracingPipeline,
@@ -263,8 +266,12 @@ impl Dx12Renderer {
                     "--animate-model 需要同时提供 --model <path>",
                 ));
             }
-            let mut scene_geometry = SceneGeometry::new(&device, &command_list, &scene)
-                .map_err(|error| dx_error("创建场景网格", error))?;
+            let mut texture_set =
+                TextureSet::new(&device, &command_list, &scene.images, &scene.materials)
+                    .map_err(|error| dx_error("创建 glTF 纹理资源", error))?;
+            let mut scene_geometry =
+                SceneGeometry::new(&device, &command_list, &scene, &texture_set)
+                    .map_err(|error| dx_error("创建场景网格", error))?;
             let mut acceleration_structures =
                 AccelerationStructures::build(&device, &command_list, &scene_geometry)
                     .map_err(|error| dx_error("构建 DXR 加速结构", error))?;
@@ -303,6 +310,7 @@ impl Dx12Renderer {
                 scene_geometry.material_count(),
                 64,
             );
+            texture_set.write_srvs(&device, &shader_heap);
             let raytracing_pipeline = RaytracingPipeline::new(&device, STAGE3_SHADER)
                 .map_err(|error| dx_error("创建 DXR State Object", error))?;
             let temporal_pipeline =
@@ -324,6 +332,7 @@ impl Dx12Renderer {
             fence.SetEventOnCompletion(1, fence_event)?;
             WaitForSingleObject(fence_event, INFINITE);
             scene_geometry.release_uploads();
+            texture_set.release_uploads();
             acceleration_structures.release_build_resources();
             let mut renderer = Self {
                 device,
@@ -358,6 +367,7 @@ impl Dx12Renderer {
                         / 1024
                 ),
                 raytracing_status,
+                _textures: texture_set,
                 _scene_geometry: scene_geometry,
                 _acceleration_structures: acceleration_structures,
                 raytracing_pipeline,
@@ -894,6 +904,9 @@ impl Dx12Renderer {
     }
 
     unsafe fn create_shader_views(&self) {
+        unsafe {
+            self._textures.write_srvs(&self.device, &self.shader_heap);
+        }
         let raw_diffuse = self.raw_diffuse.as_ref().unwrap();
         let raw_specular = self.raw_specular.as_ref().unwrap();
         let albedo = self.gbuffer_albedo.as_ref().unwrap();
@@ -922,7 +935,14 @@ impl Dx12Renderer {
             hit_distance,
         ];
         for (offset, resource) in dxr_uavs.into_iter().enumerate() {
-            unsafe { create_texture_uav(&self.device, &self.shader_heap, 4 + offset, resource) };
+            unsafe {
+                create_texture_uav(
+                    &self.device,
+                    &self.shader_heap,
+                    DXR_UAV_BASE + offset,
+                    resource,
+                )
+            };
         }
 
         for current_index in 0..2 {
@@ -1398,7 +1418,7 @@ mod tests {
 
     #[test]
     fn descriptor_tables_do_not_overlap_and_fit_the_heap() {
-        let mut ranges = vec![(DXR_TABLE_BASE, DXR_TABLE_BASE + 13)];
+        let mut ranges = vec![(DXR_TABLE_BASE, DXR_UAV_BASE + 9)];
         for base in TEMPORAL_TABLE_BASES {
             ranges.push((base, base + 28));
         }
@@ -1419,6 +1439,6 @@ mod tests {
         for pair in ranges.windows(2) {
             assert!(pair[0].1 <= pair[1].0, "descriptor tables overlap");
         }
-        assert_eq!(ranges.last().unwrap().1, SHADER_DESCRIPTOR_COUNT);
+        assert!(ranges.last().unwrap().1 <= SHADER_DESCRIPTOR_COUNT);
     }
 }

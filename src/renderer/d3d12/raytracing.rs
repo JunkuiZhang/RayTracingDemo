@@ -15,6 +15,8 @@ use crate::scene::{
     MATERIAL_FLAG_LEGACY_DIELECTRIC, MaterialKind, SceneAsset,
 };
 
+use super::texture::TextureSet;
+
 #[derive(Clone, Copy)]
 struct PrimitiveRange {
     vertex_offset: u32,
@@ -101,6 +103,7 @@ impl SceneGeometry {
         device: &ID3D12Device,
         command_list: &ID3D12GraphicsCommandList,
         scene: &SceneAsset,
+        textures: &TextureSet,
     ) -> Result<Self> {
         scene.validate().map_err(|error| {
             windows::core::Error::new(
@@ -128,7 +131,11 @@ impl SceneGeometry {
                 index_count: primitive.indices.len() as u32,
             });
         }
-        let materials = scene.materials.iter().map(gpu_material).collect::<Vec<_>>();
+        let materials = scene
+            .materials
+            .iter()
+            .map(|material| gpu_material(material, textures))
+            .collect::<Vec<_>>();
         let instances = scene
             .instances
             .iter()
@@ -317,7 +324,7 @@ fn matrix_rows(matrix: glam::Mat4) -> [[f32; 4]; 4] {
     ]
 }
 
-fn gpu_material(material: &crate::scene::MaterialAsset) -> GpuMaterial {
+fn gpu_material(material: &crate::scene::MaterialAsset, textures: &TextureSet) -> GpuMaterial {
     let mut flags = 0;
     if material.double_sided {
         flags |= MATERIAL_FLAG_DOUBLE_SIDED;
@@ -325,6 +332,8 @@ fn gpu_material(material: &crate::scene::MaterialAsset) -> GpuMaterial {
     if material.kind == MaterialKind::LegacyDielectric {
         flags |= MATERIAL_FLAG_LEGACY_DIELECTRIC;
     }
+    let [base_color, metallic_roughness, normal, emissive] =
+        textures.material_texture_indices(material);
     GpuMaterial {
         base_color_factor: material.base_color_factor,
         emissive_factor: material.emissive_factor,
@@ -333,10 +342,10 @@ fn gpu_material(material: &crate::scene::MaterialAsset) -> GpuMaterial {
         normal_scale: material.normal_scale,
         ior: material.ior,
         flags,
-        base_color_texture_and_sampler: 0,
-        metallic_roughness_texture_and_sampler: 0,
-        normal_texture_and_sampler: 0,
-        emissive_texture_and_sampler: 0,
+        base_color_texture_and_sampler: base_color,
+        metallic_roughness_texture_and_sampler: metallic_roughness,
+        normal_texture_and_sampler: normal,
+        emissive_texture_and_sampler: emissive,
     }
 }
 
@@ -806,11 +815,18 @@ fn create_raytracing_root_signature(device: &ID3D12Device) -> Result<ID3D12RootS
             OffsetInDescriptorsFromTableStart: 0,
         },
         D3D12_DESCRIPTOR_RANGE {
+            RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
+            NumDescriptors: super::texture::MAX_TEXTURE_VIEWS as u32,
+            BaseShaderRegister: 5,
+            RegisterSpace: 0,
+            OffsetInDescriptorsFromTableStart: super::texture::DXR_TEXTURE_BASE as u32,
+        },
+        D3D12_DESCRIPTOR_RANGE {
             RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
             NumDescriptors: 9,
             BaseShaderRegister: 0,
             RegisterSpace: 0,
-            OffsetInDescriptorsFromTableStart: 4,
+            OffsetInDescriptorsFromTableStart: super::texture::DXR_UAV_BASE as u32,
         },
     ];
     let parameters = [
@@ -846,11 +862,26 @@ fn create_raytracing_root_signature(device: &ID3D12Device) -> Result<ID3D12RootS
             ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
         },
     ];
+    let static_samplers = [D3D12_STATIC_SAMPLER_DESC {
+        Filter: D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+        AddressU: D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+        AddressV: D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+        AddressW: D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+        MipLODBias: 0.0,
+        MaxAnisotropy: 1,
+        ComparisonFunc: D3D12_COMPARISON_FUNC_NEVER,
+        BorderColor: D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE,
+        MinLOD: 0.0,
+        MaxLOD: f32::MAX,
+        ShaderRegister: 0,
+        RegisterSpace: 0,
+        ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+    }];
     let description = D3D12_ROOT_SIGNATURE_DESC {
         NumParameters: parameters.len() as u32,
         pParameters: parameters.as_ptr(),
-        NumStaticSamplers: 0,
-        pStaticSamplers: std::ptr::null(),
+        NumStaticSamplers: static_samplers.len() as u32,
+        pStaticSamplers: static_samplers.as_ptr(),
         Flags: D3D12_ROOT_SIGNATURE_FLAG_NONE,
     };
     let mut serialized: Option<ID3DBlob> = None;
