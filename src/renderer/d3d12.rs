@@ -18,7 +18,7 @@ use winit::{
 };
 
 use crate::{
-    realtime::RealtimeConfig,
+    realtime::{AtrousMode, RealtimeConfig},
     scene::{MAX_SCENE_SAMPLERS, SceneAsset, gltf_loader},
 };
 
@@ -48,6 +48,8 @@ const SHADER_DESCRIPTOR_COUNT: usize = 320;
 const STAGE3_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage3_triangle.dxil"));
 const TEMPORAL_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage6_temporal.dxil"));
 const ATROUS_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage6_atrous.dxil"));
+const ATROUS_SHARED_SHADER: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/stage8_atrous_shared.dxil"));
 const TONEMAP_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage6_tonemap.dxil"));
 
 const DXR_TABLE_BASE: usize = 0;
@@ -144,7 +146,8 @@ pub struct Dx12Renderer {
     _acceleration_structures: AccelerationStructures,
     raytracing_pipeline: RaytracingPipeline,
     temporal_pipeline: ComputePipeline,
-    atrous_pipeline: ComputePipeline,
+    atrous_baseline_pipeline: ComputePipeline,
+    atrous_shared_pipeline: ComputePipeline,
     tonemap_pipeline: ComputePipeline,
     shader_reloader: ShaderReloader,
     frames: Vec<FrameContext>,
@@ -167,6 +170,7 @@ pub struct Dx12Renderer {
     previous_camera_yaw: f32,
     previous_camera_pitch: f32,
     animate_model: bool,
+    atrous_mode: AtrousMode,
     animation_start: Instant,
     history_reset_count: u64,
     render_extent_change_count: u64,
@@ -343,9 +347,18 @@ impl Dx12Renderer {
             let temporal_pipeline =
                 ComputePipeline::new(&device, TEMPORAL_SHADER, 18, 10, 1, "阶段 6 时域重投影")
                     .map_err(|error| dx_error("创建时域重投影管线", error))?;
-            let atrous_pipeline =
-                ComputePipeline::new(&device, ATROUS_SHADER, 8, 2, 2, "阶段 6 À-Trous")
-                    .map_err(|error| dx_error("创建 À-Trous 管线", error))?;
+            let atrous_baseline_pipeline =
+                ComputePipeline::new(&device, ATROUS_SHADER, 8, 2, 2, "阶段 8 À-Trous Baseline")
+                    .map_err(|error| dx_error("创建 À-Trous baseline 管线", error))?;
+            let atrous_shared_pipeline = ComputePipeline::new(
+                &device,
+                ATROUS_SHARED_SHADER,
+                8,
+                2,
+                2,
+                "阶段 8 À-Trous Shared 1/2",
+            )
+            .map_err(|error| dx_error("创建 À-Trous shared 管线", error))?;
             let tonemap_pipeline =
                 ComputePipeline::new(&device, TONEMAP_SHADER, 13, 1, 2, "Tone Map 与调试视图")
                     .map_err(|error| dx_error("创建 Tone Map 管线", error))?;
@@ -393,6 +406,7 @@ impl Dx12Renderer {
                     (STAGE3_SHADER.len()
                         + TEMPORAL_SHADER.len()
                         + ATROUS_SHADER.len()
+                        + ATROUS_SHARED_SHADER.len()
                         + TONEMAP_SHADER.len())
                         / 1024
                 ),
@@ -403,7 +417,8 @@ impl Dx12Renderer {
                 _acceleration_structures: acceleration_structures,
                 raytracing_pipeline,
                 temporal_pipeline,
-                atrous_pipeline,
+                atrous_baseline_pipeline,
+                atrous_shared_pipeline,
                 tonemap_pipeline,
                 shader_reloader: ShaderReloader::new(),
                 frames,
@@ -426,6 +441,7 @@ impl Dx12Renderer {
                 previous_camera_yaw: 0.0,
                 previous_camera_pitch: 0.0,
                 animate_model: config.animate_model,
+                atrous_mode: config.atrous_mode,
                 animation_start: Instant::now(),
                 history_reset_count: 1,
                 render_extent_change_count: 0,
@@ -607,7 +623,7 @@ impl Dx12Renderer {
                 .as_mut()
                 .unwrap()
                 .transition(&self.command_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            self.atrous_pipeline.bind(
+            self.atrous_pipeline_for_step(1).bind(
                 &self.command_list,
                 self.shader_heap
                     .gpu_handle(ATROUS_HISTORY_TABLE_BASES[current_history]),
@@ -638,7 +654,7 @@ impl Dx12Renderer {
                 .as_mut()
                 .unwrap()
                 .transition(&self.command_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            self.atrous_pipeline.bind(
+            self.atrous_pipeline_for_step(2).bind(
                 &self.command_list,
                 self.shader_heap
                     .gpu_handle(ATROUS_PING_TO_PONG_BASES[current_history]),
@@ -669,7 +685,7 @@ impl Dx12Renderer {
                 .as_mut()
                 .unwrap()
                 .transition(&self.command_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            self.atrous_pipeline.bind(
+            self.atrous_pipeline_for_step(4).bind(
                 &self.command_list,
                 self.shader_heap
                     .gpu_handle(ATROUS_PONG_TO_PING_BASES[current_history]),
@@ -700,7 +716,7 @@ impl Dx12Renderer {
                 .as_mut()
                 .unwrap()
                 .transition(&self.command_list, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            self.atrous_pipeline.bind(
+            self.atrous_pipeline_for_step(8).bind(
                 &self.command_list,
                 self.shader_heap
                     .gpu_handle(ATROUS_PING_TO_PONG_BASES[current_history]),
@@ -865,6 +881,18 @@ impl Dx12Renderer {
         self.gpu_profiler.time_ms(pass)
     }
 
+    pub fn atrous_mode_name(&self) -> &'static str {
+        self.atrous_mode.as_str()
+    }
+
+    fn atrous_pipeline_for_step(&self, step_width: u32) -> &ComputePipeline {
+        if uses_shared_atrous(self.atrous_mode, step_width) {
+            &self.atrous_shared_pipeline
+        } else {
+            &self.atrous_baseline_pipeline
+        }
+    }
+
     pub fn valid_timing_sample_serial(&self) -> u64 {
         self.gpu_profiler.valid_sample_serial()
     }
@@ -925,11 +953,16 @@ impl Dx12Renderer {
                 render_extent_change_count: self
                     .render_extent_change_count
                     .saturating_sub(self.benchmark_extent_change_baseline),
+                atrous_mode: self.atrous_mode.as_str(),
             },
             self.gpu_profiler.benchmark_statistics(),
             self.video_memory_snapshot(),
         )
     }
+}
+
+fn uses_shared_atrous(mode: AtrousMode, step_width: u32) -> bool {
+    mode == AtrousMode::Shared && matches!(step_width, 1 | 2)
 }
 
 struct BenchmarkJsonContext<'a> {
@@ -941,6 +974,7 @@ struct BenchmarkJsonContext<'a> {
     pix_events_available: bool,
     history_reset_count: u64,
     render_extent_change_count: u64,
+    atrous_mode: &'a str,
 }
 
 fn benchmark_json_line(
@@ -957,6 +991,7 @@ fn benchmark_json_line(
         pix_events_available,
         history_reset_count,
         render_extent_change_count,
+        atrous_mode,
     } = context;
     let status = match memory.status {
         VideoMemoryStatus::Available => "available",
@@ -975,6 +1010,7 @@ fn benchmark_json_line(
         "render_max_width": width,
         "render_max_height": height,
         "resolution_mode": "fixed",
+        "atrous_mode": atrous_mode,
         "benchmark_seconds": duration_seconds,
         "warmup_valid_frames": warmup_valid_frames,
         "valid_samples": report.pass(GpuPass::Total).valid_samples,
@@ -1397,8 +1433,22 @@ impl Dx12Renderer {
             1,
             "阶段 6 时域重投影",
         )?;
-        let atrous =
-            ComputePipeline::new(&self.device, &shaders.atrous, 8, 2, 2, "阶段 6 À-Trous")?;
+        let atrous_baseline = ComputePipeline::new(
+            &self.device,
+            &shaders.atrous,
+            8,
+            2,
+            2,
+            "阶段 8 À-Trous Baseline",
+        )?;
+        let atrous_shared = ComputePipeline::new(
+            &self.device,
+            &shaders.atrous_shared,
+            8,
+            2,
+            2,
+            "阶段 8 À-Trous Shared 1/2",
+        )?;
         let tonemap = ComputePipeline::new(
             &self.device,
             &shaders.tonemap,
@@ -1409,7 +1459,8 @@ impl Dx12Renderer {
         )?;
         self.raytracing_pipeline = raytracing;
         self.temporal_pipeline = temporal;
-        self.atrous_pipeline = atrous;
+        self.atrous_baseline_pipeline = atrous_baseline;
+        self.atrous_shared_pipeline = atrous_shared;
         self.tonemap_pipeline = tonemap;
         self.request_history_reset();
         self.accumulated_frames = 0;
@@ -1828,6 +1879,7 @@ mod tests {
                 pix_events_available: true,
                 history_reset_count: 2,
                 render_extent_change_count: 1,
+                atrous_mode: "shared",
             },
             report,
             memory,
@@ -1837,6 +1889,7 @@ mod tests {
         assert_eq!(value["schema_version"], 1);
         assert_eq!(value["gpu_name"], "RTX 4060 \"Laptop\"");
         assert_eq!(value["resolution_mode"], "fixed");
+        assert_eq!(value["atrous_mode"], "shared");
         assert_eq!(value["render_min_width"], 1280);
         assert_eq!(value["render_max_height"], 720);
         assert_eq!(value["history_reset_count"], 2);
@@ -1846,5 +1899,15 @@ mod tests {
         assert_eq!(value["passes"]["tone_map"]["valid_samples"], 240);
         assert_eq!(value["memory"]["usage_bytes"], 512);
         assert_eq!(value["memory"]["usage_ratio"], 0.5);
+    }
+
+    #[test]
+    fn shared_atrous_is_limited_to_the_small_step_iterations() {
+        assert!(!uses_shared_atrous(AtrousMode::Baseline, 1));
+        assert!(uses_shared_atrous(AtrousMode::Shared, 1));
+        assert!(uses_shared_atrous(AtrousMode::Shared, 2));
+        assert!(!uses_shared_atrous(AtrousMode::Shared, 4));
+        assert!(!uses_shared_atrous(AtrousMode::Shared, 8));
+        assert!(!uses_shared_atrous(AtrousMode::Shared, 0));
     }
 }

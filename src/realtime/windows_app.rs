@@ -92,11 +92,12 @@ impl ApplicationHandler for RealtimeApplication {
             return;
         }
 
+        let output_size = self.config.output_size.unwrap_or((1280, 720));
         let attributes = Window::default_attributes()
             .with_title("RayTracingDemo - DX12 阶段 8")
             // 这里故意使用物理像素。若使用 LogicalSize，200% DPI 会把默认
             // DX12 工作尺寸隐式放大为 2560x1440，Debug Validation 成本也随之变成约 4 倍。
-            .with_inner_size(PhysicalSize::new(1280, 720))
+            .with_inner_size(PhysicalSize::new(output_size.0, output_size.1))
             .with_min_inner_size(PhysicalSize::new(320, 180));
         let window = match event_loop.create_window(attributes) {
             Ok(window) => window,
@@ -183,7 +184,7 @@ impl ApplicationHandler for RealtimeApplication {
                     if elapsed >= Duration::from_millis(500) {
                         let fps = self.frames_since_stats as f64 / elapsed.as_secs_f64();
                         window.set_title(&format!(
-                            "RayTracingDemo - 阶段 8 | FPS {:.0} | GPU {:.2} ms (p95 {:.2}) | 输出 {}x{} | VRAM {} | AS {:.2} PT {:.2} T {:.2} A {:.2} | SPP {} | 视图 {} | {} | {}",
+                            "RayTracingDemo - 阶段 8 | FPS {:.0} | GPU {:.2} ms (p95 {:.2}) | 输出 {}x{} | VRAM {} | AS {:.2} PT {:.2} T {:.2} A {:.2} ({}) | SPP {} | 视图 {} | {} | {}",
                             fps,
                             renderer.gpu_time_ms(),
                             renderer.gpu_time_p95_ms(),
@@ -194,6 +195,7 @@ impl ApplicationHandler for RealtimeApplication {
                             renderer.gpu_pass_time_ms(GpuPass::PathTrace),
                             renderer.gpu_pass_time_ms(GpuPass::Temporal),
                             renderer.gpu_pass_time_ms(GpuPass::Atrous),
+                            renderer.atrous_mode_name(),
                             renderer.sample_count(),
                             renderer.debug_view_name(),
                             renderer.raytracing_status(),

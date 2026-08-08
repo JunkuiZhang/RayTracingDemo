@@ -5,6 +5,24 @@ pub struct RealtimeConfig {
     pub model_path: Option<PathBuf>,
     pub animate_model: bool,
     pub benchmark_seconds: Option<u32>,
+    pub atrous_mode: AtrousMode,
+    pub output_size: Option<(u32, u32)>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AtrousMode {
+    #[default]
+    Baseline,
+    Shared,
+}
+
+impl AtrousMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Baseline => "baseline",
+            Self::Shared => "shared",
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]

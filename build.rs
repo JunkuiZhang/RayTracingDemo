@@ -18,6 +18,11 @@ fn main() {
         ),
         ("shaders/stage6_atrous.hlsl", "stage6_atrous.dxil", "cs_6_6"),
         (
+            "shaders/stage8_atrous_shared.hlsl",
+            "stage8_atrous_shared.dxil",
+            "cs_6_6",
+        ),
+        (
             "shaders/stage6_tonemap.hlsl",
             "stage6_tonemap.dxil",
             "cs_6_6",

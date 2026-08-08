@@ -66,12 +66,16 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
     let realtime_requested = arguments.iter().any(|argument| {
         matches!(
             argument.as_str(),
-            "--model" | "--animate-model" | "--benchmark-seconds"
+            "--model"
+                | "--animate-model"
+                | "--benchmark-seconds"
+                | "--atrous-mode"
+                | "--output-size"
         )
     });
     if cpu_reference_requested && realtime_requested {
         return Err(
-            "--cpu-reference 不能与实时渲染选项（--model、--animate-model、--benchmark-seconds）同时使用"
+            "--cpu-reference 不能与实时渲染选项（--model、--animate-model、--benchmark-seconds、--atrous-mode、--output-size）同时使用"
                 .to_string(),
         );
     }
@@ -93,6 +97,14 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                 "--benchmark-seconds" => {
                     let value = arguments.next().ok_or("--benchmark-seconds 缺少数值")?;
                     config.benchmark_seconds = Some(parse_benchmark_seconds(&value)?);
+                }
+                "--atrous-mode" => {
+                    let value = arguments.next().ok_or("--atrous-mode 缺少模式")?;
+                    config.atrous_mode = parse_atrous_mode(&value)?;
+                }
+                "--output-size" => {
+                    let value = arguments.next().ok_or("--output-size 缺少尺寸")?;
+                    config.output_size = Some(parse_output_size(&value)?);
                 }
                 _ => return Err(format!("未知参数：{argument}")),
             }
@@ -156,12 +168,39 @@ fn parse_benchmark_seconds(value: &str) -> Result<u32, String> {
     Ok(seconds)
 }
 
+fn parse_atrous_mode(value: &str) -> Result<realtime::AtrousMode, String> {
+    match value {
+        "baseline" => Ok(realtime::AtrousMode::Baseline),
+        "shared" => Ok(realtime::AtrousMode::Shared),
+        _ => Err(format!(
+            "无效的 À-Trous 模式：{value}（仅支持 baseline 或 shared）"
+        )),
+    }
+}
+
+fn parse_output_size(value: &str) -> Result<(u32, u32), String> {
+    let (width, height) = value
+        .split_once('x')
+        .or_else(|| value.split_once('X'))
+        .ok_or_else(|| format!("无效的输出尺寸：{value}（格式应为 WIDTHxHEIGHT）"))?;
+    let width = width
+        .parse::<u32>()
+        .map_err(|_| format!("无效的输出宽度：{width}"))?;
+    let height = height
+        .parse::<u32>()
+        .map_err(|_| format!("无效的输出高度：{height}"))?;
+    if !(320..=7680).contains(&width) || !(180..=4320).contains(&height) {
+        return Err("输出尺寸必须在 320x180 至 7680x4320 范围内".to_string());
+    }
+    Ok((width, height))
+}
+
 fn print_help() {
     println!(
         "RayTracingDemo\n\n\
          用法：\n  \
          cargo run --release                 启动实时 DX12 窗口\n  \
-         cargo run --release -- --model <路径> [--animate-model] [--benchmark-seconds <秒>]\n  \
+         cargo run --release -- --model <路径> [--animate-model] [--benchmark-seconds <秒>] [--atrous-mode <模式>] [--output-size <宽x高>]\n  \
          cargo run --release -- --cpu-reference [选项]\n\n\
          选项：\n  \
          --samples <数量>       每像素采样数，默认 1\n  \
@@ -169,6 +208,8 @@ fn print_help() {
          --output-dir <目录>    输出目录，默认 output/cpu-reference\n  \
          --skip-denoise         只保存原始路径追踪结果\n  \
          --benchmark-seconds <秒> 预热后输出固定格式 GPU JSON 报告（1..3600）\n  \
+         --atrous-mode <模式>      À-Trous 路径：baseline 或 shared，默认 baseline\n  \
+         --output-size <宽x高>     窗口物理像素尺寸，范围 320x180..7680x4320\n  \
          --help, -h             显示帮助"
     );
 }
@@ -240,5 +281,36 @@ mod tests {
             "30".to_string(),
         ]);
         assert!(matches!(result, Err(message) if message.contains("不能与")));
+    }
+
+    #[test]
+    fn parses_and_rejects_atrous_modes() {
+        let command = parse_arguments(["--atrous-mode".to_string(), "shared".to_string()]).unwrap();
+        assert!(matches!(
+            command,
+            Command::Realtime(RealtimeConfig {
+                atrous_mode: crate::realtime::AtrousMode::Shared,
+                ..
+            })
+        ));
+        assert!(parse_atrous_mode("baseline").is_ok());
+        assert!(parse_atrous_mode("other").is_err());
+    }
+
+    #[test]
+    fn parses_and_bounds_output_size() {
+        let command =
+            parse_arguments(["--output-size".to_string(), "1600x900".to_string()]).unwrap();
+        assert!(matches!(
+            command,
+            Command::Realtime(RealtimeConfig {
+                output_size: Some((1600, 900)),
+                ..
+            })
+        ));
+        assert_eq!(parse_output_size("1920X1080"), Ok((1920, 1080)));
+        assert!(parse_output_size("1920").is_err());
+        assert!(parse_output_size("0x1080").is_err());
+        assert!(parse_output_size("8000x4500").is_err());
     }
 }

@@ -23,6 +23,7 @@ pub struct ReloadedShaders {
     pub raytracing: Vec<u8>,
     pub temporal: Vec<u8>,
     pub atrous: Vec<u8>,
+    pub atrous_shared: Vec<u8>,
     pub tonemap: Vec<u8>,
 }
 
@@ -46,6 +47,11 @@ impl ShaderReloader {
             ("stage3_triangle.hlsl", "stage3_triangle.dxil", "lib_6_6"),
             ("stage6_temporal.hlsl", "stage6_temporal.dxil", "cs_6_6"),
             ("stage6_atrous.hlsl", "stage6_atrous.dxil", "cs_6_6"),
+            (
+                "stage8_atrous_shared.hlsl",
+                "stage8_atrous_shared.dxil",
+                "cs_6_6",
+            ),
             ("stage6_tonemap.hlsl", "stage6_tonemap.dxil", "cs_6_6"),
         ];
         let sources = descriptions
@@ -135,7 +141,11 @@ impl ShaderReloader {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             },
-            tonemap: match read(3) {
+            atrous_shared: match read(3) {
+                Ok(value) => value,
+                Err(error) => return Some(Err(error)),
+            },
+            tonemap: match read(4) {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             },
