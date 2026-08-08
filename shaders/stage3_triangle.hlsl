@@ -42,7 +42,8 @@ StructuredBuffer<uint> Indices : register(t2);
 StructuredBuffer<Material> Materials : register(t3);
 StructuredBuffer<InstanceGpu> Instances : register(t4);
 Texture2D<float4> MaterialTextures[] : register(t5);
-SamplerState LinearWrap : register(s0);
+static const uint MAX_MATERIAL_SAMPLERS = 64u;
+SamplerState MaterialSamplers[MAX_MATERIAL_SAMPLERS] : register(s0);
 
 RWTexture2D<float4> RawDiffuse : register(u0);
 RWTexture2D<float4> RawSpecular : register(u1);
@@ -149,10 +150,14 @@ float3 PreviousWorldPosition(float3 localPosition, InstanceGpu instanceData)
     return mul(previousObjectToWorld, float4(localPosition, 1.0));
 }
 
-float4 SampleMaterialTexture(uint textureIndex, float2 uv)
+float4 SampleMaterialTexture(uint textureAndSampler, float2 uv)
 {
-    return MaterialTextures[NonUniformResourceIndex(textureIndex & 0x7Fu)]
-        .SampleLevel(LinearWrap, uv, 0.0);
+    const uint textureViewMask = (1u << 7u) - 1u;
+    const uint samplerIndexMask = (1u << 6u) - 1u;
+    uint textureView = textureAndSampler & textureViewMask;
+    uint samplerIndex = (textureAndSampler >> 7u) & samplerIndexMask;
+    return MaterialTextures[NonUniformResourceIndex(textureView)]
+        .SampleLevel(MaterialSamplers[NonUniformResourceIndex(samplerIndex)], uv, 0.0);
 }
 
 static const float PI = 3.14159265359;

@@ -19,7 +19,7 @@ use winit::{
 
 use crate::{
     realtime::RealtimeConfig,
-    scene::{SceneAsset, gltf_loader},
+    scene::{MAX_SCENE_SAMPLERS, SceneAsset, gltf_loader},
 };
 
 use self::{
@@ -132,6 +132,7 @@ pub struct Dx12Renderer {
     shader_status: String,
     raytracing_status: String,
     _textures: TextureSet,
+    _sampler_heap: DescriptorHeap,
     _scene_geometry: SceneGeometry,
     _acceleration_structures: AccelerationStructures,
     raytracing_pipeline: RaytracingPipeline,
@@ -232,6 +233,13 @@ impl Dx12Renderer {
                 true,
             )
             .map_err(|error| dx_error("创建 Shader 描述符堆", error))?;
+            let sampler_heap = DescriptorHeap::new(
+                &device,
+                D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+                MAX_SCENE_SAMPLERS,
+                true,
+            )
+            .map_err(|error| dx_error("创建 sampler 描述符堆", error))?;
             let gpu_profiler = GpuProfiler::new(&device, &command_queue, FRAME_COUNT)
                 .map_err(|error| dx_error("创建 GPU 计时器", error))?;
             let raytracing_status = require_raytracing_tier_1_1(&device)?;
@@ -266,9 +274,15 @@ impl Dx12Renderer {
                     "--animate-model 需要同时提供 --model <path>",
                 ));
             }
-            let mut texture_set =
-                TextureSet::new(&device, &command_list, &scene.images, &scene.materials)
-                    .map_err(|error| dx_error("创建 glTF 纹理资源", error))?;
+            let mut texture_set = TextureSet::new(
+                &device,
+                &command_list,
+                &scene.images,
+                &scene.materials,
+                &scene.samplers,
+            )
+            .map_err(|error| dx_error("创建 glTF 纹理资源", error))?;
+            texture_set.write_samplers(&device, &sampler_heap);
             let mut scene_geometry =
                 SceneGeometry::new(&device, &command_list, &scene, &texture_set)
                     .map_err(|error| dx_error("创建场景网格", error))?;
@@ -368,6 +382,7 @@ impl Dx12Renderer {
                 ),
                 raytracing_status,
                 _textures: texture_set,
+                _sampler_heap: sampler_heap,
                 _scene_geometry: scene_geometry,
                 _acceleration_structures: acceleration_structures,
                 raytracing_pipeline,
@@ -447,8 +462,10 @@ impl Dx12Renderer {
                 GpuPass::AccelerationStructure,
             );
 
-            self.command_list
-                .SetDescriptorHeaps(&[Some(self.shader_heap.heap().clone())]);
+            self.command_list.SetDescriptorHeaps(&[
+                Some(self.shader_heap.heap().clone()),
+                Some(self._sampler_heap.heap().clone()),
+            ]);
             let command_list4: ID3D12GraphicsCommandList4 = self.command_list.cast()?;
             self.gpu_profiler
                 .begin(&self.command_list, frame_index, GpuPass::Total);
@@ -458,6 +475,7 @@ impl Dx12Renderer {
             command_list4.SetComputeRootSignature(&self.raytracing_pipeline.root_signature);
             command_list4
                 .SetComputeRootDescriptorTable(0, self.shader_heap.gpu_handle(DXR_TABLE_BASE));
+            command_list4.SetComputeRootDescriptorTable(3, self._sampler_heap.gpu_handle(0));
             command_list4.SetComputeRootShaderResourceView(
                 2,
                 self._acceleration_structures

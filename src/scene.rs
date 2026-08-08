@@ -11,6 +11,35 @@ pub const MATERIAL_FLAG_LEGACY_DIELECTRIC: u32 = 1 << 2;
 pub const MATERIAL_FLAG_LEGACY_METAL: u32 = 1 << 3;
 pub const MATERIAL_FLAG_LEGACY_EMISSIVE: u32 = 1 << 4;
 pub const MAX_SCENE_SAMPLERS: usize = 64;
+pub const TEXTURE_VIEW_BITS: u32 = 7;
+pub const SAMPLER_INDEX_BITS: u32 = 6;
+pub const MAX_PACKED_TEXTURE_VIEWS: usize = 1 << TEXTURE_VIEW_BITS;
+pub const MAX_PACKED_SAMPLERS: usize = 1 << SAMPLER_INDEX_BITS;
+
+pub fn pack_texture_and_sampler(texture_view: usize, sampler_index: usize) -> Result<u32, String> {
+    if texture_view >= MAX_PACKED_TEXTURE_VIEWS {
+        return Err(format!(
+            "texture view {} 超过打包上限 {}",
+            texture_view, MAX_PACKED_TEXTURE_VIEWS
+        ));
+    }
+    if sampler_index >= MAX_PACKED_SAMPLERS {
+        return Err(format!(
+            "sampler {} 超过打包上限 {}",
+            sampler_index, MAX_PACKED_SAMPLERS
+        ));
+    }
+    Ok((texture_view as u32) | ((sampler_index as u32) << TEXTURE_VIEW_BITS))
+}
+
+pub fn unpack_texture_and_sampler(packed: u32) -> (usize, usize) {
+    let texture_mask = (1_u32 << TEXTURE_VIEW_BITS) - 1;
+    let sampler_mask = (1_u32 << SAMPLER_INDEX_BITS) - 1;
+    (
+        (packed & texture_mask) as usize,
+        ((packed >> TEXTURE_VIEW_BITS) & sampler_mask) as usize,
+    )
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum FilterMode {
@@ -504,5 +533,13 @@ mod tests {
         let mut scene = SceneAsset::cornell_box();
         scene.primitives[0].has_texcoord0 = false;
         scene.validate().unwrap();
+    }
+
+    #[test]
+    fn texture_sampler_packing_round_trips_and_rejects_overflow() {
+        let packed = pack_texture_and_sampler(127, 63).unwrap();
+        assert_eq!(unpack_texture_and_sampler(packed), (127, 63));
+        assert!(pack_texture_and_sampler(128, 0).is_err());
+        assert!(pack_texture_and_sampler(0, 64).is_err());
     }
 }

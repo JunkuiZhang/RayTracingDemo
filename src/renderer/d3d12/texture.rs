@@ -5,10 +5,13 @@ use windows::{
     core::{PCWSTR, Result},
 };
 
-use crate::scene::{ImageAsset, MaterialAsset, TextureBindingAsset};
+use crate::scene::{
+    FilterMode, ImageAsset, MAX_PACKED_SAMPLERS, MAX_PACKED_TEXTURE_VIEWS, MAX_SCENE_SAMPLERS,
+    MaterialAsset, SamplerKey, TextureBindingAsset, WrapMode, pack_texture_and_sampler,
+};
 
 /// t5 的 bindless 纹理数组预留的描述符数量。
-pub const MAX_TEXTURE_VIEWS: usize = 128;
+pub const MAX_TEXTURE_VIEWS: usize = MAX_PACKED_TEXTURE_VIEWS;
 /// DXR 描述符表中 t5 纹理数组的起始位置。
 pub const DXR_TEXTURE_BASE: usize = 4;
 /// DXR UAV 紧跟在纹理数组之后，避免破坏阶段 6 的表布局。
@@ -40,6 +43,7 @@ pub struct TextureSet {
     fallback_metallic_roughness: usize,
     fallback_normal: usize,
     fallback_emissive: usize,
+    samplers: Vec<SamplerKey>,
 }
 
 impl TextureSet {
@@ -48,7 +52,18 @@ impl TextureSet {
         command_list: &ID3D12GraphicsCommandList,
         images: &[ImageAsset],
         materials: &[MaterialAsset],
+        samplers: &[SamplerKey],
     ) -> Result<Self> {
+        if samplers.is_empty() || samplers.len() > MAX_SCENE_SAMPLERS {
+            return Err(windows::core::Error::new(
+                windows::core::HRESULT(0x80004005_u32 as i32),
+                format!(
+                    "sampler 数 {} 不在 1..={} 范围内",
+                    samplers.len(),
+                    MAX_SCENE_SAMPLERS
+                ),
+            ));
+        }
         let fallback_images = [
             ("Fallback BaseColor sRGB", [255, 255, 255, 255]),
             // glTF metallic-roughness: G=roughness=1, B=metallic=0.
@@ -81,6 +96,7 @@ impl TextureSet {
             fallback_metallic_roughness: 0,
             fallback_normal: 0,
             fallback_emissive: 0,
+            samplers: samplers.to_vec(),
         };
         texture_set.fallback_base_color = texture_set.ensure_view(0, true)?;
         texture_set.fallback_metallic_roughness = texture_set.ensure_view(1, false)?;
@@ -142,8 +158,8 @@ impl TextureSet {
         Ok(index)
     }
 
-    pub fn material_texture_indices(&self, material: &MaterialAsset) -> [u32; 4] {
-        [
+    pub fn material_texture_indices(&self, material: &MaterialAsset) -> Result<[u32; 4]> {
+        Ok([
             self.lookup_or_fallback(material.base_color_texture, true, self.fallback_base_color),
             self.lookup_or_fallback(
                 material.metallic_roughness_texture,
@@ -153,6 +169,10 @@ impl TextureSet {
             self.lookup_or_fallback(material.normal_texture, false, self.fallback_normal),
             self.lookup_or_fallback(material.emissive_texture, true, self.fallback_emissive),
         ]
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?
+        .try_into()
+        .expect("材质固定有四个纹理槽"))
     }
 
     fn lookup_or_fallback(
@@ -160,17 +180,39 @@ impl TextureSet {
         binding: Option<TextureBindingAsset>,
         srgb: bool,
         fallback: usize,
-    ) -> u32 {
-        binding
-            .and_then(|binding| {
-                self.lookup
-                    .get(&TextureView {
-                        image_index: binding.image_index + FALLBACK_COUNT,
-                        srgb,
-                    })
-                    .copied()
+    ) -> Result<u32> {
+        let (texture_view, sampler_index) = binding
+            .map(|binding| {
+                (
+                    self.lookup
+                        .get(&TextureView {
+                            image_index: binding.image_index + FALLBACK_COUNT,
+                            srgb,
+                        })
+                        .copied()
+                        .unwrap_or(fallback),
+                    binding.sampler_index,
+                )
             })
-            .unwrap_or(fallback) as u32
+            .unwrap_or((fallback, 0));
+        pack_texture_and_sampler(texture_view, sampler_index).map_err(|error| {
+            windows::core::Error::new(windows::core::HRESULT(0x80004005_u32 as i32), error)
+        })
+    }
+
+    /// Populate the bounded shader-visible sampler table. Unused entries use
+    /// the deterministic default sampler (linear min/mag, repeat U/V).
+    pub unsafe fn write_samplers(
+        &self,
+        device: &ID3D12Device,
+        heap: &crate::renderer::d3d12::descriptor::DescriptorHeap,
+    ) {
+        let default_sampler = SamplerKey::default();
+        for index in 0..MAX_PACKED_SAMPLERS {
+            let sampler = self.samplers.get(index).copied().unwrap_or(default_sampler);
+            let description = sampler_description(sampler);
+            unsafe { device.CreateSampler(&description, heap.cpu_handle(index)) };
+        }
     }
 
     /// Populate the complete t5 texture array, including unused entries.
@@ -220,6 +262,32 @@ impl TextureSet {
         for image in &mut self.images {
             image.upload = None;
         }
+    }
+}
+
+fn sampler_description(sampler: SamplerKey) -> D3D12_SAMPLER_DESC {
+    let filter = match (sampler.min_filter, sampler.mag_filter) {
+        (FilterMode::Nearest, FilterMode::Nearest) => D3D12_FILTER_MIN_MAG_MIP_POINT,
+        (FilterMode::Nearest, FilterMode::Linear) => D3D12_FILTER_MIN_POINT_MAG_LINEAR_MIP_POINT,
+        (FilterMode::Linear, FilterMode::Nearest) => D3D12_FILTER_MIN_LINEAR_MAG_MIP_POINT,
+        (FilterMode::Linear, FilterMode::Linear) => D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT,
+    };
+    let address_mode = |mode| match mode {
+        WrapMode::Repeat => D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+        WrapMode::Clamp => D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        WrapMode::Mirror => D3D12_TEXTURE_ADDRESS_MODE_MIRROR,
+    };
+    D3D12_SAMPLER_DESC {
+        Filter: filter,
+        AddressU: address_mode(sampler.wrap_u),
+        AddressV: address_mode(sampler.wrap_v),
+        AddressW: D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+        MipLODBias: 0.0,
+        MaxAnisotropy: 1,
+        ComparisonFunc: D3D12_COMPARISON_FUNC_NEVER,
+        BorderColor: [0.0; 4],
+        MinLOD: 0.0,
+        MaxLOD: f32::MAX,
     }
 }
 

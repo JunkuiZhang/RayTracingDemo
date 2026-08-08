@@ -408,15 +408,22 @@ fn image_to_rgba8(image: &ImageData) -> Result<Vec<u8>, String> {
     let mut rgba8 = vec![0u8; pixel_count * 4];
     for pixel in 0..pixel_count {
         for channel in 0..4 {
-            let source_channel = channel.min(channels - 1);
+            let source_channel = if channels == 2 {
+                usize::from(channel == 3)
+            } else {
+                channel.min(channels - 1)
+            };
             let offset = (pixel * channels + source_channel) * bytes_per_channel;
-            rgba8[pixel * 4 + channel] = if channel == 3 && channels < 4 {
+            rgba8[pixel * 4 + channel] = if channel == 3 && channels != 2 && channels < 4 {
                 255
             } else {
                 match bytes_per_channel {
                     1 => image.pixels[offset],
-                    2 => u16::from_le_bytes([image.pixels[offset], image.pixels[offset + 1]])
-                        .div_ceil(257) as u8,
+                    2 => {
+                        let value =
+                            u16::from_le_bytes([image.pixels[offset], image.pixels[offset + 1]]);
+                        (u32::from(value) + 128).div_euclid(257).min(255) as u8
+                    }
                     4 => {
                         (f32::from_le_bytes(image.pixels[offset..offset + 4].try_into().unwrap())
                             .clamp(0.0, 1.0)
@@ -887,6 +894,33 @@ mod tests {
             height: 1,
         };
         assert_eq!(image_to_rgba8(&image).unwrap(), [12, 34, 56, 255]);
+    }
+
+    #[test]
+    fn image_conversion_maps_luma_alpha_without_channel_swizzle() {
+        let r8 = ImageData {
+            pixels: vec![42],
+            format: ImageFormat::R8,
+            width: 1,
+            height: 1,
+        };
+        assert_eq!(image_to_rgba8(&r8).unwrap(), [42, 42, 42, 255]);
+
+        let r8g8 = ImageData {
+            pixels: vec![42, 200],
+            format: ImageFormat::R8G8,
+            width: 1,
+            height: 1,
+        };
+        assert_eq!(image_to_rgba8(&r8g8).unwrap(), [42, 42, 42, 200]);
+
+        let r16g16 = ImageData {
+            pixels: vec![0x80, 0x80, 0xff, 0xff],
+            format: ImageFormat::R16G16,
+            width: 1,
+            height: 1,
+        };
+        assert_eq!(image_to_rgba8(&r16g16).unwrap(), [128, 128, 128, 255]);
     }
 
     #[test]

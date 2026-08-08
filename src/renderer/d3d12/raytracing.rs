@@ -148,7 +148,7 @@ impl SceneGeometry {
             .iter()
             .enumerate()
             .map(|(index, material)| gpu_material(material, textures, material_has_tangent[index]))
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         let instances = scene
             .instances
             .iter()
@@ -388,7 +388,7 @@ fn gpu_material(
     material: &crate::scene::MaterialAsset,
     textures: &TextureSet,
     has_tangent: bool,
-) -> GpuMaterial {
+) -> Result<GpuMaterial> {
     let mut flags = 0;
     if material.double_sided {
         flags |= MATERIAL_FLAG_DOUBLE_SIDED;
@@ -406,8 +406,8 @@ fn gpu_material(
         flags |= MATERIAL_FLAG_HAS_TANGENT;
     }
     let [base_color, metallic_roughness, normal, emissive] =
-        textures.material_texture_indices(material);
-    GpuMaterial {
+        textures.material_texture_indices(material)?;
+    Ok(GpuMaterial {
         base_color_factor: material.base_color_factor,
         emissive_factor: material.emissive_factor,
         metallic_factor: material.metallic_factor,
@@ -419,7 +419,7 @@ fn gpu_material(
         metallic_roughness_texture_and_sampler: metallic_roughness,
         normal_texture_and_sampler: normal,
         emissive_texture_and_sampler: emissive,
-    }
+    })
 }
 
 impl AccelerationStructures {
@@ -915,6 +915,13 @@ fn create_raytracing_root_signature(device: &ID3D12Device) -> Result<ID3D12RootS
             OffsetInDescriptorsFromTableStart: super::texture::DXR_UAV_BASE as u32,
         },
     ];
+    let sampler_range = D3D12_DESCRIPTOR_RANGE {
+        RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER,
+        NumDescriptors: crate::scene::MAX_SCENE_SAMPLERS as u32,
+        BaseShaderRegister: 0,
+        RegisterSpace: 0,
+        OffsetInDescriptorsFromTableStart: 0,
+    };
     let parameters = [
         D3D12_ROOT_PARAMETER {
             ParameterType: D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
@@ -947,27 +954,22 @@ fn create_raytracing_root_signature(device: &ID3D12Device) -> Result<ID3D12RootS
             },
             ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
         },
+        D3D12_ROOT_PARAMETER {
+            ParameterType: D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
+            Anonymous: D3D12_ROOT_PARAMETER_0 {
+                DescriptorTable: D3D12_ROOT_DESCRIPTOR_TABLE {
+                    NumDescriptorRanges: 1,
+                    pDescriptorRanges: &sampler_range,
+                },
+            },
+            ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+        },
     ];
-    let static_samplers = [D3D12_STATIC_SAMPLER_DESC {
-        Filter: D3D12_FILTER_MIN_MAG_MIP_LINEAR,
-        AddressU: D3D12_TEXTURE_ADDRESS_MODE_WRAP,
-        AddressV: D3D12_TEXTURE_ADDRESS_MODE_WRAP,
-        AddressW: D3D12_TEXTURE_ADDRESS_MODE_WRAP,
-        MipLODBias: 0.0,
-        MaxAnisotropy: 1,
-        ComparisonFunc: D3D12_COMPARISON_FUNC_NEVER,
-        BorderColor: D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE,
-        MinLOD: 0.0,
-        MaxLOD: f32::MAX,
-        ShaderRegister: 0,
-        RegisterSpace: 0,
-        ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
-    }];
     let description = D3D12_ROOT_SIGNATURE_DESC {
         NumParameters: parameters.len() as u32,
         pParameters: parameters.as_ptr(),
-        NumStaticSamplers: static_samplers.len() as u32,
-        pStaticSamplers: static_samplers.as_ptr(),
+        NumStaticSamplers: 0,
+        pStaticSamplers: std::ptr::null(),
         Flags: D3D12_ROOT_SIGNATURE_FLAG_NONE,
     };
     let mut serialized: Option<ID3DBlob> = None;
