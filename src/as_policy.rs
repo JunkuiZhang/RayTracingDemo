@@ -167,7 +167,8 @@ pub struct AccelerationStructureStats {
     pub allocation_saving_ratio: Option<f64>,
     pub tlas_result_bytes: u64,
     pub tlas_allocation_bytes: u64,
-    pub retained_update_scratch_bytes: u64,
+    pub retained_update_scratch_required_bytes: u64,
+    pub retained_update_scratch_allocation_bytes: u64,
     pub blas: Vec<BlasAllocationRecord>,
 }
 
@@ -178,7 +179,8 @@ impl AccelerationStructureStats {
         records: Vec<BlasAllocationRecord>,
         tlas_result_bytes: u64,
         tlas_allocation_bytes: u64,
-        retained_update_scratch_bytes: u64,
+        retained_update_scratch_required_bytes: u64,
+        retained_update_scratch_allocation_bytes: u64,
     ) -> Self {
         let mut stats = Self {
             mode,
@@ -196,7 +198,8 @@ impl AccelerationStructureStats {
             allocation_saving_ratio: None,
             tlas_result_bytes,
             tlas_allocation_bytes,
-            retained_update_scratch_bytes,
+            retained_update_scratch_required_bytes,
+            retained_update_scratch_allocation_bytes,
             blas: records,
         };
         for record in &stats.blas {
@@ -333,6 +336,7 @@ mod tests {
             ],
             256,
             256,
+            0,
             0,
         );
         assert_eq!(stats.compacted_blas_count, 1);

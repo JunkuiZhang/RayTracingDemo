@@ -511,13 +511,19 @@ impl AccelerationStructures {
             }
             let result_bytes = align_acceleration_structure_size(prebuild.ResultDataMaxSizeInBytes)
                 .ok_or_else(|| as_error(format!("BLAS {primitive_index} result size overflow")))?;
+            let original_allocation_bytes = resource_allocation_bytes(
+                device,
+                result_bytes,
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            )
+            .ok_or_else(|| {
+                as_error(format!(
+                    "BLAS {primitive_index} allocation query failed for {result_bytes} bytes"
+                ))
+            })?;
             blas_infos.push(BlasBuildInfo {
                 prebuild,
-                original_allocation_bytes: resource_allocation_bytes(
-                    device,
-                    result_bytes,
-                    D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                ),
+                original_allocation_bytes,
             });
             original_blas.push(Some(create_default_buffer(
                 device,
@@ -652,7 +658,7 @@ impl PendingAccelerationStructures {
                 .then(|| align_acceleration_structure_size(reported_size))
                 .flatten();
             let candidate_allocation_bytes = candidate_size
-                .map(|size| {
+                .and_then(|size| {
                     resource_allocation_bytes(
                         device,
                         size,
@@ -787,21 +793,43 @@ impl PendingAccelerationStructures {
             command_list4.BuildRaytracingAccelerationStructure(&tlas_build, None);
         }
         uav_barrier(command_list, &tlas);
+        let tlas_allocation_bytes = resource_allocation_bytes(
+            device,
+            tlas_result_allocation_size,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+        )
+        .ok_or_else(|| {
+            as_error(format!(
+                "TLAS allocation query failed for {tlas_result_allocation_size} bytes"
+            ))
+        })?;
+        let retained_update_scratch_required_bytes = if self.tlas_update_enabled {
+            scratch_size
+        } else {
+            0
+        };
+        let retained_update_scratch_allocation_bytes = if self.tlas_update_enabled {
+            resource_allocation_bytes(
+                device,
+                scratch_size,
+                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            )
+            .ok_or_else(|| {
+                as_error(format!(
+                    "TLAS scratch allocation query failed for {scratch_size} bytes"
+                ))
+            })?
+        } else {
+            0
+        };
         let telemetry = AccelerationStructureStats::from_records(
             self.mode,
             self.tlas_update_enabled,
             records,
             tlas_result_bytes,
-            resource_allocation_bytes(
-                device,
-                tlas_result_allocation_size,
-                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-            ),
-            if self.tlas_update_enabled {
-                scratch_size
-            } else {
-                0
-            },
+            tlas_allocation_bytes,
+            retained_update_scratch_required_bytes,
+            retained_update_scratch_allocation_bytes,
         );
         debug_assert_eq!(
             crate::as_policy::final_blas_primitive_order(&telemetry.blas),
@@ -908,12 +936,23 @@ fn read_compacted_sizes(resource: &ID3D12Resource, count: usize) -> Result<Vec<u
     }
 }
 
-fn resource_allocation_bytes(device: &ID3D12Device, size: u64, flags: D3D12_RESOURCE_FLAGS) -> u64 {
+fn resource_allocation_bytes(
+    device: &ID3D12Device,
+    size: u64,
+    flags: D3D12_RESOURCE_FLAGS,
+) -> Option<u64> {
     if size == 0 {
-        return 0;
+        return None;
     }
     let description = buffer_resource_desc(size, flags);
-    unsafe { device.GetResourceAllocationInfo(0, std::slice::from_ref(&description)) }.SizeInBytes
+    let size_in_bytes =
+        unsafe { device.GetResourceAllocationInfo(0, std::slice::from_ref(&description)) }
+            .SizeInBytes;
+    valid_allocation_size(size_in_bytes)
+}
+
+fn valid_allocation_size(size_in_bytes: u64) -> Option<u64> {
+    (size_in_bytes != 0 && size_in_bytes != u64::MAX).then_some(size_in_bytes)
 }
 
 fn buffer_resource_desc(size: u64, flags: D3D12_RESOURCE_FLAGS) -> D3D12_RESOURCE_DESC {
@@ -1438,6 +1477,13 @@ mod tests {
             ),
             512
         );
+    }
+
+    #[test]
+    fn allocation_query_failure_sentinel_is_rejected() {
+        assert_eq!(valid_allocation_size(0), None);
+        assert_eq!(valid_allocation_size(u64::MAX), None);
+        assert_eq!(valid_allocation_size(65_536), Some(65_536));
     }
 
     #[test]

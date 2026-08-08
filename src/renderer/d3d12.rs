@@ -390,14 +390,15 @@ impl Dx12Renderer {
             texture_set.release_uploads();
             let as_stats = acceleration_structures.stats();
             eprintln!(
-                "DXR AS：{}，BLAS {}/{} compacted，allocation {} -> {} KiB，TLAS update={}，retained scratch={} KiB",
+                "DXR AS：{}，BLAS {}/{} compacted，allocation {} -> {} KiB，TLAS update={}，retained scratch={} B required / {} KiB allocation",
                 as_stats.mode.as_str(),
                 as_stats.compacted_blas_count,
                 as_stats.blas_count,
                 as_stats.original_allocation_bytes / 1024,
                 as_stats.final_allocation_bytes / 1024,
                 as_stats.tlas_update_enabled,
-                as_stats.retained_update_scratch_bytes / 1024,
+                as_stats.retained_update_scratch_required_bytes,
+                as_stats.retained_update_scratch_allocation_bytes / 1024,
             );
             acceleration_structures.release_build_resources();
             let mut renderer = Self {
@@ -1197,7 +1198,10 @@ fn benchmark_json_line(
             "allocation_saving_ratio": acceleration_structures.allocation_saving_ratio.filter(|value| value.is_finite()),
             "tlas_result_bytes": acceleration_structures.tlas_result_bytes,
             "tlas_allocation_bytes": acceleration_structures.tlas_allocation_bytes,
-            "retained_update_scratch_bytes": acceleration_structures.retained_update_scratch_bytes,
+            // Compatibility alias: this now consistently means committed allocation bytes.
+            "retained_update_scratch_bytes": acceleration_structures.retained_update_scratch_allocation_bytes,
+            "retained_update_scratch_required_bytes": acceleration_structures.retained_update_scratch_required_bytes,
+            "retained_update_scratch_allocation_bytes": acceleration_structures.retained_update_scratch_allocation_bytes,
             "blas": blas,
         },
         "benchmark_seconds": duration_seconds,
@@ -2122,6 +2126,7 @@ mod tests {
                 256,
                 256,
                 512,
+                65_536,
             ),
         );
         assert!(!json.contains(['\r', '\n']));
@@ -2152,6 +2157,18 @@ mod tests {
         assert_eq!(value["acceleration_structures"]["mode"], "baseline");
         assert_eq!(value["acceleration_structures"]["blas_count"], 0);
         assert!(value["acceleration_structures"]["allocation_saving_ratio"].is_null());
+        assert_eq!(
+            value["acceleration_structures"]["retained_update_scratch_required_bytes"],
+            512
+        );
+        assert_eq!(
+            value["acceleration_structures"]["retained_update_scratch_allocation_bytes"],
+            65_536
+        );
+        assert_eq!(
+            value["acceleration_structures"]["retained_update_scratch_bytes"],
+            65_536
+        );
     }
 
     #[test]

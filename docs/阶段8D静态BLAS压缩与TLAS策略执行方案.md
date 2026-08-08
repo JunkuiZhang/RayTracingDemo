@@ -8,6 +8,7 @@
 - 目标硬件：NVIDIA GeForce RTX 4060 Laptop GPU。
 - 当前默认命令记录模式：`optimized`；本工作包不得改回 baseline。
 - 当前默认 À-Trous 模式：`baseline`；8B 的 shared 路径仍只是未采纳实验。
+- 当前实现状态：8D 代码、小模型 A/B、Debug GPU Validation 和首轮 Codex review 修复已完成；AS 默认仍为 baseline，大 BLAS compact copy 与人工画质/生命周期矩阵仍待验收。
 - 8D 目标：压缩真正能减少实际 allocation 的静态 BLAS；让 TLAS 只在确有刚体实例动画时承担 update 成本；正确释放只在初始化期需要的资源；输出可审计的 AS 内存与策略遥测。
 - 8D 不等于阶段 8 完成。8A 长时矩阵、8C 画面对比、8E 动态分辨率和 8G 总体验收仍是后续工作。
 
@@ -211,7 +212,8 @@ pub struct AccelerationStructureStats {
     pub allocation_saving_ratio: Option<f64>,
     pub tlas_result_bytes: u64,
     pub tlas_allocation_bytes: u64,
-    pub retained_update_scratch_bytes: u64,
+    pub retained_update_scratch_required_bytes: u64,
+    pub retained_update_scratch_allocation_bytes: u64,
 }
 ```
 
@@ -225,6 +227,8 @@ benchmark JSON 增加顶层对象 `acceleration_structures`，至少包含以上
 - baseline 的 compacted count 必须为 0，final allocation 等于 original allocation。
 - optimized 的每个 compacted entry 必须满足 final allocation 小于 original allocation。
 - local VRAM usage/budget 继续来自现有 adapter telemetry；AS 统计不能伪装成进程总显存。
+- `GetResourceAllocationInfo` 返回 `UINT64_MAX` 时表示查询失败，必须拒绝；original/TLAS 查询失败应返回带上下文错误，candidate 查询失败则保留 original BLAS 并记录 invalid。
+- 动态 TLAS scratch 必须同时报告 DXR required bytes 和 committed allocation bytes；兼容 JSON 字段 `retained_update_scratch_bytes` 表示 committed allocation，不得再填逻辑宽度。
 - 这是向 schema v1 增加对象，不删除或改名现有字段；除非做破坏性变更，否则不要擅自更改 `schema_version`。
 
 启动时向 stderr 输出一行简洁摘要，例如：
@@ -445,6 +449,8 @@ TLAS scratch 策略和稳定 benchmark JSON 遥测。RTX 4060 Laptop 的 Cornell
 四项 Debug + GPU-Based Validation（Cornell baseline/optimized、静态 glTF、动画 glTF）均为
 exit code 0 且 `D3D12 Debug InfoQueue：0 条消息`。F1 全视图、resize、最小化/恢复、截图
 diff 和代表性大模型实测尚未完成，不能把 8D 或阶段 8 标记为完成。
+
+首轮 Codex review 修复补充：allocation query 现在拒绝 `UINT64_MAX` 失败哨兵；动态 TLAS 的 `3,328 B` 是逻辑 required size，对应当前 committed buffer 的真实 allocation 为 `65,536 B`，两者已在 JSON 中分字段报告。高层 README、主方案和阶段状态已同步，下一代码工作包为 8E-1。
 
 ## 13. Review 高风险清单
 
