@@ -45,7 +45,14 @@ impl ComputePipeline {
         })
     }
 
-    pub fn bind(
+    pub fn bind_pipeline(&self, command_list: &ID3D12GraphicsCommandList) {
+        unsafe {
+            command_list.SetPipelineState(&self.pipeline_state);
+            command_list.SetComputeRootSignature(&self.root_signature);
+        }
+    }
+
+    pub fn set_arguments(
         &self,
         command_list: &ID3D12GraphicsCommandList,
         descriptor_table: D3D12_GPU_DESCRIPTOR_HANDLE,
@@ -53,8 +60,6 @@ impl ComputePipeline {
     ) {
         assert_eq!(constants.len(), self.constant_count);
         unsafe {
-            command_list.SetPipelineState(&self.pipeline_state);
-            command_list.SetComputeRootSignature(&self.root_signature);
             command_list.SetComputeRootDescriptorTable(0, descriptor_table);
             command_list.SetComputeRoot32BitConstants(
                 1,
@@ -63,6 +68,16 @@ impl ComputePipeline {
                 0,
             );
         }
+    }
+
+    pub fn bind(
+        &self,
+        command_list: &ID3D12GraphicsCommandList,
+        descriptor_table: D3D12_GPU_DESCRIPTOR_HANDLE,
+        constants: &[u32],
+    ) {
+        self.bind_pipeline(command_list);
+        self.set_arguments(command_list, descriptor_table, constants);
     }
 }
 

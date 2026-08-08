@@ -74,6 +74,32 @@ pub struct GpuTimingReport {
     pub passes: [GpuTimingStats; PASS_COUNT],
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CommandRecordingFrameStats {
+    pub tracked_transition_api_calls: u32,
+    pub tracked_transition_barriers: u32,
+    pub atrous_pipeline_binds: u32,
+    pub atrous_argument_updates: u32,
+}
+
+impl CommandRecordingFrameStats {
+    pub fn add_transition_submission(&mut self, api_calls: u32, transitions: u32) {
+        self.tracked_transition_api_calls =
+            self.tracked_transition_api_calls.saturating_add(api_calls);
+        self.tracked_transition_barriers =
+            self.tracked_transition_barriers.saturating_add(transitions);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CommandRecordingStats {
+    pub cpu_ms: GpuTimingStats,
+    pub tracked_transition_api_calls_mean: Option<f64>,
+    pub tracked_transition_barriers_mean: Option<f64>,
+    pub atrous_pipeline_binds_mean: Option<f64>,
+    pub atrous_argument_updates_mean: Option<f64>,
+}
+
 impl GpuTimingReport {
     pub fn pass(&self, pass: GpuPass) -> GpuTimingStats {
         self.passes[pass as usize]
@@ -188,6 +214,50 @@ struct BenchmarkAccumulator {
     passes: [BenchmarkHistogram; PASS_COUNT],
 }
 
+#[derive(Default)]
+struct CommandRecordingAccumulator {
+    cpu_ms: BenchmarkHistogram,
+    valid_samples: usize,
+    tracked_transition_api_calls: u64,
+    tracked_transition_barriers: u64,
+    atrous_pipeline_binds: u64,
+    atrous_argument_updates: u64,
+}
+
+impl CommandRecordingAccumulator {
+    fn push(&mut self, cpu_ms: f64, stats: CommandRecordingFrameStats) {
+        if !cpu_ms.is_finite() || cpu_ms < 0.0 {
+            return;
+        }
+        self.cpu_ms.push(cpu_ms);
+        self.valid_samples = self.valid_samples.saturating_add(1);
+        self.tracked_transition_api_calls = self
+            .tracked_transition_api_calls
+            .saturating_add(stats.tracked_transition_api_calls as u64);
+        self.tracked_transition_barriers = self
+            .tracked_transition_barriers
+            .saturating_add(stats.tracked_transition_barriers as u64);
+        self.atrous_pipeline_binds = self
+            .atrous_pipeline_binds
+            .saturating_add(stats.atrous_pipeline_binds as u64);
+        self.atrous_argument_updates = self
+            .atrous_argument_updates
+            .saturating_add(stats.atrous_argument_updates as u64);
+    }
+
+    fn report(&self) -> CommandRecordingStats {
+        let mean =
+            |sum: u64| (self.valid_samples > 0).then_some(sum as f64 / self.valid_samples as f64);
+        CommandRecordingStats {
+            cpu_ms: self.cpu_ms.snapshot(),
+            tracked_transition_api_calls_mean: mean(self.tracked_transition_api_calls),
+            tracked_transition_barriers_mean: mean(self.tracked_transition_barriers),
+            atrous_pipeline_binds_mean: mean(self.atrous_pipeline_binds),
+            atrous_argument_updates_mean: mean(self.atrous_argument_updates),
+        }
+    }
+}
+
 impl Default for BenchmarkAccumulator {
     fn default() -> Self {
         Self {
@@ -226,6 +296,7 @@ pub struct GpuProfiler {
     last_sample: Option<GpuTimingSample>,
     windows: [RollingStats; PASS_COUNT],
     benchmark: Option<BenchmarkAccumulator>,
+    command_recording: Option<CommandRecordingAccumulator>,
     valid_sample_serial: u64,
     pix: PixEventRuntime,
 }
@@ -281,6 +352,7 @@ impl GpuProfiler {
             last_sample: None,
             windows: [RollingStats::default(); PASS_COUNT],
             benchmark: None,
+            command_recording: None,
             valid_sample_serial: 0,
             pix: PixEventRuntime::load(),
         })
@@ -430,6 +502,7 @@ impl GpuProfiler {
         self.clear_statistics();
         if self.benchmark.is_some() {
             self.benchmark = Some(BenchmarkAccumulator::default());
+            self.command_recording = Some(CommandRecordingAccumulator::default());
         }
     }
 
@@ -455,12 +528,30 @@ impl GpuProfiler {
         self.last_sample = None;
         self.clear_statistics();
         self.benchmark = Some(BenchmarkAccumulator::default());
+        self.command_recording = Some(CommandRecordingAccumulator::default());
     }
 
     pub fn benchmark_statistics(&self) -> GpuTimingReport {
         self.benchmark
             .as_ref()
             .map(BenchmarkAccumulator::report)
+            .unwrap_or_default()
+    }
+
+    pub fn record_command_recording(
+        &mut self,
+        elapsed: std::time::Duration,
+        stats: CommandRecordingFrameStats,
+    ) {
+        if let Some(command_recording) = self.command_recording.as_mut() {
+            command_recording.push(elapsed.as_secs_f64() * 1000.0, stats);
+        }
+    }
+
+    pub fn command_recording_statistics(&self) -> CommandRecordingStats {
+        self.command_recording
+            .as_ref()
+            .map(CommandRecordingAccumulator::report)
             .unwrap_or_default()
     }
 
@@ -537,5 +628,49 @@ mod tests {
         assert_eq!(stats.valid_samples, 600);
         assert_eq!(stats.p50_ms, Some(30.0));
         assert_eq!(stats.p95_ms, Some(57.0));
+    }
+
+    #[test]
+    fn command_recording_statistics_use_cpu_samples_and_means() {
+        let mut accumulator = CommandRecordingAccumulator::default();
+        accumulator.push(
+            1.0,
+            CommandRecordingFrameStats {
+                tracked_transition_api_calls: 10,
+                tracked_transition_barriers: 58,
+                atrous_pipeline_binds: 4,
+                atrous_argument_updates: 4,
+            },
+        );
+        accumulator.push(
+            3.0,
+            CommandRecordingFrameStats {
+                tracked_transition_api_calls: 8,
+                tracked_transition_barriers: 58,
+                atrous_pipeline_binds: 2,
+                atrous_argument_updates: 4,
+            },
+        );
+        let report = accumulator.report();
+        assert_eq!(report.cpu_ms.valid_samples, 2);
+        assert_eq!(report.cpu_ms.p50_ms, Some(1.0));
+        assert_eq!(report.cpu_ms.p95_ms, Some(3.0));
+        assert_eq!(report.tracked_transition_api_calls_mean, Some(9.0));
+        assert_eq!(report.tracked_transition_barriers_mean, Some(58.0));
+        assert_eq!(report.atrous_pipeline_binds_mean, Some(3.0));
+        assert_eq!(report.atrous_argument_updates_mean, Some(4.0));
+    }
+
+    #[test]
+    fn command_recording_statistics_reject_invalid_cpu_samples() {
+        let mut accumulator = CommandRecordingAccumulator::default();
+        let stats = CommandRecordingFrameStats {
+            tracked_transition_api_calls: 1,
+            ..Default::default()
+        };
+        accumulator.push(f64::NAN, stats);
+        accumulator.push(f64::INFINITY, stats);
+        accumulator.push(-1.0, stats);
+        assert_eq!(accumulator.report(), CommandRecordingStats::default());
     }
 }

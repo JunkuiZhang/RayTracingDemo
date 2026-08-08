@@ -7,6 +7,7 @@ pub struct RealtimeConfig {
     pub benchmark_seconds: Option<u32>,
     pub atrous_mode: AtrousMode,
     pub output_size: Option<(u32, u32)>,
+    pub command_recording_mode: CommandRecordingMode,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -21,6 +22,22 @@ impl AtrousMode {
         match self {
             Self::Baseline => "baseline",
             Self::Shared => "shared",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CommandRecordingMode {
+    #[default]
+    Baseline,
+    Optimized,
+}
+
+impl CommandRecordingMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Baseline => "baseline",
+            Self::Optimized => "optimized",
         }
     }
 }

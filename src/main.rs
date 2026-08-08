@@ -71,11 +71,12 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                 | "--benchmark-seconds"
                 | "--atrous-mode"
                 | "--output-size"
+                | "--command-recording-mode"
         )
     });
     if cpu_reference_requested && realtime_requested {
         return Err(
-            "--cpu-reference 不能与实时渲染选项（--model、--animate-model、--benchmark-seconds、--atrous-mode、--output-size）同时使用"
+            "--cpu-reference 不能与实时渲染选项（--model、--animate-model、--benchmark-seconds、--atrous-mode、--output-size、--command-recording-mode）同时使用"
                 .to_string(),
         );
     }
@@ -105,6 +106,12 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                 "--output-size" => {
                     let value = arguments.next().ok_or("--output-size 缺少尺寸")?;
                     config.output_size = Some(parse_output_size(&value)?);
+                }
+                "--command-recording-mode" => {
+                    let value = arguments
+                        .next()
+                        .ok_or("--command-recording-mode 缺少模式")?;
+                    config.command_recording_mode = parse_command_recording_mode(&value)?;
                 }
                 _ => return Err(format!("未知参数：{argument}")),
             }
@@ -195,12 +202,22 @@ fn parse_output_size(value: &str) -> Result<(u32, u32), String> {
     Ok((width, height))
 }
 
+fn parse_command_recording_mode(value: &str) -> Result<realtime::CommandRecordingMode, String> {
+    match value {
+        "baseline" => Ok(realtime::CommandRecordingMode::Baseline),
+        "optimized" => Ok(realtime::CommandRecordingMode::Optimized),
+        _ => Err(format!(
+            "无效的命令记录模式：{value}（仅支持 baseline 或 optimized）"
+        )),
+    }
+}
+
 fn print_help() {
     println!(
         "RayTracingDemo\n\n\
          用法：\n  \
          cargo run --release                 启动实时 DX12 窗口\n  \
-         cargo run --release -- --model <路径> [--animate-model] [--benchmark-seconds <秒>] [--atrous-mode <模式>] [--output-size <宽x高>]\n  \
+         cargo run --release -- --model <路径> [--animate-model] [--benchmark-seconds <秒>] [--atrous-mode <模式>] [--output-size <宽x高>] [--command-recording-mode <模式>]\n  \
          cargo run --release -- --cpu-reference [选项]\n\n\
          选项：\n  \
          --samples <数量>       每像素采样数，默认 1\n  \
@@ -210,6 +227,7 @@ fn print_help() {
          --benchmark-seconds <秒> 预热后输出固定格式 GPU JSON 报告（1..3600）\n  \
          --atrous-mode <模式>      À-Trous 路径：baseline 或 shared，默认 baseline\n  \
          --output-size <宽x高>     窗口物理像素尺寸，范围 320x180..7680x4320\n  \
+         --command-recording-mode <模式> 命令记录：baseline 或 optimized，默认 baseline\n  \
          --help, -h             显示帮助"
     );
 }
@@ -312,5 +330,24 @@ mod tests {
         assert!(parse_output_size("1920").is_err());
         assert!(parse_output_size("0x1080").is_err());
         assert!(parse_output_size("8000x4500").is_err());
+    }
+
+    #[test]
+    fn parses_and_rejects_command_recording_modes() {
+        let command = parse_arguments([
+            "--command-recording-mode".to_string(),
+            "optimized".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            command,
+            Command::Realtime(RealtimeConfig {
+                command_recording_mode: crate::realtime::CommandRecordingMode::Optimized,
+                ..
+            })
+        ));
+        assert!(parse_command_recording_mode("baseline").is_ok());
+        assert!(parse_command_recording_mode("other").is_err());
+        assert!(parse_arguments(["--command-recording-mode".to_string()]).is_err());
     }
 }
