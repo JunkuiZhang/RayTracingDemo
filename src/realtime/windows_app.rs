@@ -9,7 +9,7 @@ use windows::Win32::UI::HiDpi::{
 };
 use winit::{
     application::ApplicationHandler,
-    dpi::{LogicalSize, PhysicalSize},
+    dpi::PhysicalSize,
     event::{ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
@@ -24,7 +24,11 @@ use crate::{
 pub fn run(config: RealtimeConfig) -> Result<(), Box<dyn Error>> {
     // 让窗口、截图工具和 GPU 输出统一使用物理像素，避免 200% 缩放时只截到左上角四分之一。
     unsafe {
-        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        if let Err(error) =
+            SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+        {
+            eprintln!("设置 Per-Monitor DPI 感知失败，将使用系统当前 DPI 设置：{error}");
+        }
     }
     let event_loop = EventLoop::new()
         .map_err(|error| io::Error::other(format!("创建 winit 事件循环：{error}")))?;
@@ -67,13 +71,24 @@ impl ApplicationHandler for RealtimeApplication {
 
         let attributes = Window::default_attributes()
             .with_title("RayTracingDemo - DX12 阶段 7")
-            .with_inner_size(LogicalSize::new(1280, 720))
-            .with_min_inner_size(LogicalSize::new(320, 180));
+            // 这里故意使用物理像素。若使用 LogicalSize，200% DPI 会把默认
+            // DX12 工作尺寸隐式放大为 2560x1440，Debug Validation 成本也随之变成约 4 倍。
+            .with_inner_size(PhysicalSize::new(1280, 720))
+            .with_min_inner_size(PhysicalSize::new(320, 180));
         let window = match event_loop.create_window(attributes) {
             Ok(window) => window,
             Err(error) => return self.fail(event_loop, format!("创建窗口：{error}")),
         };
         let size = window.inner_size();
+        let logical_size = size.to_logical::<f64>(window.scale_factor());
+        eprintln!(
+            "DX12 窗口：DPI scale factor {:.2}，logical {:.0}x{:.0}，physical {}x{}",
+            window.scale_factor(),
+            logical_size.width,
+            logical_size.height,
+            size.width,
+            size.height
+        );
         let renderer =
             match Dx12Renderer::new(&window, size.width.max(1), size.height.max(1), &self.config) {
                 Ok(renderer) => renderer,
