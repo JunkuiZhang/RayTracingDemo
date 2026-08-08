@@ -791,7 +791,7 @@ Rust 只传递稳定的句柄、枚举和 POD 结构，禁止跨 FFI 传递 Rust
 
 详细实施、分提交顺序、数据契约和 Luna 执行提示词见 [`阶段7动态场景与glTF执行计划.md`](./阶段7动态场景与glTF执行计划.md)。
 
-**实现状态（2026-08-08）：7A–7F 已提交；GPU-Based Validation、Release 多分辨率和公开 PBR 资产手工验收尚未在本工作区执行，不能据此宣称阶段 7 完成。**
+**实现状态（2026-08-08）：7A–7F 已提交；7G 已完成自动化真机冒烟和 Release 计时采样，但公开 PBR 资产手工验收、30 秒动画和逐调试视图图像核验仍未完成，不能据此宣称阶段 7 完成。**
 
 工作内容：
 
@@ -805,6 +805,20 @@ Rust 只传递稳定的句柄、枚举和 POD 结构，禁止跨 FFI 传递 Rust
 
 - 能加载至少一个公开 glTF 测试场景。
 - 物体运动时阴影、反射和降噪历史正确更新。
+
+本工作区的 7G 实测记录：
+
+| 构建/场景 | 结果 |
+| --- | --- |
+| Debug GPU-Based Validation + RTX 4060 Laptop GPU + Cornell | 启动运行约 12 秒，无 D3D12 验证错误 |
+| Debug GPU-Based Validation + 静态 Triangle | 启动运行约 12 秒，无验证错误；仅输出缺少 tangent 的预期警告 |
+| Debug GPU-Based Validation + 动画 Triangle | 启动运行约 15 秒，无验证错误；仅输出缺少 tangent 的预期警告 |
+| Debug UI 序列 | resize、3 次 F1、最小化/恢复运行，无验证错误 |
+| Release 1280×720 | Total 约 10.6–11.1 ms；AS 0.01；Path Trace 约 5.2–5.9；Temporal 约 1.5–1.6；À-Trous 约 3.4–4.0 ms |
+| Release 1600×900 | Total 约 11.1–11.8 ms；AS 0.01；Path Trace 约 5.6–5.9；Temporal 约 1.6–1.7；À-Trous 约 3.8–4.1 ms |
+| Release 1907×1044（屏幕工作区限制） | Total 约 23.2–23.8 ms；AS 0.01；Path Trace 约 11.4–11.7；Temporal 约 3.4；À-Trous 约 8.0–8.2 ms |
+
+尚未达到的条件：仓库没有可离线验收的 Khronos `BoxTextured` 或 `DamagedHelmet.glb`，因此未完成公开 PBR 资产的纹理方向/法线图人工截图；未执行 30 秒连续动画、逐个 F1 视图的图像对比和 720p/900p/1080p 全套 Debug Validation 长时序列。上述限制必须在补齐资产和测试时间后再关闭。
 
 ### 阶段 8：性能优化
 
