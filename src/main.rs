@@ -9,6 +9,7 @@ mod entity;
 mod material;
 mod realtime;
 mod renderer;
+mod scene;
 mod settings;
 mod some_math;
 mod systems;
@@ -23,7 +24,7 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        Ok(Command::Realtime) => match realtime::run() {
+        Ok(Command::Realtime(config)) => match realtime::run(config) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("实时 DX12 渲染器启动失败：{error}");
@@ -43,23 +44,53 @@ fn main() -> ExitCode {
 }
 
 enum Command {
-    Realtime,
+    Realtime(realtime::RealtimeConfig),
     CpuReference(CpuReferenceConfig),
     Help,
 }
 
 fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Command, String> {
-    let mut arguments = arguments.into_iter();
-    let Some(command) = arguments.next() else {
-        return Ok(Command::Realtime);
-    };
-    if command == "--help" || command == "-h" {
-        return Ok(Command::Help);
+    let arguments = arguments.into_iter().collect::<Vec<_>>();
+    if arguments
+        .iter()
+        .any(|argument| argument == "--help" || argument == "-h")
+    {
+        if arguments.len() == 1 {
+            return Ok(Command::Help);
+        }
+        return Err("--help 不能与其他参数同时使用".to_string());
     }
-    if command != "--cpu-reference" {
-        return Err(format!("未知命令：{command}"));
+    let cpu_reference_requested = arguments
+        .iter()
+        .any(|argument| argument == "--cpu-reference");
+    let realtime_requested = arguments
+        .iter()
+        .any(|argument| matches!(argument.as_str(), "--model" | "--animate-model"));
+    if cpu_reference_requested && realtime_requested {
+        return Err("--cpu-reference 不能与 --model 或 --animate-model 同时使用".to_string());
     }
 
+    if !cpu_reference_requested {
+        let mut config = realtime::RealtimeConfig::default();
+        let mut arguments = arguments.into_iter();
+        while let Some(argument) = arguments.next() {
+            match argument.as_str() {
+                "--model" => {
+                    let value = arguments.next().ok_or("--model 缺少路径")?;
+                    let path = PathBuf::from(&value);
+                    if !path.is_file() {
+                        return Err(format!("模型文件不存在或不是文件：{}", path.display()));
+                    }
+                    config.model_path = Some(path);
+                }
+                "--animate-model" => config.animate_model = true,
+                _ => return Err(format!("未知参数：{argument}")),
+            }
+        }
+        return Ok(Command::Realtime(config));
+    }
+
+    let mut arguments = arguments.into_iter();
     let mut config = CpuReferenceConfig::default();
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -81,6 +112,7 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                 config.output_dir = PathBuf::from(value);
             }
             "--skip-denoise" => config.denoise = false,
+            "--cpu-reference" => {}
             _ => return Err(format!("未知参数：{argument}")),
         }
     }
@@ -104,6 +136,7 @@ fn print_help() {
         "RayTracingDemo\n\n\
          用法：\n  \
          cargo run --release                 启动实时 DX12 窗口\n  \
+         cargo run --release -- --model <路径> [--animate-model]\n  \
          cargo run --release -- --cpu-reference [选项]\n\n\
          选项：\n  \
          --samples <数量>       每像素采样数，默认 1\n  \
@@ -139,7 +172,20 @@ mod tests {
     fn realtime_is_the_default_command() {
         assert!(matches!(
             parse_arguments(Vec::<String>::new()),
-            Ok(Command::Realtime)
+            Ok(Command::Realtime(_))
         ));
+    }
+
+    #[test]
+    fn rejects_missing_model_path() {
+        let result = parse_arguments(["--model".to_string(), "does-not-exist.gltf".to_string()]);
+        assert!(matches!(result, Err(message) if message.contains("模型文件不存在")));
+    }
+
+    #[test]
+    fn rejects_realtime_options_with_cpu_reference() {
+        let result =
+            parse_arguments(["--cpu-reference".to_string(), "--animate-model".to_string()]);
+        assert!(matches!(result, Err(message) if message.contains("不能与")));
     }
 }

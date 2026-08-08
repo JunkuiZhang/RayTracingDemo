@@ -16,16 +16,22 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use crate::renderer::d3d12::{Dx12Renderer, profiler::GpuPass};
+use crate::{
+    realtime::RealtimeConfig,
+    renderer::d3d12::{Dx12Renderer, profiler::GpuPass},
+};
 
-pub fn run() -> Result<(), Box<dyn Error>> {
+pub fn run(config: RealtimeConfig) -> Result<(), Box<dyn Error>> {
     // 让窗口、截图工具和 GPU 输出统一使用物理像素，避免 200% 缩放时只截到左上角四分之一。
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
     let event_loop = EventLoop::new()
         .map_err(|error| io::Error::other(format!("创建 winit 事件循环：{error}")))?;
-    let mut application = RealtimeApplication::default();
+    let mut application = RealtimeApplication {
+        config,
+        ..Default::default()
+    };
     event_loop
         .run_app(&mut application)
         .map_err(|error| io::Error::other(format!("运行 winit 事件循环：{error}")))?;
@@ -37,6 +43,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 
 #[derive(Default)]
 struct RealtimeApplication {
+    config: RealtimeConfig,
     window: Option<Window>,
     renderer: Option<Dx12Renderer>,
     failure: Option<String>,
@@ -67,10 +74,11 @@ impl ApplicationHandler for RealtimeApplication {
             Err(error) => return self.fail(event_loop, format!("创建窗口：{error}")),
         };
         let size = window.inner_size();
-        let renderer = match Dx12Renderer::new(&window, size.width.max(1), size.height.max(1)) {
-            Ok(renderer) => renderer,
-            Err(error) => return self.fail(event_loop, format!("创建 DX12 后端：{error}")),
-        };
+        let renderer =
+            match Dx12Renderer::new(&window, size.width.max(1), size.height.max(1), &self.config) {
+                Ok(renderer) => renderer,
+                Err(error) => return self.fail(event_loop, format!("创建 DX12 后端：{error}")),
+            };
         self.renderer = Some(renderer);
         self.window = Some(window);
     }

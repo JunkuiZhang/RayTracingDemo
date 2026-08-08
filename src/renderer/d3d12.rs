@@ -17,6 +17,8 @@ use winit::{
     window::Window,
 };
 
+use crate::realtime::RealtimeConfig;
+
 use self::{
     descriptor::DescriptorHeap,
     pipeline::ComputePipeline,
@@ -153,8 +155,14 @@ pub struct Dx12Renderer {
 }
 
 impl Dx12Renderer {
-    pub fn new(window: &Window, width: u32, height: u32) -> Result<Self> {
+    pub fn new(window: &Window, width: u32, height: u32, config: &RealtimeConfig) -> Result<Self> {
         unsafe {
+            if config.model_path.is_some() || config.animate_model {
+                return Err(WindowsError::new(
+                    windows::core::HRESULT(0x80004005_u32 as i32),
+                    "阶段 7A 已注册 --model/--animate-model 参数；glTF 加载将在阶段 7B 实现",
+                ));
+            }
             enable_debug_interfaces();
 
             let factory_flags = if cfg!(debug_assertions) {

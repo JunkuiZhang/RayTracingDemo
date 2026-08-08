@@ -9,6 +9,8 @@ use windows::{
     core::{Interface, PCWSTR, Result},
 };
 
+use crate::scene::SceneAsset;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Vertex {
@@ -45,7 +47,14 @@ pub struct AccelerationStructures {
 
 impl SceneGeometry {
     pub fn new(device: &ID3D12Device, command_list: &ID3D12GraphicsCommandList) -> Result<Self> {
-        let (vertices, indices, material_indices, object_indices) = create_cornell_box();
+        let scene = SceneAsset::cornell_box();
+        scene.validate().map_err(|error| {
+            windows::core::Error::new(
+                windows::core::HRESULT(0x80004005_u32 as i32),
+                format!("验证 Cornell Box CPU 场景：{error}"),
+            )
+        })?;
+        let (vertices, indices, material_indices, object_indices) = flatten_scene(&scene);
         let materials = create_materials();
         let (vertex_buffer, vertex_upload) =
             create_static_buffer(device, command_list, &vertices, "Cornell Box 顶点")?;
@@ -145,6 +154,38 @@ impl SceneGeometry {
     }
 }
 
+fn flatten_scene(scene: &SceneAsset) -> (Vec<Vertex>, Vec<u32>, Vec<u32>, Vec<u32>) {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let mut material_indices = Vec::new();
+    let mut object_indices = Vec::new();
+    for instance in &scene.instances {
+        let primitive = &scene.primitives[instance.primitive_index];
+        let base_vertex = vertices.len() as u32;
+        vertices.extend(primitive.vertices.iter().map(|vertex| Vertex {
+            position: vertex.position,
+            normal: vertex.normal,
+        }));
+        indices.extend(primitive.indices.iter().map(|index| base_vertex + index));
+        material_indices.extend(std::iter::repeat_n(
+            primitive.material_index as u32,
+            primitive.indices.len() / 3,
+        ));
+        let object_index = if instance.primitive_index < 6 {
+            instance.primitive_index as u32
+        } else if instance.primitive_index < 12 {
+            6
+        } else {
+            7
+        };
+        object_indices.extend(std::iter::repeat_n(
+            object_index,
+            primitive.indices.len() / 3,
+        ));
+    }
+    (vertices, indices, material_indices, object_indices)
+}
+
 fn create_materials() -> [Material; 6] {
     [
         Material {
@@ -172,195 +213,6 @@ fn create_materials() -> [Material; 6] {
             emission_and_kind: [0.0, 0.0, 0.0, 2.0],
         },
     ]
-}
-
-fn create_cornell_box() -> (Vec<Vertex>, Vec<u32>, Vec<u32>, Vec<u32>) {
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
-    let mut materials = Vec::new();
-    add_quad(
-        &mut vertices,
-        &mut indices,
-        &mut materials,
-        [
-            [-1.0, -1.0, 0.0],
-            [1.0, -1.0, 0.0],
-            [1.0, -1.0, 2.0],
-            [-1.0, -1.0, 2.0],
-        ],
-        [0.0, 1.0, 0.0],
-        0,
-    );
-    add_quad(
-        &mut vertices,
-        &mut indices,
-        &mut materials,
-        [
-            [-1.0, 1.0, 2.0],
-            [1.0, 1.0, 2.0],
-            [1.0, 1.0, 0.0],
-            [-1.0, 1.0, 0.0],
-        ],
-        [0.0, -1.0, 0.0],
-        0,
-    );
-    add_quad(
-        &mut vertices,
-        &mut indices,
-        &mut materials,
-        [
-            [-1.0, -1.0, 2.0],
-            [1.0, -1.0, 2.0],
-            [1.0, 1.0, 2.0],
-            [-1.0, 1.0, 2.0],
-        ],
-        [0.0, 0.0, -1.0],
-        0,
-    );
-    add_quad(
-        &mut vertices,
-        &mut indices,
-        &mut materials,
-        [
-            [-1.0, -1.0, 0.0],
-            [-1.0, -1.0, 2.0],
-            [-1.0, 1.0, 2.0],
-            [-1.0, 1.0, 0.0],
-        ],
-        [1.0, 0.0, 0.0],
-        2,
-    );
-    add_quad(
-        &mut vertices,
-        &mut indices,
-        &mut materials,
-        [
-            [1.0, -1.0, 2.0],
-            [1.0, -1.0, 0.0],
-            [1.0, 1.0, 0.0],
-            [1.0, 1.0, 2.0],
-        ],
-        [-1.0, 0.0, 0.0],
-        1,
-    );
-    add_quad(
-        &mut vertices,
-        &mut indices,
-        &mut materials,
-        [
-            [-0.25, 0.996_666_7, 0.666_666_7],
-            [0.25, 0.996_666_7, 0.666_666_7],
-            [0.25, 0.996_666_7, 1.166_666_6],
-            [-0.25, 0.996_666_7, 1.166_666_6],
-        ],
-        [0.0, -1.0, 0.0],
-        3,
-    );
-    add_oriented_box(
-        &mut vertices,
-        &mut indices,
-        &mut materials,
-        [-0.633_333_3, -1.0, 0.933_333_34],
-        [-0.066_666_67, 0.1, 1.533_333_3],
-        (-10.0_f32).to_radians(),
-        0,
-    );
-    add_oriented_box(
-        &mut vertices,
-        &mut indices,
-        &mut materials,
-        [0.166_666_67, -1.0, 0.4],
-        [0.666_666_7, -0.5, 0.9],
-        5.0_f32.to_radians(),
-        0,
-    );
-    let object_indices = (0..materials.len())
-        .map(|primitive| match primitive {
-            0..=11 => (primitive / 2) as u32,
-            12..=23 => 6,
-            _ => 7,
-        })
-        .collect();
-    (vertices, indices, materials, object_indices)
-}
-
-fn add_oriented_box(
-    vertices: &mut Vec<Vertex>,
-    indices: &mut Vec<u32>,
-    materials: &mut Vec<u32>,
-    min: [f32; 3],
-    max: [f32; 3],
-    angle: f32,
-    material: u32,
-) {
-    let [x0, y0, z0] = min;
-    let [x1, y1, z1] = max;
-    let center = [(x0 + x1) * 0.5, (y0 + y1) * 0.5, (z0 + z1) * 0.5];
-    let (sine, cosine) = angle.sin_cos();
-    let transform_position = |position: [f32; 3]| {
-        let x = position[0] - center[0];
-        let z = position[2] - center[2];
-        [
-            center[0] + cosine * x + sine * z,
-            position[1],
-            center[2] - sine * x + cosine * z,
-        ]
-    };
-    let transform_normal = |normal: [f32; 3]| {
-        [
-            cosine * normal[0] + sine * normal[2],
-            normal[1],
-            -sine * normal[0] + cosine * normal[2],
-        ]
-    };
-    let mut add_face = |positions: [[f32; 3]; 4], normal: [f32; 3]| {
-        add_quad(
-            vertices,
-            indices,
-            materials,
-            positions.map(transform_position),
-            transform_normal(normal),
-            material,
-        );
-    };
-    add_face(
-        [[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0]],
-        [0.0, 0.0, -1.0],
-    );
-    add_face(
-        [[x1, y0, z1], [x0, y0, z1], [x0, y1, z1], [x1, y1, z1]],
-        [0.0, 0.0, 1.0],
-    );
-    add_face(
-        [[x0, y0, z1], [x0, y0, z0], [x0, y1, z0], [x0, y1, z1]],
-        [-1.0, 0.0, 0.0],
-    );
-    add_face(
-        [[x1, y0, z0], [x1, y0, z1], [x1, y1, z1], [x1, y1, z0]],
-        [1.0, 0.0, 0.0],
-    );
-    add_face(
-        [[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]],
-        [0.0, 1.0, 0.0],
-    );
-    add_face(
-        [[x0, y0, z1], [x1, y0, z1], [x1, y0, z0], [x0, y0, z0]],
-        [0.0, -1.0, 0.0],
-    );
-}
-
-fn add_quad(
-    vertices: &mut Vec<Vertex>,
-    indices: &mut Vec<u32>,
-    materials: &mut Vec<u32>,
-    positions: [[f32; 3]; 4],
-    normal: [f32; 3],
-    material: u32,
-) {
-    let base = vertices.len() as u32;
-    vertices.extend(positions.map(|position| Vertex { position, normal }));
-    indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
-    materials.extend([material, material]);
 }
 
 impl AccelerationStructures {
@@ -821,7 +673,8 @@ mod tests {
 
     #[test]
     fn cornell_box_geometry_has_consistent_primitive_metadata() {
-        let (vertices, indices, materials, object_indices) = create_cornell_box();
+        let (vertices, indices, materials, object_indices) =
+            flatten_scene(&SceneAsset::cornell_box());
         assert_eq!(vertices.len(), 72);
         assert_eq!(indices.len(), 108);
         assert_eq!(materials.len(), indices.len() / 3);
@@ -836,7 +689,7 @@ mod tests {
 
     #[test]
     fn cornell_box_normals_stay_normalized_after_rotation() {
-        let (vertices, _, _, _) = create_cornell_box();
+        let (vertices, _, _, _) = flatten_scene(&SceneAsset::cornell_box());
         for vertex in vertices {
             let length_squared = vertex.normal.iter().map(|value| value * value).sum::<f32>();
             assert!((length_squared - 1.0).abs() < 1.0e-5);
