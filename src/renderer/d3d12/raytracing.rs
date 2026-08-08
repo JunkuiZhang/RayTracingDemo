@@ -521,8 +521,14 @@ impl AccelerationStructures {
             device,
             scratch_size,
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_COMMON,
         )?;
+        transition_buffer(
+            command_list,
+            &scratch,
+            D3D12_RESOURCE_STATE_COMMON,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        );
 
         for (primitive_index, blas_resource) in blas.iter().enumerate() {
             let geometry_desc = geometry.geometry_desc(primitive_index);
@@ -703,10 +709,16 @@ fn create_static_buffer<T: Copy>(
         device,
         byte_size,
         D3D12_RESOURCE_FLAG_NONE,
-        D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATE_COMMON,
     )?;
     set_resource_name(&default, name)?;
     let upload = create_upload_buffer(device, values, &format!("{name} Upload"))?;
+    transition_buffer(
+        command_list,
+        &default,
+        D3D12_RESOURCE_STATE_COMMON,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+    );
     unsafe {
         command_list.CopyBufferRegion(&default, 0, &upload, 0, byte_size);
     }

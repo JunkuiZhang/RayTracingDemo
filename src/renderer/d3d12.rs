@@ -36,6 +36,7 @@ use raytracing::{AccelerationStructures, RaytracingPipeline, SceneGeometry};
 mod descriptor;
 mod memory;
 mod pipeline;
+mod pix;
 pub(crate) mod profiler;
 mod raytracing;
 mod resource;
@@ -1473,6 +1474,9 @@ impl Drop for Dx12Renderer {
     fn drop(&mut self) {
         unsafe {
             let _ = self.wait_for_gpu();
+            if cfg!(debug_assertions) {
+                report_debug_messages(&self.device);
+            }
             let _ = CloseHandle(self.fence_event);
         }
     }
@@ -1637,10 +1641,53 @@ unsafe fn configure_info_queue(device: &ID3D12Device) {
         return;
     }
     if let Ok(info_queue) = device.cast::<ID3D12InfoQueue>() {
-        unsafe {
-            let _ = info_queue.SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, true);
-            let _ = info_queue.SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, true);
+        // Keep validation messages in the queue for the shutdown report. A
+        // debugger break would terminate a standalone smoke-test process
+        // before the message can be observed.
+        unsafe { info_queue.ClearStoredMessages() };
+    }
+}
+
+unsafe fn report_debug_messages(device: &ID3D12Device) {
+    let Ok(info_queue) = device.cast::<ID3D12InfoQueue>() else {
+        return;
+    };
+    let message_count = unsafe { info_queue.GetNumStoredMessagesAllowedByRetrievalFilter() };
+    if message_count == 0 {
+        eprintln!("D3D12 Debug InfoQueue：0 条消息");
+        return;
+    }
+    eprintln!("D3D12 Debug InfoQueue：{} 条消息", message_count);
+    for index in 0..message_count.min(32) {
+        let mut byte_length = 0usize;
+        if unsafe { info_queue.GetMessage(index, None, &mut byte_length) }.is_err()
+            || byte_length == 0
+        {
+            continue;
         }
+        let mut storage = vec![0_u8; byte_length];
+        let message = storage.as_mut_ptr().cast::<D3D12_MESSAGE>();
+        if unsafe { info_queue.GetMessage(index, Some(message), &mut byte_length) }.is_err() {
+            continue;
+        }
+        let description = if unsafe { (*message).pDescription.is_null() } {
+            "<无描述>".to_string()
+        } else {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    (*message).pDescription,
+                    (*message).DescriptionByteLength,
+                )
+            };
+            String::from_utf8_lossy(bytes).into_owned()
+        };
+        eprintln!(
+            "D3D12 Debug [{}] severity={} id={}: {}",
+            index,
+            unsafe { (*message).Severity.0 },
+            unsafe { (*message).ID.0 },
+            description.trim_end_matches('\0')
+        );
     }
 }
 

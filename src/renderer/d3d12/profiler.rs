@@ -5,6 +5,8 @@ use windows::{
     core::Result,
 };
 
+use super::pix::PixEventRuntime;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(usize)]
 pub enum GpuPass {
@@ -140,6 +142,7 @@ pub struct GpuProfiler {
     last_sample: Option<GpuTimingSample>,
     windows: [RollingStats; PASS_COUNT],
     valid_sample_serial: u64,
+    pix: PixEventRuntime,
 }
 
 impl GpuProfiler {
@@ -193,6 +196,7 @@ impl GpuProfiler {
             last_sample: None,
             windows: [RollingStats::default(); PASS_COUNT],
             valid_sample_serial: 0,
+            pix: PixEventRuntime::load(),
         })
     }
 
@@ -209,28 +213,27 @@ impl GpuProfiler {
         self.write_timestamp(command_list, frame_index, pass, 1);
     }
 
-    /// Add a named GPU capture region. The payload is static and does not
-    /// allocate; PIX consumes it while the command list is recorded.
+    /// Add a named GPU capture region through WinPixEventRuntime. The payload
+    /// is static and does not allocate; if the optional runtime is absent this
+    /// safely becomes a no-op instead of calling D3D12's internal API.
     pub fn begin_event(&self, command_list: &ID3D12GraphicsCommandList, pass: GpuPass) {
-        let label = match pass {
-            GpuPass::AccelerationStructure => b"Stage8 AS".as_slice(),
-            GpuPass::PathTrace => b"Stage8 Path Trace".as_slice(),
-            GpuPass::Temporal => b"Stage8 Temporal".as_slice(),
-            GpuPass::Atrous => b"Stage8 A-Trous aggregate".as_slice(),
-            GpuPass::Atrous0 => b"Stage8 A-Trous 0".as_slice(),
-            GpuPass::Atrous1 => b"Stage8 A-Trous 1".as_slice(),
-            GpuPass::Atrous2 => b"Stage8 A-Trous 2".as_slice(),
-            GpuPass::Atrous3 => b"Stage8 A-Trous 3".as_slice(),
-            GpuPass::ToneMap => b"Stage8 ToneMap".as_slice(),
-            GpuPass::Total => b"Stage8 Total".as_slice(),
+        let label: &'static [u8] = match pass {
+            GpuPass::AccelerationStructure => b"Stage8 AS\0",
+            GpuPass::PathTrace => b"Stage8 Path Trace\0",
+            GpuPass::Temporal => b"Stage8 Temporal\0",
+            GpuPass::Atrous => b"Stage8 A-Trous aggregate\0",
+            GpuPass::Atrous0 => b"Stage8 A-Trous 0\0",
+            GpuPass::Atrous1 => b"Stage8 A-Trous 1\0",
+            GpuPass::Atrous2 => b"Stage8 A-Trous 2\0",
+            GpuPass::Atrous3 => b"Stage8 A-Trous 3\0",
+            GpuPass::ToneMap => b"Stage8 ToneMap\0",
+            GpuPass::Total => b"Stage8 Total\0",
         };
-        unsafe {
-            command_list.BeginEvent(0, Some(label.as_ptr().cast::<c_void>()), label.len() as u32);
-        }
+        self.pix.begin(command_list, label);
     }
 
     pub fn end_event(&self, command_list: &ID3D12GraphicsCommandList) {
-        unsafe { command_list.EndEvent() };
+        self.pix.end(command_list);
     }
 
     fn write_timestamp(
