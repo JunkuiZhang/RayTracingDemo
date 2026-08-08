@@ -1,0 +1,5 @@
+# Keep immutable upstream WinPixEventRuntime distribution files out of textual
+# whitespace normalization/diffs. Their source package and SHA-256 are recorded
+# in third_party/winpix/README.md.
+/third_party/winpix/ThirdPartyNotices.txt -diff -text
+/third_party/winpix/x64/WinPixEventRuntime.dll binary

@@ -30,6 +30,9 @@ fn main() {
     // the directory keeps build-time shader recompilation in sync with the
     // debug runtime hot-reload path.
     println!("cargo:rerun-if-changed=shaders");
+    println!("cargo:rerun-if-changed=third_party/winpix/x64/WinPixEventRuntime.dll");
+    println!("cargo:rerun-if-changed=third_party/winpix/LICENSE.txt");
+    println!("cargo:rerun-if-changed=third_party/winpix/ThirdPartyNotices.txt");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
@@ -39,7 +42,55 @@ fn main() {
     for (source, output, target) in shaders {
         compile_shader(&dxc, source, &output_directory.join(output), target);
     }
+    deploy_winpix_runtime(&output_directory);
     println!("cargo:rustc-env=RAY_TRACING_DXC={}", dxc.display());
+    println!("cargo:rustc-env=WINPIX_RUNTIME_VERSION=1.0.240308001");
+}
+
+fn deploy_winpix_runtime(output_directory: &Path) {
+    if env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("x86_64") {
+        println!(
+            "cargo:warning=WinPixEventRuntime 仅随仓库提供 x64 版本，当前目标不会部署 PIX runtime"
+        );
+        return;
+    }
+
+    // OUT_DIR is target[/triple]/<profile>/build/<package-hash>/out. Cargo
+    // launches the executable from the profile directory, so keep the runtime
+    // beside the executable as required by WinPixEventRuntime.
+    let profile_directory = output_directory
+        .ancestors()
+        .nth(3)
+        .expect("无法从 OUT_DIR 定位 Cargo profile 输出目录");
+    for (source, destination) in [
+        (
+            Path::new("third_party/winpix/x64/WinPixEventRuntime.dll"),
+            "WinPixEventRuntime.dll",
+        ),
+        (
+            Path::new("third_party/winpix/LICENSE.txt"),
+            "WinPixEventRuntime.LICENSE.txt",
+        ),
+        (
+            Path::new("third_party/winpix/ThirdPartyNotices.txt"),
+            "WinPixEventRuntime.ThirdPartyNotices.txt",
+        ),
+    ] {
+        let destination = profile_directory.join(destination);
+        copy_if_changed(source, &destination);
+    }
+}
+
+fn copy_if_changed(source: &Path, destination: &Path) {
+    let source_bytes =
+        fs::read(source).unwrap_or_else(|error| panic!("读取 {}：{error}", source.display()));
+    if let Ok(destination_bytes) = fs::read(destination)
+        && destination_bytes == source_bytes
+    {
+        return;
+    }
+    fs::write(destination, source_bytes)
+        .unwrap_or_else(|error| panic!("写入 {}：{error}", destination.display()));
 }
 
 fn compile_shader(dxc: &Path, source: &str, output: &Path, target: &str) {

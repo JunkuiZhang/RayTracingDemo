@@ -1,11 +1,11 @@
-use std::ffi::c_void;
+use std::{ffi::c_void, os::windows::ffi::OsStrExt, path::PathBuf};
 
 use windows::{
     Win32::{
-        Foundation::HMODULE,
-        System::LibraryLoader::{GetProcAddress, LoadLibraryA},
+        Foundation::{FreeLibrary, HMODULE},
+        System::LibraryLoader::{GetProcAddress, LoadLibraryW},
     },
-    core::{Interface, PCSTR},
+    core::{Interface, PCSTR, PCWSTR},
 };
 
 type BeginEventOnCommandList = unsafe extern "system" fn(*mut c_void, u64, *const i8);
@@ -15,16 +15,30 @@ type EndEventOnCommandList = unsafe extern "system" fn(*mut c_void);
 /// internal BeginEvent/EndEvent directly produces validation errors; when the
 /// runtime DLL is unavailable we therefore emit no internal calls.
 pub struct PixEventRuntime {
-    _module: Option<HMODULE>,
+    module: Option<HMODULE>,
     begin_event: Option<BeginEventOnCommandList>,
     end_event: Option<EndEventOnCommandList>,
 }
 
 impl PixEventRuntime {
     pub fn load() -> Self {
-        let module = unsafe { LoadLibraryA(PCSTR(c"WinPixEventRuntime.dll".as_ptr().cast())) }.ok();
+        let Some(runtime_path) = runtime_path() else {
+            eprintln!("PIX：无法定位当前可执行文件，GPU event 标记不可用");
+            return Self::unavailable();
+        };
+        let wide_path = runtime_path
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        // Load by an absolute executable-adjacent path. This is both
+        // reproducible and avoids resolving an unrelated DLL from PATH/CWD.
+        let module = unsafe { LoadLibraryW(PCWSTR(wide_path.as_ptr())) }.ok();
         let Some(module) = module else {
-            eprintln!("PIX：未找到 WinPixEventRuntime.dll，GPU event 标记不可用");
+            eprintln!(
+                "PIX：未找到 {}，GPU event 标记不可用",
+                runtime_path.display()
+            );
             return Self::unavailable();
         };
 
@@ -49,13 +63,19 @@ impl PixEventRuntime {
             eprintln!(
                 "PIX：WinPixEventRuntime.dll 缺少 command-list event 导出，GPU event 标记不可用"
             );
+            let _ = unsafe { FreeLibrary(module) };
             return Self::unavailable();
         }
+        eprintln!("PIX：已加载 {}，GPU event 标记可用", runtime_path.display());
         Self {
-            _module: Some(module),
+            module: Some(module),
             begin_event,
             end_event,
         }
+    }
+
+    pub fn is_available(&self) -> bool {
+        self.begin_event.is_some() && self.end_event.is_some()
     }
 
     pub fn begin(
@@ -81,9 +101,24 @@ impl PixEventRuntime {
 
     fn unavailable() -> Self {
         Self {
-            _module: None,
+            module: None,
             begin_event: None,
             end_event: None,
         }
     }
+}
+
+impl Drop for PixEventRuntime {
+    fn drop(&mut self) {
+        if let Some(module) = self.module.take() {
+            let _ = unsafe { FreeLibrary(module) };
+        }
+    }
+}
+
+fn runtime_path() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(|directory| directory.join("WinPixEventRuntime.dll"))
 }
