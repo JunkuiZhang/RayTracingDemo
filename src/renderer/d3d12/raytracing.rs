@@ -11,8 +11,8 @@ use windows::{
 };
 
 use crate::scene::{
-    GpuMaterial, GpuVertex, InstanceGpu, MATERIAL_FLAG_DOUBLE_SIDED,
-    MATERIAL_FLAG_LEGACY_DIELECTRIC, MaterialKind, SceneAsset,
+    GpuMaterial, GpuVertex, InstanceGpu, MATERIAL_FLAG_DOUBLE_SIDED, MATERIAL_FLAG_HAS_TANGENT,
+    MATERIAL_FLAG_LEGACY_DIELECTRIC, MATERIAL_FLAG_LEGACY_METAL, MaterialKind, SceneAsset,
 };
 
 use super::texture::TextureSet;
@@ -131,10 +131,17 @@ impl SceneGeometry {
                 index_count: primitive.indices.len() as u32,
             });
         }
+        let mut material_has_tangent = vec![true; scene.materials.len()];
+        for primitive in &scene.primitives {
+            if primitive.vertices.iter().any(|vertex| !vertex.has_tangent) {
+                material_has_tangent[primitive.material_index] = false;
+            }
+        }
         let materials = scene
             .materials
             .iter()
-            .map(|material| gpu_material(material, textures))
+            .enumerate()
+            .map(|(index, material)| gpu_material(material, textures, material_has_tangent[index]))
             .collect::<Vec<_>>();
         let instances = scene
             .instances
@@ -324,13 +331,23 @@ fn matrix_rows(matrix: glam::Mat4) -> [[f32; 4]; 4] {
     ]
 }
 
-fn gpu_material(material: &crate::scene::MaterialAsset, textures: &TextureSet) -> GpuMaterial {
+fn gpu_material(
+    material: &crate::scene::MaterialAsset,
+    textures: &TextureSet,
+    has_tangent: bool,
+) -> GpuMaterial {
     let mut flags = 0;
     if material.double_sided {
         flags |= MATERIAL_FLAG_DOUBLE_SIDED;
     }
     if material.kind == MaterialKind::LegacyDielectric {
         flags |= MATERIAL_FLAG_LEGACY_DIELECTRIC;
+    }
+    if material.kind == MaterialKind::LegacyMetal {
+        flags |= MATERIAL_FLAG_LEGACY_METAL;
+    }
+    if material.normal_texture.is_some() && has_tangent {
+        flags |= MATERIAL_FLAG_HAS_TANGENT;
     }
     let [base_color, metallic_roughness, normal, emissive] =
         textures.material_texture_indices(material);
@@ -722,7 +739,7 @@ impl RaytracingPipeline {
             IntersectionShaderImport: PCWSTR::null(),
         };
         let shader_config = D3D12_RAYTRACING_SHADER_CONFIG {
-            MaxPayloadSizeInBytes: 32,
+            MaxPayloadSizeInBytes: 64,
             MaxAttributeSizeInBytes: 8,
         };
         let global_root = D3D12_GLOBAL_ROOT_SIGNATURE {
@@ -964,5 +981,34 @@ mod tests {
             let length_squared = vertex.normal.iter().map(|value| value * value).sum::<f32>();
             assert!((length_squared - 1.0).abs() < 1.0e-5);
         }
+    }
+
+    fn ggx_d(no_h: f32, roughness: f32) -> f32 {
+        let alpha = roughness * roughness;
+        let alpha_squared = alpha * alpha;
+        let denominator = no_h * no_h * (alpha_squared - 1.0) + 1.0;
+        alpha_squared / (std::f32::consts::PI * denominator * denominator).max(1.0e-7)
+    }
+
+    fn fresnel_schlick(cosine: f32, f0: f32) -> f32 {
+        f0 + (1.0 - f0) * (1.0 - cosine.clamp(0.0, 1.0)).powi(5)
+    }
+
+    #[test]
+    fn ggx_extremes_are_finite_non_negative_and_energy_bounded() {
+        for roughness in [0.045, 0.1, 0.5, 1.0] {
+            for no_h in [0.0, 0.001, 0.5, 1.0] {
+                let distribution = ggx_d(no_h, roughness);
+                assert!(distribution.is_finite() && distribution >= 0.0);
+            }
+        }
+        for cosine in [0.0, 0.25, 0.75, 1.0] {
+            let fresnel = fresnel_schlick(cosine, 0.04);
+            assert!((0.04..=1.0).contains(&fresnel));
+        }
+        let metallic_diffuse_weight = (1.0 - 1.0) * (1.0 - fresnel_schlick(0.5, 0.9));
+        let dielectric_diffuse_weight = (1.0 - 0.0) * (1.0 - fresnel_schlick(0.5, 0.04));
+        assert!(metallic_diffuse_weight.abs() < 1.0e-6);
+        assert!(dielectric_diffuse_weight > 0.0);
     }
 }

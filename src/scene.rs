@@ -8,6 +8,7 @@ pub mod gltf_loader;
 pub const MATERIAL_FLAG_DOUBLE_SIDED: u32 = 1 << 0;
 pub const MATERIAL_FLAG_HAS_TANGENT: u32 = 1 << 1;
 pub const MATERIAL_FLAG_LEGACY_DIELECTRIC: u32 = 1 << 2;
+pub const MATERIAL_FLAG_LEGACY_METAL: u32 = 1 << 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaterialKind {

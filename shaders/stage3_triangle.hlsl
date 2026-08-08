@@ -76,6 +76,8 @@ struct Payload
     float lastPdf;
     uint firstKind;
     float hitDistance;
+    float3 rawDiffuse;
+    float3 rawSpecular;
 };
 
 uint RandomUint(inout uint state)
@@ -153,6 +155,99 @@ float4 SampleMaterialTexture(uint textureIndex, float2 uv)
         .SampleLevel(LinearWrap, uv, 0.0);
 }
 
+static const float PI = 3.14159265359;
+
+float3 FresnelSchlick(float cosine, float3 f0)
+{
+    return f0 + (1.0 - f0) * pow(1.0 - saturate(cosine), 5.0);
+}
+
+float D_GGX(float NoH, float roughness)
+{
+    float alpha = roughness * roughness;
+    float alphaSquared = alpha * alpha;
+    float denominator = NoH * NoH * (alphaSquared - 1.0) + 1.0;
+    return alphaSquared / max(PI * denominator * denominator, 1.0e-7);
+}
+
+float G_SchlickGGX(float NoX, float roughness)
+{
+    float k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+    return NoX / max(NoX * (1.0 - k) + k, 1.0e-6);
+}
+
+float G_Smith(float NoV, float NoL, float roughness)
+{
+    return G_SchlickGGX(NoV, roughness) * G_SchlickGGX(NoL, roughness);
+}
+
+struct BrdfEvaluation
+{
+    float3 diffuse;
+    float3 specular;
+    float diffusePdf;
+    float specularPdf;
+};
+
+BrdfEvaluation EvaluateBrdf(
+    float3 normal,
+    float3 viewDirection,
+    float3 lightDirection,
+    float3 baseColor,
+    float metallic,
+    float roughness)
+{
+    BrdfEvaluation value;
+    value.diffuse = 0;
+    value.specular = 0;
+    value.diffusePdf = 0;
+    value.specularPdf = 0;
+    float NoV = saturate(dot(normal, viewDirection));
+    float NoL = saturate(dot(normal, lightDirection));
+    if (NoV <= 0.0 || NoL <= 0.0)
+        return value;
+
+    float3 halfVector = normalize(viewDirection + lightDirection);
+    float NoH = saturate(dot(normal, halfVector));
+    float VoH = saturate(dot(viewDirection, halfVector));
+    float3 f0 = lerp(0.04.xxx, baseColor, metallic);
+    float3 fresnel = FresnelSchlick(VoH, f0);
+    float distribution = D_GGX(NoH, roughness);
+    float geometry = G_Smith(NoV, NoL, roughness);
+    value.specular = distribution * geometry * fresnel
+        / max(4.0 * NoV * NoL, 1.0e-6);
+    value.diffuse = (1.0 - metallic) * (1.0 - fresnel) * baseColor / PI;
+    value.diffusePdf = NoL / PI;
+    value.specularPdf = distribution * NoH / max(4.0 * VoH, 1.0e-6);
+    return value;
+}
+
+float3 SampleGgxDirection(
+    float3 normal,
+    float3 viewDirection,
+    float roughness,
+    inout uint seed,
+    out float pdf)
+{
+    float alpha = roughness * roughness;
+    float phi = 2.0 * PI * RandomFloat(seed);
+    float random = RandomFloat(seed);
+    float cosTheta = sqrt((1.0 - random) / (1.0 + (alpha * alpha - 1.0) * random));
+    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
+    float3 halfTangent = float3(sinTheta * cos(phi), sinTheta * sin(phi), cosTheta);
+    float3 tangent = normalize(abs(normal.z) < 0.999
+        ? cross(float3(0, 0, 1), normal)
+        : cross(float3(0, 1, 0), normal));
+    float3 bitangent = cross(normal, tangent);
+    float3 halfVector = normalize(
+        tangent * halfTangent.x + bitangent * halfTangent.y + normal * halfTangent.z);
+    float3 lightDirection = normalize(reflect(-viewDirection, halfVector));
+    float NoH = saturate(dot(normal, halfVector));
+    float VoH = saturate(dot(viewDirection, halfVector));
+    pdf = D_GGX(NoH, roughness) * NoH / max(4.0 * VoH, 1.0e-6);
+    return lightDirection;
+}
+
 [shader("raygeneration")]
 void RayGen()
 {
@@ -182,6 +277,8 @@ void RayGen()
     payload.lastPdf = 0;
     payload.firstKind = 0;
     payload.hitDistance = 0;
+    payload.rawDiffuse = 0;
+    payload.rawSpecular = 0;
 
     GBufferAlbedo[pixel] = 0;
     GBufferNormalRoughness[pixel] = 0;
@@ -192,10 +289,8 @@ void RayGen()
     GBufferHitDistance[pixel] = 0;
     TraceRay(Scene, RAY_FLAG_NONE, 0xFF, 0, 1, 0, ray, payload);
 
-    float4 sample = float4(payload.radiance, 1.0);
-    bool specularPrimary = payload.firstKind == 1u || payload.firstKind == 2u;
-    RawDiffuse[pixel] = specularPrimary ? 0 : sample;
-    RawSpecular[pixel] = specularPrimary ? sample : 0;
+    RawDiffuse[pixel] = float4(payload.rawDiffuse, 1.0);
+    RawSpecular[pixel] = float4(payload.rawSpecular, 1.0);
 }
 
 [shader("miss")]
@@ -213,6 +308,269 @@ void ShadowMiss(inout Payload payload)
 
 [shader("closesthit")]
 void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes attributes)
+{
+    uint primitive = PrimitiveIndex();
+    InstanceGpu instanceData = Instances[InstanceID()];
+    uint3 triIndices = uint3(
+        Indices[instanceData.indexOffset + primitive * 3],
+        Indices[instanceData.indexOffset + primitive * 3 + 1],
+        Indices[instanceData.indexOffset + primitive * 3 + 2]);
+    float3 barycentric = float3(
+        1.0 - attributes.barycentrics.x - attributes.barycentrics.y,
+        attributes.barycentrics.x,
+        attributes.barycentrics.y);
+    uint vertex0 = instanceData.vertexOffset + triIndices.x;
+    uint vertex1 = instanceData.vertexOffset + triIndices.y;
+    uint vertex2 = instanceData.vertexOffset + triIndices.z;
+    float3 localPosition = Vertices[vertex0].position * barycentric.x
+        + Vertices[vertex1].position * barycentric.y
+        + Vertices[vertex2].position * barycentric.z;
+    float3 localNormal = normalize(
+        Vertices[vertex0].normal * barycentric.x
+        + Vertices[vertex1].normal * barycentric.y
+        + Vertices[vertex2].normal * barycentric.z);
+    float4 localTangent = Vertices[vertex0].tangent * barycentric.x
+        + Vertices[vertex1].tangent * barycentric.y
+        + Vertices[vertex2].tangent * barycentric.z;
+    float2 texcoord0 = Vertices[vertex0].texcoord0 * barycentric.x
+        + Vertices[vertex1].texcoord0 * barycentric.y
+        + Vertices[vertex2].texcoord0 * barycentric.z;
+
+    float3 geometricNormal = normalize(mul(localNormal, (float3x3)WorldToObject3x4()));
+    bool frontFace = dot(WorldRayDirection(), geometricNormal) < 0.0;
+    float3 normal = frontFace ? geometricNormal : -geometricNormal;
+
+    uint materialIndex = instanceData.materialIndex;
+    Material material = Materials[materialIndex];
+    float4 baseColor = material.baseColorFactor
+        * SampleMaterialTexture(material.baseColorTextureAndSampler, texcoord0);
+    float4 metallicRoughness = SampleMaterialTexture(
+        material.metallicRoughnessTextureAndSampler,
+        texcoord0);
+    float3 emissive = material.emissiveFactor
+        * SampleMaterialTexture(material.emissiveTextureAndSampler, texcoord0).xyz;
+    float metallic = saturate(material.metallicFactor * metallicRoughness.b);
+    float roughness = clamp(material.roughnessFactor * metallicRoughness.g, 0.045, 1.0);
+
+    if ((material.flags & 2u) != 0u)
+    {
+        float3 tangent = normalize(mul(localTangent.xyz, (float3x3)ObjectToWorld3x4()));
+        tangent = normalize(tangent - normal * dot(normal, tangent));
+        float3 bitangent = normalize(cross(normal, tangent)) * localTangent.w;
+        float3 tangentNormal = SampleMaterialTexture(
+            material.normalTextureAndSampler,
+            texcoord0).xyz * 2.0 - 1.0;
+        tangentNormal.xy *= material.normalScale;
+        normal = normalize(
+            tangent * tangentNormal.x + bitangent * tangentNormal.y + normal * tangentNormal.z);
+        if (dot(normal, -WorldRayDirection()) < 0.0)
+            normal = -normal;
+    }
+
+    bool legacyDielectric = (material.flags & 4u) != 0u;
+    bool legacyMetal = (material.flags & 8u) != 0u;
+    bool emissiveSurface = any(emissive > 0.0);
+    uint kind = legacyDielectric ? 2u : (legacyMetal ? 1u : (emissiveSurface ? 3u : 0u));
+    float3 hitPosition = mul(ObjectToWorld3x4(), float4(localPosition, 1.0));
+    float3 previousHitPosition = PreviousWorldPosition(localPosition, instanceData);
+    payload.hitDistance = RayTCurrent();
+
+    if (payload.depth == 0)
+    {
+        uint2 pixel = DispatchRaysIndex().xy;
+        uint2 size = DispatchRaysDimensions().xy;
+        payload.firstKind = kind;
+        GBufferAlbedo[pixel] = float4(baseColor.xyz, float(kind));
+        GBufferNormalRoughness[pixel] = float4(normal * 0.5 + 0.5, roughness);
+        GBufferDepth[pixel] = RayTCurrent();
+        GBufferId[pixel] = instanceData.stableSurfaceId;
+        GBufferWorldPosition[pixel] = float4(hitPosition, 1.0);
+        float2 currentUv = (float2(pixel) + 0.5) / float2(size);
+        float2 previousUv = ProjectToPreviousUv(previousHitPosition, size);
+        GBufferMotion[pixel] = ResetHistory != 0u
+            ? 0
+            : (currentUv - previousUv) * float2(size);
+    }
+
+    if (kind == 3u)
+    {
+        float weight = 1.0;
+        if (payload.depth > 0 && payload.lastPdf > 0.0)
+        {
+            const float lightArea = 0.25;
+            float lightPdf = RayTCurrent() * RayTCurrent()
+                / max(0.0001, abs(dot(normal, -WorldRayDirection())) * lightArea);
+            float bsdfSquared = payload.lastPdf * payload.lastPdf;
+            weight = bsdfSquared / max(bsdfSquared + lightPdf * lightPdf, 1.0e-7);
+        }
+        payload.radiance = emissive * weight;
+        if (payload.depth == 0)
+            payload.rawDiffuse = payload.radiance;
+        return;
+    }
+    if (payload.depth >= 3)
+    {
+        payload.radiance = 0;
+        return;
+    }
+
+    float3 viewDirection = normalize(-WorldRayDirection());
+    float3 directDiffuse = 0;
+    float3 directSpecular = 0;
+    if (kind == 0u)
+    {
+        float2 lightRandom = float2(RandomFloat(payload.seed), RandomFloat(payload.seed));
+        float3 lightPoint = float3(-0.25 + lightRandom.x * 0.5, 0.9966667, 0.6666667 + lightRandom.y * 0.5);
+        float3 toLight = lightPoint - hitPosition;
+        float lightDistance = length(toLight);
+        float3 lightDirection = toLight / max(lightDistance, 1.0e-6);
+        float NoL = max(0.0, dot(normal, lightDirection));
+        float lightCosine = max(0.0, dot(float3(0, -1, 0), -lightDirection));
+        if (NoL > 0.0 && lightCosine > 0.0)
+        {
+            Payload shadow;
+            shadow.radiance = 0;
+            shadow.seed = payload.seed;
+            shadow.depth = payload.depth;
+            shadow.lastPdf = 0;
+            shadow.firstKind = 0;
+            shadow.hitDistance = 0;
+            shadow.rawDiffuse = 0;
+            shadow.rawSpecular = 0;
+            RayDesc shadowRay;
+            shadowRay.Origin = hitPosition + normal * 0.002;
+            shadowRay.Direction = lightDirection;
+            shadowRay.TMin = 0.001;
+            shadowRay.TMax = lightDistance - 0.004;
+            TraceRay(
+                Scene,
+                RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
+                0xFF,
+                0,
+                1,
+                1,
+                shadowRay,
+                shadow);
+            BrdfEvaluation brdf = EvaluateBrdf(
+                normal,
+                viewDirection,
+                lightDirection,
+                baseColor.xyz,
+                metallic,
+                roughness);
+            float specularProbability = clamp(
+                max(max(lerp(0.04, baseColor.x, metallic), lerp(0.04, baseColor.y, metallic)),
+                    lerp(0.04, baseColor.z, metallic)),
+                0.05,
+                0.95);
+            float bsdfPdf = (1.0 - specularProbability) * brdf.diffusePdf
+                + specularProbability * brdf.specularPdf;
+            float lightPdf = lightDistance * lightDistance
+                / max(lightCosine * 0.25, 1.0e-6);
+            float lightSquared = lightPdf * lightPdf;
+            float bsdfSquared = bsdfPdf * bsdfPdf;
+            float misWeight = lightSquared / max(lightSquared + bsdfSquared, 1.0e-7);
+            float3 lightRadiance = Materials[3].emissiveFactor;
+            float visibility = shadow.radiance;
+            directDiffuse = visibility * lightRadiance * brdf.diffuse * NoL
+                * misWeight / max(lightPdf, 1.0e-6);
+            directSpecular = visibility * lightRadiance * brdf.specular * NoL
+                * misWeight / max(lightPdf, 1.0e-6);
+        }
+    }
+
+    float3 direction = 0;
+    float3 bounceWeight = 0;
+    float samplePdf = 1.0;
+    bool sampledSpecular = kind == 1u || kind == 2u;
+    if (kind == 1u)
+    {
+        direction = reflect(WorldRayDirection(), normal);
+        bounceWeight = baseColor.xyz;
+    }
+    else if (kind == 2u)
+    {
+        float etaRatio = frontFace ? (1.0 / max(material.ior, 1.0001)) : max(material.ior, 1.0001);
+        float cosine = saturate(dot(-WorldRayDirection(), normal));
+        float3 refracted = refract(WorldRayDirection(), normal, etaRatio);
+        bool reflectRay = length(refracted) < 0.001
+            || Schlick(cosine, etaRatio) > RandomFloat(payload.seed);
+        direction = reflectRay ? reflect(WorldRayDirection(), normal) : refracted;
+        bounceWeight = baseColor.xyz;
+    }
+    else
+    {
+        float3 f0 = lerp(0.04.xxx, baseColor.xyz, metallic);
+        float specularProbability = clamp(max(max(f0.x, f0.y), f0.z), 0.05, 0.95);
+        sampledSpecular = RandomFloat(payload.seed) < specularProbability;
+        if (sampledSpecular)
+        {
+            direction = SampleGgxDirection(normal, viewDirection, roughness, payload.seed, samplePdf);
+            float NoL = max(0.0, dot(normal, direction));
+            BrdfEvaluation brdf = EvaluateBrdf(
+                normal,
+                viewDirection,
+                direction,
+                baseColor.xyz,
+                metallic,
+                roughness);
+            samplePdf = specularProbability * brdf.specularPdf
+                + (1.0 - specularProbability) * brdf.diffusePdf;
+            bounceWeight = (brdf.diffuse + brdf.specular) * NoL / max(samplePdf, 1.0e-6);
+        }
+        else
+        {
+            direction = SampleCosineHemisphere(normal, payload.seed);
+            float NoL = max(0.0, dot(normal, direction));
+            BrdfEvaluation brdf = EvaluateBrdf(
+                normal,
+                viewDirection,
+                direction,
+                baseColor.xyz,
+                metallic,
+                roughness);
+            samplePdf = (1.0 - specularProbability) * brdf.diffusePdf
+                + specularProbability * brdf.specularPdf;
+            bounceWeight = (brdf.diffuse + brdf.specular) * NoL / max(samplePdf, 1.0e-6);
+        }
+    }
+
+    if (dot(normal, direction) <= 0.0)
+        bounceWeight = 0;
+    RayDesc bounce;
+    bounce.Origin = hitPosition + (kind == 2u ? direction : normal) * 0.002;
+    bounce.Direction = normalize(direction);
+    bounce.TMin = 0.001;
+    bounce.TMax = 1000.0;
+    Payload child;
+    child.radiance = 0;
+    child.seed = payload.seed;
+    child.depth = payload.depth + 1;
+    child.lastPdf = kind == 0u ? max(samplePdf, 1.0e-6) : 0.0;
+    child.firstKind = 0;
+    child.hitDistance = 0;
+    child.rawDiffuse = 0;
+    child.rawSpecular = 0;
+    TraceRay(Scene, RAY_FLAG_NONE, 0xFF, 0, 1, 0, bounce, child);
+    payload.seed = child.seed;
+    float3 bouncedRadiance = bounceWeight * child.radiance;
+    if (payload.depth == 0)
+    {
+        payload.rawDiffuse = directDiffuse;
+        payload.rawSpecular = directSpecular;
+        if (sampledSpecular)
+            payload.rawSpecular += bouncedRadiance;
+        else
+            payload.rawDiffuse += bouncedRadiance;
+    }
+    if (payload.depth == 0 && sampledSpecular)
+        GBufferHitDistance[DispatchRaysIndex().xy] = child.hitDistance;
+    payload.radiance = directDiffuse + directSpecular + bouncedRadiance;
+}
+
+// Kept as a reference while validating the GGX replacement; it is not an
+// exported shader and therefore cannot be selected by the DXR hit group.
+void LegacyClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes attributes)
 {
     uint primitive = PrimitiveIndex();
     InstanceGpu instanceData = Instances[InstanceID()];
