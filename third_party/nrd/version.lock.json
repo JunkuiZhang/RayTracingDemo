@@ -1,0 +1,40 @@
+{
+  "nrd": {
+    "repository": "https://github.com/NVIDIA-RTX/NRD.git",
+    "tag": "v4.17.3",
+    "commit": "792eff196afdd350fd9c3f862119017ccb438a0e",
+    "commit_prefix": "792eff1"
+  },
+  "nri": {
+    "repository": "https://github.com/NVIDIA-RTX/NRI.git",
+    "tag": "v179",
+    "commit": "9140b87f29604d358a448d88022d60edae9d799c"
+  },
+  "mathlib": {
+    "repository": "https://github.com/NVIDIA-RTX/MathLib.git",
+    "tag": "v11",
+    "commit": "974e1387ba936740c7cdc494792d2641bc127e86"
+  },
+  "shadermake": {
+    "repository": "https://github.com/NVIDIA-RTX/ShaderMake.git",
+    "commit": "18f5a344e7ca8fa65daaf079d07bc8ce38453e05"
+  },
+  "fetch_content": {
+    "fully_disconnected": true,
+    "nrd_nri": true,
+    "nrd_static_library": true,
+    "nrd_embeds_dxil_shaders": true,
+    "nrd_embeds_dxbc_shaders": false,
+    "nrd_embeds_spirv_shaders": false
+  },
+  "license_hashes": {
+    "status": "verified",
+    "files": {
+      "LICENSE.txt": "85201d19c2dc5041d9a2029e9fda9d78105fe41ce21ce9701d4aa7e56184b6e7",
+      "_deps/NRI/LICENSE.txt": "c8bd33d1ed7d6f5e5656e1f5df11373e99dabb77d94dc59a67a66de571dca521",
+      "_deps/MathLib/LICENSE.txt": "c8bd33d1ed7d6f5e5656e1f5df11373e99dabb77d94dc59a67a66de571dca521",
+      "_deps/ShaderMake/LICENSE.txt": "8f0b12e3a6d4d714bb7993c74270a3806f11ae1f6b6d7301629215c21939e37b",
+      "_deps/ShaderMake/ThirdPartyLicenses.txt": "5f38c7b411b2c5f79ad0d2a0692c8cd0fb918c836cff0199b24d44bb150ed3b7"
+    }
+  }
+}
