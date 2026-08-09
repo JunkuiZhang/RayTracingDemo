@@ -146,6 +146,10 @@ cargo run --release --features nrd -- --benchmark-seconds 3 --denoiser nrd-reblu
 
 `F3` 可在支持 `nrd` feature 的构建中创建新 generation，在 SVGF 与 NRD 间切换；旧代按 fence 退休，历史显式 reset。NRD 调度会恢复应用 descriptor heap，inactive profiler pass 在 JSON 中为 `null`。离线版本、桥接说明和第三方许可见 [`third_party/nrd/README.md`](third_party/nrd/README.md)，短矩阵和未完成人工验收见 [`docs/阶段9验收记录.md`](docs/阶段9验收记录.md)。本阶段不包含 Streamline、DLSS、Ray Reconstruction、RELAX、SIGMA、SH 或 ReSTIR。
 
+## 阶段 10：DLSS Super Resolution 与 Reflex（验收未完成）
+
+阶段 10 已加入可选 Streamline v2.12.0、DLSS/DLAA 模式、独立 DLSS 输入资源、按 optimal settings 创建的 viewport、fence 退休和 Reflex/PCL 对账。默认构建完全不加载 Streamline，`nrd` 与 `streamline` feature 正交；未实现 DLSS RR、Frame Generation 或 Reflex 2 Frame Warp。目标 RTX 4060 Laptop 的 native Smoke 和 Debug GPU-Based Validation 通过，但该机的 Streamline DLSS support 返回不支持，DLSS 模式真实 acceptance 标为 BLOCKED，不能将阶段 10 写成完成。命令、哈希、短矩阵结果和未完成人工项目见 [`docs/阶段10验收记录.md`](docs/阶段10验收记录.md)。
+
 ## 阶段 8：性能优化（8A–8E-2、8G）
 
 8A 已建立可信 GPU 基线和显存遥测；8B 的 À-Trous shared tile 实验因 RTX 4060 Laptop 三档实测回退而未采纳；8C 的 barrier/bind 优化已设为默认并保留 baseline 回退；8D 已实现两阶段 AS 初始化、TLAS 策略、profitable BLAS compaction 和 allocation 遥测，但仓库小模型没有触发真实 compact copy，AS 默认仍为 baseline；8E-1 已完成输出/内部尺寸解耦和按 fence 退休的资源代际切换；8E-2 已实现由已完成 GPU Total timestamp 驱动的动态分辨率、旧 generation 样本隔离、双重冷却和 measurement/lifetime 遥测，并完成首轮 review 修复。8G 已补齐 typed DebugView、fence-safe PNG、image_diff、bounded 显存 measurement、正确 median、环境来源、五条 Debug raw 证据和有界 runner。自认证 commit paired 在同一 RTX 4060 Laptop/AC 环境下得到 candidate `0fdcb7f`/reference `2031abf` p95 median `7.91/7.84 ms`，差 `+0.893%`；同一 candidate 的 dynamic/fixed paired 为 `7.89/7.85 ms`，差 `+0.510%`，三次 dynamic 均保持原生 1920×1080、零切换。因此当前是绝对历史门槛 FAIL，但没有 commit regression 或 dynamic-mode regression，不应据此改 renderer。1800/600 秒长测、真实 F1/F2/resize/最小化/恢复/hot-reload、公开 PBR/大模型和 PIX UI 证据仍未执行，阶段 8 尚未完成。窗口标题显示阶段 8、命令记录模式、最近有效 GPU Total、滚动 p95、输出/内部尺寸、动态控制状态、generation、À-Trous 模式和 local VRAM usage/budget。

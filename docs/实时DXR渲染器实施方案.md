@@ -879,6 +879,8 @@ H1–I3 最新状态（2026-08-09）：median/环境来源修复和五条 Debug 
 
 执行细则：[`阶段10DLSS超分与Reflex执行方案.md`](阶段10DLSS超分与Reflex执行方案.md)。阶段 10 只接入 DLSS Super Resolution、DLAA、Reflex Low Latency 与 PCL 标记；DLSS Ray Reconstruction 和 Frame Generation 明确保留到阶段 11。
 
+当前状态（2026-08-10）：10A–10G 已按独立提交实现，默认 feature-off 路径保持不依赖 Streamline；10H 已加入有界 1 秒 Smoke/Matrix/DebugValidation runner。目标 RTX 4060 Laptop 的 native SVGF、Debug GPU-Based Validation、Reflex/PCL token/sleep/marker/Present/presentCommon 对账通过，但 Streamline v2.12.0 在该机对 DLSS support 返回 `eErrorFeatureNotSupported (32)`，Debug DLSS resource allocation 返回 result 25，故 DLAA/Quality/Balanced/Performance/Quality+NRD 短矩阵为 BLOCKED。没有伪造 DLSS p50/p95、动态画质或 Reflex HUD 结果；详细 raw run-id、哈希和剩余债务见 [`阶段10验收记录.md`](阶段10验收记录.md)。阶段 10 尚未标记完成。
+
 工作内容：
 
 - 接入 Streamline。
