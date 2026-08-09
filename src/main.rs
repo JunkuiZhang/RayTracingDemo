@@ -22,6 +22,7 @@ mod scene;
 mod settings;
 mod some_math;
 #[cfg(feature = "streamline")]
+#[allow(dead_code)] // 10C/10D consume the ABI types from the renderer.
 mod streamline;
 mod systems;
 mod world;

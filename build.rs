@@ -97,6 +97,7 @@ fn main() {
     deploy_winpix_runtime(&output_directory);
     if env::var_os("CARGO_FEATURE_STREAMLINE").is_some() {
         validate_streamline_sdk(&output_directory);
+        build_streamline_bridge(&output_directory);
     }
     println!("cargo:rustc-env=RAY_TRACING_DXC={}", dxc.display());
     println!("cargo:rustc-env=WINPIX_RUNTIME_VERSION=1.0.240308001");
@@ -192,6 +193,71 @@ fn validate_streamline_sdk(output_directory: &Path) {
         "cargo:rustc-env=RAY_TRACING_STREAMLINE_SOURCE_DIR={}",
         sdk.display()
     );
+}
+
+fn build_streamline_bridge(output_directory: &Path) {
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sdk = dependency_path(
+        "STREAMLINE_SOURCE_DIR",
+        &repository_root.join("external/streamline-v2.12.0"),
+    );
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+    let build_type = if profile == "release" {
+        "Release"
+    } else {
+        "Debug"
+    };
+    let build_directory = output_directory.join("streamline-cmake-vs");
+    let source_directory = repository_root.join("native/streamline_bridge");
+    let cmake = env::var_os("CMAKE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("cmake"));
+    let vsdevcmd = find_vsdevcmd();
+    let configure_args = [
+        "-S".to_string(),
+        source_directory.display().to_string(),
+        "-B".to_string(),
+        build_directory.display().to_string(),
+        "-G".to_string(),
+        "Visual Studio 17 2022".to_string(),
+        "-A".to_string(),
+        "x64".to_string(),
+        format!("-DCMAKE_BUILD_TYPE={build_type}"),
+        format!("-DSTREAMLINE_SOURCE_DIR={}", sdk.display()),
+        format!("-DSTREAMLINE_LIB_DIR={}", sdk.join("lib/x64").display()),
+    ];
+    run_cmake(
+        &cmake,
+        &vsdevcmd,
+        &configure_args,
+        "configure Streamline bridge",
+    );
+    let build_args = [
+        "--build".to_string(),
+        build_directory.display().to_string(),
+        "--target".to_string(),
+        "streamline_bridge".to_string(),
+        "--config".to_string(),
+        build_type.to_string(),
+        "-j".to_string(),
+        "4".to_string(),
+    ];
+    run_cmake(&cmake, &vsdevcmd, &build_args, "build Streamline bridge");
+    for directory in [
+        build_directory.join("lib"),
+        build_directory.join("lib").join(build_type),
+        sdk.join("lib/x64"),
+    ] {
+        println!("cargo:rustc-link-search=native={}", directory.display());
+    }
+    println!("cargo:rustc-link-lib=static=streamline_bridge");
+    println!("cargo:rustc-link-lib=static=sl.interposer");
+    for library in ["d3d12", "dxgi", "dxguid", "ole32"] {
+        println!("cargo:rustc-link-lib={library}");
+    }
+    println!("cargo:rerun-if-changed=native/streamline_bridge/CMakeLists.txt");
+    println!("cargo:rerun-if-changed=native/streamline_bridge/include/streamline_bridge.h");
+    println!("cargo:rerun-if-changed=native/streamline_bridge/src/streamline_bridge.cpp");
 }
 
 fn build_nrd_bridge(output_directory: &Path, dxc: &Path) {
