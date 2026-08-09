@@ -11,11 +11,14 @@ param(
     [int]$Seconds = 30,
     [ValidateRange(1, 3600)]
     [int]$LongRunSeconds = 1800,
+    [ValidateSet("Full", "Recheck1080")]
+    [string]$Suite = "Full",
     [string]$LargeModel,
     [string]$PbrModel,
     [switch]$SkipLongRun,
     [switch]$SkipCaptures,
-    [switch]$SmokeOnly
+    [switch]$SmokeOnly,
+    [switch]$SelfTest
 )
 
 Set-StrictMode -Version Latest
@@ -29,7 +32,7 @@ function Quote-Argument([string]$Value) {
 function Get-Median([object[]]$Values) {
     $numbers = @($Values | Where-Object { $null -ne $_ } | ForEach-Object { [double]$_ } | Sort-Object)
     if ($numbers.Count -eq 0) { return $null }
-    $middle = [int]($numbers.Count / 2)
+    $middle = [int][Math]::Floor($numbers.Count / 2.0)
     if (($numbers.Count % 2) -eq 1) { return $numbers[$middle] }
     return ($numbers[$middle - 1] + $numbers[$middle]) / 2.0
 }
@@ -42,23 +45,146 @@ function Test-Finite($Value) {
 
 function Get-EnvironmentSnapshot {
     $gpu = $null
+    $gpuError = $null
     try {
         $gpu = Get-CimInstance Win32_VideoController -ErrorAction Stop |
             Where-Object { $_.Name -match 'NVIDIA' } |
             Select-Object -First 1
-    } catch { }
-    $power = $null
-    try { $power = (powercfg /getactivescheme 2>$null | Out-String).Trim() } catch { }
-    $battery = $null
-    try { $battery = Get-CimInstance Win32_Battery -ErrorAction Stop | Select-Object -First 1 } catch { }
-    [pscustomobject]@{
-        gpu_name = if ($null -ne $gpu) { $gpu.Name } else { "N/A" }
-        driver_version = if ($null -ne $gpu) { $gpu.DriverVersion } else { "N/A" }
-        active_power_scheme = if ([string]::IsNullOrWhiteSpace($power)) { "N/A" } else { $power }
-        power_source = if ($null -ne $battery) {
-            if ($battery.BatteryStatus -eq 2) { "AC" } else { "battery" }
-        } else { "N/A" }
+    } catch {
+        $gpuError = $_.Exception.Message
     }
+
+    $driverVersion = "N/A"
+    $driverSource = "unavailable"
+    $driverError = $null
+    if ($null -ne $gpu -and -not [string]::IsNullOrWhiteSpace([string]$gpu.DriverVersion)) {
+        $driverVersion = [string]$gpu.DriverVersion
+        $driverSource = "Win32_VideoController"
+    } else {
+        try {
+            $smi = @(& nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits 2>&1 |
+                ForEach-Object { [string]$_ } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            if ($smi.Count -gt 0 -and $smi[0] -notmatch 'not recognized|failed|error') {
+                $driverVersion = $smi[0].Trim()
+                $driverSource = "nvidia-smi"
+            } else {
+                $driverError = ($smi -join " ").Trim()
+            }
+        } catch {
+            $driverError = $_.Exception.Message
+        }
+    }
+
+    $power = "N/A"
+    $powerSource = "unavailable"
+    $powerError = $null
+    try {
+        $powerOutput = @(& powercfg /getactivescheme 2>&1 | ForEach-Object { [string]$_ })
+        $power = ($powerOutput -join " ").Trim()
+        if ([string]::IsNullOrWhiteSpace($power)) {
+            $powerError = "powercfg returned no output"
+        } else {
+            $powerSource = "powercfg /getactivescheme"
+        }
+    } catch {
+        $powerError = $_.Exception.Message
+    }
+
+    $powerSourceValue = "N/A"
+    $powerSourceProbe = "unavailable"
+    $powerSourceError = $null
+    try {
+        if (-not ("Stage8Validation.Native.PowerStatus" -as [type])) {
+            Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+namespace Stage8Validation.Native {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SystemPowerStatus {
+        public byte ACLineStatus;
+        public byte BatteryFlag;
+        public byte BatteryLifePercent;
+        public byte Reserved;
+        public int BatteryLifeTime;
+        public int BatteryFullLifeTime;
+    }
+    public static class PowerStatus {
+        [DllImport("kernel32.dll")]
+        public static extern bool GetSystemPowerStatus(out SystemPowerStatus status);
+    }
+}
+"@
+        }
+        $status = New-Object Stage8Validation.Native.SystemPowerStatus
+        if ([Stage8Validation.Native.PowerStatus]::GetSystemPowerStatus([ref]$status)) {
+            $powerSourceProbe = "GetSystemPowerStatus"
+            if ($status.ACLineStatus -eq 1) {
+                $powerSourceValue = "AC"
+            } elseif ($status.ACLineStatus -eq 0) {
+                $powerSourceValue = "battery"
+            } else {
+                $powerSourceValue = "N/A"
+            }
+        } else {
+            $powerSourceError = "GetSystemPowerStatus returned false"
+        }
+    } catch {
+        $powerSourceError = $_.Exception.Message
+    }
+
+    if ($powerSourceValue -eq "N/A") {
+        try {
+            $battery = Get-CimInstance Win32_Battery -ErrorAction Stop | Select-Object -First 1
+            if ($null -ne $battery) {
+                $powerSourceProbe = "Win32_Battery.BatteryStatus"
+                if ([int]$battery.BatteryStatus -eq 2) {
+                    $powerSourceValue = "AC"
+                } elseif ([int]$battery.BatteryStatus -in @(1, 3, 4, 5)) {
+                    $powerSourceValue = "battery"
+                }
+            } else {
+                $powerSourceError = "Win32_Battery returned no instance"
+            }
+        } catch {
+            $powerSourceError = $_.Exception.Message
+        }
+    }
+
+    [pscustomobject]@{
+        gpu_name = if ($null -ne $gpu) { [string]$gpu.Name } else { "N/A" }
+        gpu_name_source = if ($null -ne $gpu) { "Win32_VideoController" } else { "benchmark_json_pending" }
+        driver_version = $driverVersion
+        driver_version_source = $driverSource
+        driver_version_error = $driverError
+        active_power_scheme = if ([string]::IsNullOrWhiteSpace($power)) { "N/A" } else { $power }
+        active_power_scheme_source = $powerSource
+        active_power_scheme_error = $powerError
+        power_source = $powerSourceValue
+        power_source_probe = $powerSourceProbe
+        power_source_error = $powerSourceError
+        gpu_probe_error = $gpuError
+    }
+}
+
+function Invoke-MedianSelfTest {
+    $cases = @(
+        [pscustomobject]@{ name = "empty"; values = @(); expected = $null },
+        [pscustomobject]@{ name = "single"; values = @(3); expected = 3.0 },
+        [pscustomobject]@{ name = "odd"; values = @(3, 1, 2); expected = 2.0 },
+        [pscustomobject]@{ name = "even"; values = @(4, 1, 3, 2); expected = 2.5 },
+        [pscustomobject]@{ name = "seven"; values = @(7, 1, 6, 2, 5, 3, 4); expected = 4.0 }
+    )
+    foreach ($case in $cases) {
+        $actual = Get-Median $case.values
+        $matches = if ($null -eq $case.expected) { $null -eq $actual } else {
+            $null -ne $actual -and [double]$actual -eq [double]$case.expected
+        }
+        if (-not $matches) {
+            throw "median self-test failed: $($case.name), expected=$($case.expected), actual=$actual"
+        }
+    }
+    [ordered]@{ self_test = "passed"; cases = $cases.Count } | ConvertTo-Json -Compress
 }
 
 function Invoke-RecordedProcess(
@@ -346,6 +472,15 @@ function Invoke-DiffCase(
     }
 }
 
+if ($SelfTest) {
+    Invoke-MedianSelfTest
+    exit 0
+}
+
+if ($Suite -eq "Recheck1080" -and (-not $SkipLongRun -or -not $SkipCaptures)) {
+    throw "Recheck1080 requires both -SkipLongRun and -SkipCaptures"
+}
+
 $repoRoot = (Get-Location).Path
 $resolvedOutputRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot))
 $runId = "{0}-{1}" -f (Get-Date -Format "yyyyMMdd-HHmmss"), ([guid]::NewGuid().ToString("N").Substring(0, 8))
@@ -383,6 +518,7 @@ if ($environment.gpu_name -eq "N/A" -and $smoke.runs.Count -gt 0 -and $null -ne 
 $summary = [ordered]@{
     schema_version = 1
     stage = "8G"
+    suite = $Suite
     git_head = $head
     run_id = $runId
     started_at = $startedAt.ToString("o")
@@ -401,6 +537,30 @@ if (-not $smokePassed -or $SmokeOnly) {
     $summary.passed = $smokePassed
     Save-Summary (Join-Path $runRoot "summary.json") $summary
     if (-not $smokePassed) { exit 1 }
+    exit 0
+}
+
+if ($Suite -eq "Recheck1080") {
+    $fixed1080Expectations = @{
+        ExpectedOutput = "1920x1080"
+        ExpectedRender = "1920x1080"
+        ExpectedResolutionMode = "fixed"
+        MaxTotalP95 = 16.67
+        MaxMedianTotalP95 = 7.6632
+    }
+    $caseSummaries.Add((Invoke-BenchmarkCase "fixed-1920x1080" @("--output-size", "1920x1080", "--render-scale", "1.0") $Runs $Seconds $fixed1080Expectations $runRoot $Executable $allRuns))
+    $dynamic1080Expectations = @{
+        ExpectedOutput = "1920x1080"
+        ExpectedResolutionMode = "dynamic"
+        MaxTotalP95 = 16.67
+        MaxMedianTotalP95 = 7.6632
+    }
+    $caseSummaries.Add((Invoke-BenchmarkCase "dynamic-default" @("--output-size", "1920x1080", "--dynamic-resolution") $Runs $Seconds $dynamic1080Expectations $runRoot $Executable $allRuns))
+    $summary.cases = $caseSummaries.ToArray()
+    $summary.finished_at = (Get-Date).ToString("o")
+    $summary.passed = (@($caseSummaries | Where-Object { -not $_.passed }).Count -eq 0)
+    Save-Summary (Join-Path $runRoot "summary.json") $summary
+    if (-not $summary.passed) { exit 1 }
     exit 0
 }
 
