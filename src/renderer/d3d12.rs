@@ -52,7 +52,7 @@ use self::{
     },
     pipeline::ComputePipeline,
     profiler::{CommandRecordingFrameStats, GpuPass, GpuProfiler},
-    render_resources::RenderResourceGeneration,
+    render_resources::{RenderGenerationDesc, RenderResourceGeneration},
     resource::{BarrierSubmissionMode, TrackedResource, TransitionBatch},
     shader::{ReloadedShaders, ShaderReloader},
     texture::TextureSet,
@@ -83,11 +83,19 @@ impl NrdBackend {
         let mut handle = null_mut();
         let status = unsafe { reconstruction::nrd_bridge_create(&description, &mut handle) };
         if status != reconstruction::NRD_BRIDGE_STATUS_OK || handle.is_null() {
+            eprintln!(
+                "nrd_generation_create status=failed extent={}x{} version={} error=status={status}",
+                extent.width, extent.height, NRD_VERSION
+            );
             return Err(WindowsError::new(
                 windows::core::HRESULT(0x80004005_u32 as i32),
                 format!("创建 NRD bridge 失败，status={status}"),
             ));
         }
+        eprintln!(
+            "nrd_generation_create status=ok extent={}x{} version={} commit={}",
+            extent.width, extent.height, NRD_VERSION, NRD_COMMIT_PREFIX
+        );
         Ok(Self { handle, extent })
     }
 
@@ -246,6 +254,7 @@ struct FrameContext {
     fence_value: u64,
     timing_valid: bool,
     timing_generation_id: u64,
+    timing_passes: [bool; profiler::PASS_COUNT],
 }
 
 struct CaptureRequest {
@@ -317,8 +326,6 @@ pub struct Dx12Renderer {
     nrd_prep_pipeline: ComputePipeline,
     #[cfg(feature = "nrd")]
     nrd_compose_pipeline: ComputePipeline,
-    #[cfg(feature = "nrd")]
-    nrd_backend: Option<NrdBackend>,
     shader_reloader: ShaderReloader,
     frames: Vec<FrameContext>,
     command_list: ID3D12GraphicsCommandList,
@@ -349,6 +356,7 @@ pub struct Dx12Renderer {
     atrous_mode: AtrousMode,
     command_recording_mode: CommandRecordingMode,
     denoiser: DenoiserBackend,
+    denoiser_switch_count: u64,
     animation_start: Instant,
     history_reset_count: u64,
     render_extent_change_count: u64,
@@ -366,6 +374,7 @@ pub struct Dx12Renderer {
     benchmark_dynamic_upscale_baseline: u64,
     benchmark_dynamic_at_min_baseline: u64,
     benchmark_dynamic_at_max_baseline: u64,
+    benchmark_denoiser_switch_baseline: u64,
     benchmark_render_min: Extent2D,
     benchmark_render_max: Extent2D,
     benchmark_measurement_active: bool,
@@ -377,15 +386,6 @@ impl Dx12Renderer {
             return Err(WindowsError::new(
                 windows::core::HRESULT(0x80070057_u32 as i32),
                 error,
-            ));
-        }
-        if cfg!(feature = "nrd")
-            && config.denoiser == DenoiserBackend::NrdReblur
-            && matches!(config.resolution_mode, ResolutionMode::Dynamic(_))
-        {
-            return Err(WindowsError::new(
-                windows::core::HRESULT(0x80070057_u32 as i32),
-                "9D NRD 后端暂只支持固定内部尺寸；动态分辨率将在 9E 接入",
             ));
         }
         unsafe {
@@ -467,6 +467,7 @@ impl Dx12Renderer {
                     fence_value: 0,
                     timing_valid: false,
                     timing_generation_id: 0,
+                    timing_passes: [false; profiler::PASS_COUNT],
                 });
             }
             let command_list: ID3D12GraphicsCommandList = device.CreateCommandList(
@@ -617,20 +618,14 @@ impl Dx12Renderer {
                 &texture_set,
                 &scene_geometry,
                 &acceleration_structures,
-                output_extent,
-                render_extent,
-                1,
+                RenderGenerationDesc {
+                    output_extent,
+                    render_extent,
+                    id: 1,
+                    with_nrd: config.denoiser == DenoiserBackend::NrdReblur,
+                },
             )
             .map_err(|error| dx_error("创建初始渲染资源代际", error))?;
-            #[cfg(feature = "nrd")]
-            let nrd_backend = if config.denoiser == DenoiserBackend::NrdReblur {
-                Some(
-                    NrdBackend::new(&device, render_extent)
-                        .map_err(|error| dx_error("创建 NRD REBLUR backend", error))?,
-                )
-            } else {
-                None
-            };
             let mut renderer = Self {
                 device,
                 _adapter: adapter,
@@ -682,8 +677,6 @@ impl Dx12Renderer {
                 nrd_prep_pipeline,
                 #[cfg(feature = "nrd")]
                 nrd_compose_pipeline,
-                #[cfg(feature = "nrd")]
-                nrd_backend,
                 shader_reloader: ShaderReloader::new(),
                 frames,
                 command_list,
@@ -717,6 +710,7 @@ impl Dx12Renderer {
                 atrous_mode: config.atrous_mode,
                 command_recording_mode: config.command_recording_mode,
                 denoiser: config.denoiser,
+                denoiser_switch_count: 0,
                 animation_start: Instant::now(),
                 history_reset_count: 1,
                 render_extent_change_count: 0,
@@ -734,6 +728,7 @@ impl Dx12Renderer {
                 benchmark_dynamic_upscale_baseline: 0,
                 benchmark_dynamic_at_min_baseline: 0,
                 benchmark_dynamic_at_max_baseline: 0,
+                benchmark_denoiser_switch_baseline: 0,
                 benchmark_render_min: render_extent,
                 benchmark_render_max: render_extent,
                 benchmark_measurement_active: false,
@@ -765,6 +760,7 @@ impl Dx12Renderer {
             let previous_fence_value = self.frames[frame_index].fence_value;
             let previous_timing_valid = self.frames[frame_index].timing_valid;
             let previous_timing_generation_id = self.frames[frame_index].timing_generation_id;
+            let previous_timing_passes = self.frames[frame_index].timing_passes;
             self.wait_for_frame(frame_index)?;
             let fence_completed =
                 previous_fence_value != 0 && self.fence.GetCompletedValue() >= previous_fence_value;
@@ -772,7 +768,7 @@ impl Dx12Renderer {
                 frame_index,
                 fence_completed,
                 previous_timing_valid,
-                active_gpu_passes(self.denoiser),
+                previous_timing_passes,
             )?;
             if let Some(sample) = timing_sample {
                 self.apply_dynamic_resolution_sample(
@@ -1239,6 +1235,7 @@ impl Dx12Renderer {
             self.frames[frame_index].fence_value = fence_value;
             self.frames[frame_index].timing_valid = !self.reset_history;
             self.frames[frame_index].timing_generation_id = self.active_generation.id;
+            self.frames[frame_index].timing_passes = active_gpu_passes(self.denoiser);
             self.active_generation.last_used_fence = fence_value;
             if self.benchmark_measurement_active {
                 self.benchmark_render_min.width =
@@ -1515,6 +1512,7 @@ impl Dx12Renderer {
                 frame.fence_value = 0;
                 frame.timing_valid = false;
                 frame.timing_generation_id = 0;
+                frame.timing_passes = [false; profiler::PASS_COUNT];
             }
             self.width = width;
             self.height = height;
@@ -1536,27 +1534,15 @@ impl Dx12Renderer {
                 &self._textures,
                 &self._scene_geometry,
                 &self._acceleration_structures,
-                output_extent,
-                new_render_extent,
-                generation_id,
+                RenderGenerationDesc {
+                    output_extent,
+                    render_extent: new_render_extent,
+                    id: generation_id,
+                    with_nrd: self.denoiser == DenoiserBackend::NrdReblur,
+                },
             )?;
-            #[cfg(feature = "nrd")]
-            let new_nrd_backend = if self.denoiser == DenoiserBackend::NrdReblur {
-                Some(
-                    NrdBackend::new(&self.device, new_render_extent)
-                        .map_err(|error| dx_error("resize 后重建 NRD REBLUR backend", error))?,
-                )
-            } else {
-                None
-            };
             self.next_generation_id = self.next_generation_id.saturating_add(1);
-            #[cfg(feature = "nrd")]
-            self.nrd_backend.take();
             self.active_generation = new_generation;
-            #[cfg(feature = "nrd")]
-            {
-                self.nrd_backend = new_nrd_backend;
-            }
             if let Some(controller) = self.dynamic_resolution.as_mut() {
                 controller.reset_after_discontinuity(self.requested_render_scale);
             }
@@ -1564,6 +1550,10 @@ impl Dx12Renderer {
                 self.render_generation_create_count.saturating_add(1);
             self.render_generation_switch_count =
                 self.render_generation_switch_count.saturating_add(1);
+            let retired_count = self.retired_generations.len() as u64 + 1;
+            self.render_generation_retired_count = self
+                .render_generation_retired_count
+                .saturating_add(retired_count);
             self.retired_generations.clear();
             self.create_render_targets()?;
             eprintln!(
@@ -1638,11 +1628,6 @@ impl Dx12Renderer {
     /// descriptors are fully built before the active generation is replaced;
     /// the old generation remains owned until its submission fence completes.
     pub fn set_render_scale(&mut self, requested: RenderScale) -> Result<()> {
-        #[cfg(feature = "nrd")]
-        if self.denoiser == DenoiserBackend::NrdReblur {
-            eprintln!("render_scale_manual_change blocked=nrd_fixed_extent_9d");
-            return Ok(());
-        }
         let output_extent = self.active_generation.output_extent;
         let new_render_extent = match classify_render_extent_change(
             self.minimized,
@@ -1669,9 +1654,12 @@ impl Dx12Renderer {
             &self._textures,
             &self._scene_geometry,
             &self._acceleration_structures,
-            output_extent,
-            new_render_extent,
-            generation_id,
+            RenderGenerationDesc {
+                output_extent,
+                render_extent: new_render_extent,
+                id: generation_id,
+                with_nrd: self.denoiser == DenoiserBackend::NrdReblur,
+            },
         )
         .map_err(|error| {
             WindowsError::new(
@@ -1750,6 +1738,96 @@ impl Dx12Renderer {
         Ok(())
     }
 
+    /// Switch denoisers at a frame boundary without waiting for the GPU. The
+    /// new generation is fully constructed before the active generation is
+    /// replaced; the old generation keeps its bridge and descriptors until
+    /// its last submitted fence is complete.
+    pub fn cycle_denoiser(&mut self) -> Result<()> {
+        #[cfg(not(feature = "nrd"))]
+        {
+            return Err(WindowsError::new(
+                windows::core::HRESULT(0x80070057_u32 as i32),
+                "F3 切换 NRD 需要使用 cargo run --features nrd 构建",
+            ));
+        }
+
+        #[cfg(feature = "nrd")]
+        {
+            let next = match self.denoiser {
+                DenoiserBackend::Svgf => DenoiserBackend::NrdReblur,
+                DenoiserBackend::NrdReblur => DenoiserBackend::Svgf,
+            };
+            let generation_id = self.next_generation_id;
+            let new_generation = RenderResourceGeneration::new(
+                &self.device,
+                &self._textures,
+                &self._scene_geometry,
+                &self._acceleration_structures,
+                RenderGenerationDesc {
+                    output_extent: self.active_generation.output_extent,
+                    render_extent: self.active_generation.render_extent,
+                    id: generation_id,
+                    with_nrd: next == DenoiserBackend::NrdReblur,
+                },
+            )
+            .map_err(|error| {
+                eprintln!(
+                    "denoiser_switch blocked=create_failed from={} to={} error={error}",
+                    self.denoiser.as_str(),
+                    next.as_str()
+                );
+                WindowsError::new(
+                    windows::core::HRESULT(0x80004005_u32 as i32),
+                    format!("创建 denoiser generation {generation_id} 失败：{error}"),
+                )
+            })?;
+            let old_name = self.denoiser.as_str();
+            let previous = std::mem::replace(&mut self.active_generation, new_generation);
+            if previous.last_used_fence != 0 {
+                self.retired_generations
+                    .push_back(RetiredRenderResourceGeneration {
+                        retire_fence: previous.last_used_fence,
+                        resources: previous,
+                    });
+                self.retired_generation_high_watermark = self
+                    .retired_generation_high_watermark
+                    .max(self.retired_generations.len() as u64);
+                if self.benchmark_measurement_active {
+                    self.benchmark_retired_high_watermark = self
+                        .benchmark_retired_high_watermark
+                        .max(self.retired_generations.len() as u64);
+                }
+            }
+            self.next_generation_id = self.next_generation_id.saturating_add(1);
+            self.render_generation_create_count =
+                self.render_generation_create_count.saturating_add(1);
+            self.render_generation_switch_count =
+                self.render_generation_switch_count.saturating_add(1);
+            self.denoiser = next;
+            self.denoiser_switch_count = self.denoiser_switch_count.saturating_add(1);
+            self.history_index = 0;
+            self.accumulated_frames = 0;
+            self.previous_camera_position = self.camera_position;
+            self.previous_camera_yaw = self.camera_yaw;
+            self.previous_camera_pitch = self.camera_pitch;
+            self.request_history_reset();
+            self.reconstruction_frame_state = self
+                .reconstruction_frame_state
+                .reset_for_extent(self.render_width(), self.render_height());
+            if let Some(controller) = self.dynamic_resolution.as_mut() {
+                controller.reset_after_discontinuity(self.requested_render_scale);
+            }
+            self.reclaim_retired_generations();
+            eprintln!(
+                "denoiser_switch from={old_name} to={} generation={} history_reset=1 idle_waits=0 retire_fence={}",
+                next.as_str(),
+                self.active_generation.id,
+                self.active_generation.last_used_fence
+            );
+            Ok(())
+        }
+    }
+
     fn reclaim_retired_generations(&mut self) {
         let completed = unsafe { self.fence.GetCompletedValue() };
         while self
@@ -1818,6 +1896,7 @@ impl Dx12Renderer {
         self.benchmark_generation_create_baseline = self.render_generation_create_count;
         self.benchmark_generation_switch_baseline = self.render_generation_switch_count;
         self.benchmark_generation_retired_baseline = self.render_generation_retired_count;
+        self.benchmark_denoiser_switch_baseline = self.denoiser_switch_count;
         self.benchmark_retired_high_watermark = self.retired_generations.len() as u64;
         self.benchmark_gpu_idle_wait_baseline = self.gpu_idle_wait_count;
         self.benchmark_render_scale_noop_baseline = self.render_scale_quantized_noop_count;
@@ -1961,6 +2040,9 @@ impl Dx12Renderer {
                 atrous_mode: self.atrous_mode.as_str(),
                 command_recording_mode: self.command_recording_mode.as_str(),
                 denoiser_backend: self.denoiser.as_str(),
+                denoiser_switch_count: self
+                    .denoiser_switch_count
+                    .saturating_sub(self.benchmark_denoiser_switch_baseline),
                 nrd_compiled: self.denoiser.nrd_compiled(),
             },
             self.gpu_profiler.benchmark_statistics(),
@@ -2104,6 +2186,7 @@ struct BenchmarkJsonContext<'a> {
     atrous_mode: &'a str,
     command_recording_mode: &'a str,
     denoiser_backend: &'a str,
+    denoiser_switch_count: u64,
     nrd_compiled: bool,
 }
 
@@ -2142,6 +2225,7 @@ fn benchmark_json_line(
         atrous_mode,
         command_recording_mode,
         denoiser_backend,
+        denoiser_switch_count,
         nrd_compiled,
     } = context;
     let status = match memory.status {
@@ -2198,7 +2282,7 @@ fn benchmark_json_line(
             "nrd_version": if cfg!(feature = "nrd") { Some(NRD_VERSION) } else { None::<&str> },
             "nrd_commit": if cfg!(feature = "nrd") { Some(NRD_COMMIT_PREFIX) } else { None::<&str> },
             "history_reset_count": history_reset_count,
-            "switch_count": 0,
+            "switch_count": denoiser_switch_count,
         },
         "command_recording": {
             "mode": command_recording_mode,
@@ -2423,20 +2507,28 @@ impl Dx12Renderer {
         command_recording_stats: &mut CommandRecordingFrameStats,
     ) -> Result<()> {
         self.collect_frame_input_transitions(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        let generation = &mut self.active_generation;
-        for resource in [
-            &mut generation.nrd_diffuse_input,
-            &mut generation.nrd_specular_input,
-            &mut generation.nrd_normal_roughness,
-            &mut generation.nrd_motion,
-            &mut generation.nrd_view_z,
-            &mut generation.nrd_diffuse_factor,
-            &mut generation.nrd_specular_factor,
-        ] {
-            resource.collect_transition(
-                &mut self.transition_batch,
-                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-            );
+        {
+            let generation = &mut self.active_generation;
+            let nrd = generation.nrd.as_mut().ok_or_else(|| {
+                WindowsError::new(
+                    windows::core::HRESULT(0x80004005_u32 as i32),
+                    "NRD generation resources 未初始化",
+                )
+            })?;
+            for resource in [
+                &mut nrd.diffuse_input,
+                &mut nrd.specular_input,
+                &mut nrd.normal_roughness,
+                &mut nrd.motion,
+                &mut nrd.view_z,
+                &mut nrd.diffuse_factor,
+                &mut nrd.specular_factor,
+            ] {
+                resource.collect_transition(
+                    &mut self.transition_batch,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                );
+            }
         }
         self.submit_transition_batch(command_recording_stats);
 
@@ -2459,20 +2551,28 @@ impl Dx12Renderer {
             .end(&self.command_list, frame_index, GpuPass::NrdPrep);
         self.gpu_profiler.end_event(&self.command_list);
 
-        let generation = &mut self.active_generation;
-        for resource in [
-            &mut generation.nrd_diffuse_input,
-            &mut generation.nrd_specular_input,
-            &mut generation.nrd_normal_roughness,
-            &mut generation.nrd_motion,
-            &mut generation.nrd_view_z,
-            &mut generation.nrd_diffuse_factor,
-            &mut generation.nrd_specular_factor,
-        ] {
-            resource.collect_transition(
-                &mut self.transition_batch,
-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-            );
+        {
+            let generation = &mut self.active_generation;
+            let nrd = generation.nrd.as_mut().ok_or_else(|| {
+                WindowsError::new(
+                    windows::core::HRESULT(0x80004005_u32 as i32),
+                    "NRD generation resources 未初始化",
+                )
+            })?;
+            for resource in [
+                &mut nrd.diffuse_input,
+                &mut nrd.specular_input,
+                &mut nrd.normal_roughness,
+                &mut nrd.motion,
+                &mut nrd.view_z,
+                &mut nrd.diffuse_factor,
+                &mut nrd.specular_factor,
+            ] {
+                resource.collect_transition(
+                    &mut self.transition_batch,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                );
+            }
         }
         if self.debug_view == DebugView::NrdValidation {
             self.active_generation.nrd_validation.collect_transition(
@@ -2486,14 +2586,20 @@ impl Dx12Renderer {
         let enable_validation = self.debug_view == DebugView::NrdValidation;
         let mut bridge_resources = {
             let generation = &self.active_generation;
+            let nrd = generation.nrd.as_ref().ok_or_else(|| {
+                WindowsError::new(
+                    windows::core::HRESULT(0x80004005_u32 as i32),
+                    "NRD generation resources 未初始化",
+                )
+            })?;
             reconstruction::NrdBridgeResources {
-                motion: bridge_resource(&generation.nrd_motion),
-                normal_roughness: bridge_resource(&generation.nrd_normal_roughness),
-                view_z: bridge_resource(&generation.nrd_view_z),
-                diffuse_radiance_hit_distance: bridge_resource(&generation.nrd_diffuse_input),
-                specular_radiance_hit_distance: bridge_resource(&generation.nrd_specular_input),
-                diffuse_output: bridge_resource(&generation.nrd_diffuse_output),
-                specular_output: bridge_resource(&generation.nrd_specular_output),
+                motion: bridge_resource(&nrd.motion),
+                normal_roughness: bridge_resource(&nrd.normal_roughness),
+                view_z: bridge_resource(&nrd.view_z),
+                diffuse_radiance_hit_distance: bridge_resource(&nrd.diffuse_input),
+                specular_radiance_hit_distance: bridge_resource(&nrd.specular_input),
+                diffuse_output: bridge_resource(&nrd.diffuse_output),
+                specular_output: bridge_resource(&nrd.specular_output),
                 validation_output: if enable_validation {
                     bridge_resource(&generation.nrd_validation)
                 } else {
@@ -2505,52 +2611,70 @@ impl Dx12Renderer {
             .begin(&self.command_list, frame_index, GpuPass::NrdDenoise);
         self.gpu_profiler
             .begin_event(&self.command_list, GpuPass::NrdDenoise);
-        let nrd_backend = self.nrd_backend.as_mut().ok_or_else(|| {
-            WindowsError::new(
-                windows::core::HRESULT(0x80004005_u32 as i32),
-                "NRD backend 未初始化",
-            )
-        })?;
-        unsafe {
-            nrd_backend.denoise(
-                &frame_state,
-                &mut bridge_resources,
-                &self.command_list,
-                enable_validation,
-            )?;
+        {
+            let generation = &mut self.active_generation;
+            let nrd = generation.nrd.as_mut().ok_or_else(|| {
+                WindowsError::new(
+                    windows::core::HRESULT(0x80004005_u32 as i32),
+                    "NRD generation resources 未初始化",
+                )
+            })?;
+            let denoise_result = unsafe {
+                nrd.backend.denoise(
+                    &frame_state,
+                    &mut bridge_resources,
+                    &self.command_list,
+                    enable_validation,
+                )
+            };
+            if let Err(error) = denoise_result {
+                eprintln!(
+                    "nrd_dispatch_failed status=error frame={} error={error}",
+                    frame_state.frame_index
+                );
+                return Err(error);
+            }
         }
         self.gpu_profiler
             .end(&self.command_list, frame_index, GpuPass::NrdDenoise);
         self.gpu_profiler.end_event(&self.command_list);
 
-        let generation = &mut self.active_generation;
-        set_bridge_resource_state(&mut generation.nrd_motion, bridge_resources.motion.state)?;
-        set_bridge_resource_state(
-            &mut generation.nrd_normal_roughness,
-            bridge_resources.normal_roughness.state,
-        )?;
-        set_bridge_resource_state(&mut generation.nrd_view_z, bridge_resources.view_z.state)?;
-        set_bridge_resource_state(
-            &mut generation.nrd_diffuse_input,
-            bridge_resources.diffuse_radiance_hit_distance.state,
-        )?;
-        set_bridge_resource_state(
-            &mut generation.nrd_specular_input,
-            bridge_resources.specular_radiance_hit_distance.state,
-        )?;
-        set_bridge_resource_state(
-            &mut generation.nrd_diffuse_output,
-            bridge_resources.diffuse_output.state,
-        )?;
-        set_bridge_resource_state(
-            &mut generation.nrd_specular_output,
-            bridge_resources.specular_output.state,
-        )?;
-        if enable_validation {
+        {
+            let generation = &mut self.active_generation;
+            let nrd = generation.nrd.as_mut().ok_or_else(|| {
+                WindowsError::new(
+                    windows::core::HRESULT(0x80004005_u32 as i32),
+                    "NRD generation resources 未初始化",
+                )
+            })?;
+            set_bridge_resource_state(&mut nrd.motion, bridge_resources.motion.state)?;
             set_bridge_resource_state(
-                &mut generation.nrd_validation,
-                bridge_resources.validation_output.state,
+                &mut nrd.normal_roughness,
+                bridge_resources.normal_roughness.state,
             )?;
+            set_bridge_resource_state(&mut nrd.view_z, bridge_resources.view_z.state)?;
+            set_bridge_resource_state(
+                &mut nrd.diffuse_input,
+                bridge_resources.diffuse_radiance_hit_distance.state,
+            )?;
+            set_bridge_resource_state(
+                &mut nrd.specular_input,
+                bridge_resources.specular_radiance_hit_distance.state,
+            )?;
+            set_bridge_resource_state(
+                &mut nrd.diffuse_output,
+                bridge_resources.diffuse_output.state,
+            )?;
+            set_bridge_resource_state(
+                &mut nrd.specular_output,
+                bridge_resources.specular_output.state,
+            )?;
+            if enable_validation {
+                set_bridge_resource_state(
+                    &mut generation.nrd_validation,
+                    bridge_resources.validation_output.state,
+                )?;
+            }
         }
 
         // NRD owns an internal descriptor heap while recording. Restore both
@@ -2561,14 +2685,20 @@ impl Dx12Renderer {
                 Some(self._sampler_heap.heap().clone()),
             ]);
         }
-        for resource in [
-            &mut self.active_generation.nrd_diffuse_output,
-            &mut self.active_generation.nrd_specular_output,
-        ] {
-            resource.collect_transition(
-                &mut self.transition_batch,
-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-            );
+        {
+            let generation = &mut self.active_generation;
+            let nrd = generation.nrd.as_mut().ok_or_else(|| {
+                WindowsError::new(
+                    windows::core::HRESULT(0x80004005_u32 as i32),
+                    "NRD generation resources 未初始化",
+                )
+            })?;
+            for resource in [&mut nrd.diffuse_output, &mut nrd.specular_output] {
+                resource.collect_transition(
+                    &mut self.transition_batch,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                );
+            }
         }
         self.active_generation
             .filter_diffuse_pong
@@ -2680,6 +2810,7 @@ impl Dx12Renderer {
         for frame in &mut self.frames {
             frame.timing_valid = false;
             frame.timing_generation_id = 0;
+            frame.timing_passes = [false; profiler::PASS_COUNT];
         }
         let raytracing = RaytracingPipeline::new(&self.device, &shaders.raytracing)?;
         let temporal = ComputePipeline::new(
@@ -2852,8 +2983,6 @@ impl Drop for Dx12Renderer {
     fn drop(&mut self) {
         unsafe {
             let _ = self.wait_for_gpu();
-            #[cfg(feature = "nrd")]
-            self.nrd_backend.take();
             if cfg!(debug_assertions) {
                 report_debug_messages(&self.device);
             }
@@ -3173,6 +3302,7 @@ mod tests {
                 atrous_mode: "shared",
                 command_recording_mode: "optimized",
                 denoiser_backend: "svgf",
+                denoiser_switch_count: 0,
                 nrd_compiled: false,
             },
             report,
@@ -3214,6 +3344,7 @@ mod tests {
         assert_eq!(value["atrous_mode"], "shared");
         assert_eq!(value["denoiser"]["requested"], "svgf");
         assert_eq!(value["denoiser"]["active"], "svgf");
+        assert_eq!(value["denoiser"]["switch_count"], 0);
         assert_eq!(value["denoiser"]["nrd_compiled"], false);
         assert_eq!(value["command_recording"]["mode"], "optimized");
         assert_eq!(value["command_recording"]["cpu_ms"]["p95_ms"], 0.61);

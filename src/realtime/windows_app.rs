@@ -259,6 +259,11 @@ impl ApplicationHandler for RealtimeApplication {
                                 self.fail(event_loop, format!("切换固定 render scale：{error}"));
                             }
                         }
+                        PhysicalKey::Code(KeyCode::F3) => {
+                            if let Err(error) = renderer.cycle_denoiser() {
+                                eprintln!("切换重建后端失败：{error}");
+                            }
+                        }
                         _ => {}
                     }
                 }
