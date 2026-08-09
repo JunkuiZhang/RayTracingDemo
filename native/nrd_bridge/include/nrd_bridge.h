@@ -67,6 +67,8 @@ typedef struct NrdBridgeResource {
     ID3D12Resource* resource;
     // D3D12_RESOURCE_STATES bitmask supplied by the renderer.
     uint32_t state;
+    // DXGI_FORMAT value. The bridge never guesses a format for NRD validation.
+    uint32_t format;
 } NrdBridgeResource;
 
 typedef struct NrdBridgeResources {
@@ -87,7 +89,7 @@ NrdBridgeStatus nrd_bridge_create(
 NrdBridgeStatus nrd_bridge_denoise(
     NrdBridge* bridge,
     const NrdBridgeFrameDesc* frame,
-    const NrdBridgeResources* resources,
+    NrdBridgeResources* resources,
     ID3D12GraphicsCommandList* command_list);
 void nrd_bridge_destroy(NrdBridge* bridge);
 size_t nrd_bridge_copy_last_error(

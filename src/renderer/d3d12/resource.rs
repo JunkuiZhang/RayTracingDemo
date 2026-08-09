@@ -204,6 +204,16 @@ impl TrackedResource {
         self.format
     }
 
+    pub fn state(&self) -> D3D12_RESOURCE_STATES {
+        self.state
+    }
+
+    /// Synchronize the CPU tracker after an external recorder (such as NRD)
+    /// has emitted its own barriers on this resource.
+    pub fn set_known_state_after_external_recording(&mut self, state: D3D12_RESOURCE_STATES) {
+        self.state = state;
+    }
+
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
     }

@@ -41,6 +41,8 @@ fn main() {
     println!("cargo:rerun-if-changed=native/nrd_bridge/CMakeLists.txt");
     println!("cargo:rerun-if-changed=native/nrd_bridge/include/nrd_bridge.h");
     println!("cargo:rerun-if-changed=native/nrd_bridge/src/nrd_bridge.cpp");
+    println!("cargo:rerun-if-changed=shaders/stage9_nrd_prep.hlsl");
+    println!("cargo:rerun-if-changed=shaders/stage9_nrd_compose.hlsl");
     println!("cargo:rerun-if-env-changed=NRD_SOURCE_DIR");
     println!("cargo:rerun-if-env-changed=NRI_SOURCE_DIR");
     println!("cargo:rerun-if-env-changed=MATHLIB_SOURCE_DIR");
@@ -58,7 +60,34 @@ fn main() {
     let dxc = find_dxc().expect("没有找到 dxc.exe，请安装 Windows SDK");
     let output_directory = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     for (source, output, target) in shaders {
-        compile_shader(&dxc, source, &output_directory.join(output), target);
+        compile_shader(&dxc, source, &output_directory.join(output), target, None);
+    }
+    if env::var_os("CARGO_FEATURE_NRD").is_some() {
+        let nrd_shader_directory = dependency_path(
+            "NRD_SOURCE_DIR",
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("external/nrd-v4.17.3"),
+        )
+        .join("Shaders");
+        if !nrd_shader_directory.is_dir() {
+            panic!(
+                "NRD shader include directory {} 不存在；请先运行 scripts/fetch_nrd.ps1",
+                nrd_shader_directory.display()
+            );
+        }
+        compile_shader(
+            &dxc,
+            "shaders/stage9_nrd_prep.hlsl",
+            &output_directory.join("stage9_nrd_prep.dxil"),
+            "cs_6_6",
+            Some(&nrd_shader_directory),
+        );
+        compile_shader(
+            &dxc,
+            "shaders/stage9_nrd_compose.hlsl",
+            &output_directory.join("stage9_nrd_compose.dxil"),
+            "cs_6_6",
+            Some(&nrd_shader_directory),
+        );
     }
     deploy_winpix_runtime(&output_directory);
     println!("cargo:rustc-env=RAY_TRACING_DXC={}", dxc.display());
@@ -284,9 +313,19 @@ fn copy_if_changed(source: &Path, destination: &Path) {
         .unwrap_or_else(|error| panic!("写入 {}：{error}", destination.display()));
 }
 
-fn compile_shader(dxc: &Path, source: &str, output: &Path, target: &str) {
+fn compile_shader(
+    dxc: &Path,
+    source: &str,
+    output: &Path,
+    target: &str,
+    extra_include: Option<&Path>,
+) {
     let mut command = Command::new(dxc);
-    command.args([source, "-I", "shaders", "-T", target, "-HV", "2021", "-Fo"]);
+    command.args([source, "-I", "shaders"]);
+    if let Some(extra_include) = extra_include {
+        command.args(["-I"]).arg(extra_include);
+    }
+    command.args(["-T", target, "-HV", "2021", "-Fo"]);
     command.arg(output);
     if env::var("PROFILE").as_deref() == Ok("release") {
         command.arg("-O3");

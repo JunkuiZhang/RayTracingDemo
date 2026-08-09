@@ -16,6 +16,9 @@ use super::{
     texture::{DXR_UAV_BASE, TextureSet},
 };
 
+#[cfg(feature = "nrd")]
+use super::{NRD_COMPOSE_TABLE_BASE, NRD_PREP_TABLE_BASE};
+
 pub(super) struct DenoiseHistory {
     pub(super) diffuse: TrackedResource,
     pub(super) specular: TrackedResource,
@@ -70,8 +73,28 @@ pub(super) struct RenderResourceGeneration {
     pub(super) reconstruction_normal_roughness: TrackedResource,
     pub(super) reconstruction_view_z: TrackedResource,
     pub(super) reconstruction_motion: TrackedResource,
+    pub(super) reconstruction_diffuse_hit_distance: TrackedResource,
     pub(super) reconstruction_specular_hit_distance: TrackedResource,
     pub(super) reconstruction_primary_emissive: TrackedResource,
+    #[cfg(feature = "nrd")]
+    pub(super) nrd_diffuse_input: TrackedResource,
+    #[cfg(feature = "nrd")]
+    pub(super) nrd_specular_input: TrackedResource,
+    #[cfg(feature = "nrd")]
+    pub(super) nrd_normal_roughness: TrackedResource,
+    #[cfg(feature = "nrd")]
+    pub(super) nrd_motion: TrackedResource,
+    #[cfg(feature = "nrd")]
+    pub(super) nrd_view_z: TrackedResource,
+    #[cfg(feature = "nrd")]
+    pub(super) nrd_diffuse_factor: TrackedResource,
+    #[cfg(feature = "nrd")]
+    pub(super) nrd_specular_factor: TrackedResource,
+    #[cfg(feature = "nrd")]
+    pub(super) nrd_diffuse_output: TrackedResource,
+    #[cfg(feature = "nrd")]
+    pub(super) nrd_specular_output: TrackedResource,
+    pub(super) nrd_validation: TrackedResource,
     pub(super) histories: [DenoiseHistory; 2],
     pub(super) filter_diffuse_ping: TrackedResource,
     pub(super) filter_diffuse_pong: TrackedResource,
@@ -232,6 +255,12 @@ impl RenderResourceGeneration {
             DXGI_FORMAT_R16G16_FLOAT,
             format!("代际 {id} Reconstruction motion old=new+MV"),
         )?;
+        let reconstruction_diffuse_hit_distance = create_uav_texture(
+            device,
+            render_extent,
+            DXGI_FORMAT_R32_FLOAT,
+            format!("代际 {id} Reconstruction diffuse hit distance"),
+        )?;
         let reconstruction_specular_hit_distance = create_uav_texture(
             device,
             render_extent,
@@ -243,6 +272,75 @@ impl RenderResourceGeneration {
             render_extent,
             DXGI_FORMAT_R16G16B16A16_FLOAT,
             format!("代际 {id} Reconstruction primary emissive"),
+        )?;
+        #[cfg(feature = "nrd")]
+        let nrd_diffuse_input = create_uav_texture(
+            device,
+            render_extent,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            format!("代际 {id} NRD diffuse radiance hit distance"),
+        )?;
+        #[cfg(feature = "nrd")]
+        let nrd_specular_input = create_uav_texture(
+            device,
+            render_extent,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            format!("代际 {id} NRD specular radiance hit distance"),
+        )?;
+        #[cfg(feature = "nrd")]
+        let nrd_normal_roughness = create_uav_texture(
+            device,
+            render_extent,
+            DXGI_FORMAT_R10G10B10A2_UNORM,
+            format!("代际 {id} NRD packed normal roughness"),
+        )?;
+        #[cfg(feature = "nrd")]
+        let nrd_motion = create_uav_texture(
+            device,
+            render_extent,
+            DXGI_FORMAT_R16G16_FLOAT,
+            format!("代际 {id} NRD motion"),
+        )?;
+        #[cfg(feature = "nrd")]
+        let nrd_view_z = create_uav_texture(
+            device,
+            render_extent,
+            DXGI_FORMAT_R32_FLOAT,
+            format!("代际 {id} NRD viewZ"),
+        )?;
+        #[cfg(feature = "nrd")]
+        let nrd_diffuse_factor = create_uav_texture(
+            device,
+            render_extent,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            format!("代际 {id} NRD diffuse material factor"),
+        )?;
+        #[cfg(feature = "nrd")]
+        let nrd_specular_factor = create_uav_texture(
+            device,
+            render_extent,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            format!("代际 {id} NRD specular material factor"),
+        )?;
+        #[cfg(feature = "nrd")]
+        let nrd_diffuse_output = create_uav_texture(
+            device,
+            render_extent,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            format!("代际 {id} NRD diffuse output"),
+        )?;
+        #[cfg(feature = "nrd")]
+        let nrd_specular_output = create_uav_texture(
+            device,
+            render_extent,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            format!("代际 {id} NRD specular output"),
+        )?;
+        let nrd_validation = create_uav_texture(
+            device,
+            render_extent,
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            format!("代际 {id} NRD validation"),
         )?;
         let histories = [
             create_history(device, render_extent, 0, id)?,
@@ -300,8 +398,28 @@ impl RenderResourceGeneration {
             reconstruction_normal_roughness,
             reconstruction_view_z,
             reconstruction_motion,
+            reconstruction_diffuse_hit_distance,
             reconstruction_specular_hit_distance,
             reconstruction_primary_emissive,
+            #[cfg(feature = "nrd")]
+            nrd_diffuse_input,
+            #[cfg(feature = "nrd")]
+            nrd_specular_input,
+            #[cfg(feature = "nrd")]
+            nrd_normal_roughness,
+            #[cfg(feature = "nrd")]
+            nrd_motion,
+            #[cfg(feature = "nrd")]
+            nrd_view_z,
+            #[cfg(feature = "nrd")]
+            nrd_diffuse_factor,
+            #[cfg(feature = "nrd")]
+            nrd_specular_factor,
+            #[cfg(feature = "nrd")]
+            nrd_diffuse_output,
+            #[cfg(feature = "nrd")]
+            nrd_specular_output,
+            nrd_validation,
             histories,
             filter_diffuse_ping,
             filter_diffuse_pong,
@@ -331,6 +449,7 @@ impl RenderResourceGeneration {
         let reconstruction_normal_roughness = &self.reconstruction_normal_roughness;
         let reconstruction_view_z = &self.reconstruction_view_z;
         let reconstruction_motion = &self.reconstruction_motion;
+        let reconstruction_diffuse_hit_distance = &self.reconstruction_diffuse_hit_distance;
         let reconstruction_specular_hit_distance = &self.reconstruction_specular_hit_distance;
         let reconstruction_primary_emissive = &self.reconstruction_primary_emissive;
         let rejection = &self.rejection_mask;
@@ -356,12 +475,65 @@ impl RenderResourceGeneration {
             reconstruction_normal_roughness,
             reconstruction_view_z,
             reconstruction_motion,
+            reconstruction_diffuse_hit_distance,
             reconstruction_specular_hit_distance,
             reconstruction_primary_emissive,
         ];
         for (offset, resource) in dxr_uavs.into_iter().enumerate() {
             unsafe {
                 create_texture_uav(device, &self.shader_heap, DXR_UAV_BASE + offset, resource)
+            };
+        }
+
+        #[cfg(feature = "nrd")]
+        {
+            let prep_srvs = [
+                raw_diffuse,
+                raw_specular,
+                albedo,
+                reconstruction_normal_roughness,
+                reconstruction_view_z,
+                reconstruction_motion,
+                reconstruction_diffuse_hit_distance,
+                reconstruction_specular_hit_distance,
+                reconstruction_primary_emissive,
+                reconstruction_specular_albedo,
+            ];
+            let prep_uavs = [
+                &self.nrd_diffuse_input,
+                &self.nrd_specular_input,
+                &self.nrd_normal_roughness,
+                &self.nrd_motion,
+                &self.nrd_view_z,
+                &self.nrd_diffuse_factor,
+                &self.nrd_specular_factor,
+            ];
+            unsafe {
+                populate_texture_table(
+                    device,
+                    &self.shader_heap,
+                    NRD_PREP_TABLE_BASE,
+                    &prep_srvs,
+                    &prep_uavs,
+                )
+            };
+
+            let compose_srvs = [
+                &self.nrd_diffuse_output,
+                &self.nrd_specular_output,
+                &self.nrd_diffuse_factor,
+                &self.nrd_specular_factor,
+                reconstruction_primary_emissive,
+            ];
+            let compose_uavs = [&self.filter_diffuse_pong, &self.filter_specular_pong];
+            unsafe {
+                populate_texture_table(
+                    device,
+                    &self.shader_heap,
+                    NRD_COMPOSE_TABLE_BASE,
+                    &compose_srvs,
+                    &compose_uavs,
+                )
             };
         }
 
@@ -476,6 +648,7 @@ impl RenderResourceGeneration {
                 &current.length,
                 id,
                 hit_distance,
+                &self.nrd_validation,
             ];
             unsafe {
                 populate_texture_table(

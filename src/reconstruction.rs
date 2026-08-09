@@ -1,10 +1,14 @@
 //! Stable reconstruction input and backend contracts shared by SVGF, NRD and
 //! future reconstruction integrations.
 
+#[cfg(feature = "nrd")]
+use std::ffi::c_void;
 use std::fmt;
 
 pub const RECONSTRUCTION_CONTRACT_VERSION: u32 = 1;
 pub const NRD_BRIDGE_ABI_VERSION: u32 = 1;
+pub const NRD_BRIDGE_STATUS_OK: u32 = 0;
+pub const NRD_BRIDGE_STATUS_INVALID_ARGUMENT: u32 = 1;
 pub const NRD_VERSION: &str = "4.17.3";
 pub const NRD_COMMIT_PREFIX: &str = "792eff1";
 pub const NRD_NRI_VERSION: &str = "v179";
@@ -56,6 +60,7 @@ impl DenoiserBackend {
                 "--denoiser nrd-reblur 需要使用 `cargo run --features nrd --` 重新构建；当前构建未包含 NRD"
                     .to_string(),
             ),
+            Self::NrdReblur if cfg!(feature = "nrd") => None,
             Self::NrdReblur => Some(
                 "--denoiser nrd-reblur 当前仅完成可选构建契约，NRD 后端尚未接入；请等待阶段 9C/9D"
                     .to_string(),
@@ -240,6 +245,43 @@ pub struct NrdBridgeCreateDesc {
     pub device: usize,
 }
 
+#[cfg(feature = "nrd")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NrdBridgeResource {
+    pub resource: usize,
+    pub state: u32,
+    pub format: u32,
+}
+
+#[cfg(feature = "nrd")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NrdBridgeResources {
+    pub motion: NrdBridgeResource,
+    pub normal_roughness: NrdBridgeResource,
+    pub view_z: NrdBridgeResource,
+    pub diffuse_radiance_hit_distance: NrdBridgeResource,
+    pub specular_radiance_hit_distance: NrdBridgeResource,
+    pub diffuse_output: NrdBridgeResource,
+    pub specular_output: NrdBridgeResource,
+    pub validation_output: NrdBridgeResource,
+}
+
+#[cfg(feature = "nrd")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NrdBridgeFrameDesc {
+    pub state: *const ReconstructionFrameState,
+    pub enable_validation: u32,
+}
+
+#[cfg(feature = "nrd")]
+#[repr(C)]
+pub struct NrdBridgeOpaque {
+    _private: [u8; 0],
+}
+
 #[repr(C)]
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,6 +312,22 @@ impl Default for NrdBridgeVersion {
 #[cfg(feature = "nrd")]
 unsafe extern "C" {
     fn nrd_bridge_query_version(out_version: *mut NrdBridgeVersion) -> u32;
+    pub fn nrd_bridge_create(
+        desc: *const NrdBridgeCreateDesc,
+        out_bridge: *mut *mut NrdBridgeOpaque,
+    ) -> u32;
+    pub fn nrd_bridge_denoise(
+        bridge: *mut NrdBridgeOpaque,
+        frame: *const NrdBridgeFrameDesc,
+        resources: *mut NrdBridgeResources,
+        command_list: *mut c_void,
+    ) -> u32;
+    pub fn nrd_bridge_destroy(bridge: *mut NrdBridgeOpaque);
+    pub fn nrd_bridge_copy_last_error(
+        bridge: *const NrdBridgeOpaque,
+        destination: *mut u8,
+        capacity: usize,
+    ) -> usize;
 }
 
 #[cfg(feature = "nrd")]
@@ -375,6 +433,17 @@ mod tests {
             abi_version: 0,
             ..valid
         }));
+    }
+
+    #[cfg(feature = "nrd")]
+    #[test]
+    fn bridge_resource_layout_is_c_compatible() {
+        assert_eq!(align_of::<NrdBridgeResource>(), 8);
+        assert_eq!(size_of::<NrdBridgeResource>(), 16);
+        assert_eq!(size_of::<NrdBridgeResources>(), 128);
+        assert_eq!(align_of::<NrdBridgeFrameDesc>(), 8);
+        assert_eq!(offset_of!(NrdBridgeFrameDesc, enable_validation), 8);
+        assert_eq!(size_of::<NrdBridgeFrameDesc>(), 16);
     }
 
     #[cfg(feature = "nrd")]

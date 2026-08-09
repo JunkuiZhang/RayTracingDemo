@@ -12,12 +12,14 @@ Texture2D<uint> RejectionMask : register(t9);
 Texture2D<uint2> HistoryLength : register(t10);
 Texture2D<uint> Id : register(t11);
 Texture2D<float> HitDistance : register(t12);
+Texture2D<float4> NrdValidation : register(t13);
 RWTexture2D<float4> Output : register(u0);
 
 cbuffer ToneMapConstants : register(b0)
 {
     uint DebugMode;
     float Exposure;
+    uint DenoiserMode;
 };
 
 float3 ToneMap(float3 hdr)
@@ -135,10 +137,13 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     {
         float3 diffuse = (nativeSize
             ? FilteredDiffuse.Load(int3(pixel, 0))
-            : LoadBilinear(FilteredDiffuse, pixel, size, renderSize)).xyz
-            * (nativeSize
+            : LoadBilinear(FilteredDiffuse, pixel, size, renderSize)).xyz;
+        if (DenoiserMode == 0u)
+        {
+            diffuse *= (nativeSize
                 ? Albedo.Load(int3(pixel, 0))
                 : LoadBilinear(Albedo, pixel, size, renderSize)).xyz;
+        }
         float3 specular = (nativeSize
             ? FilteredSpecular.Load(int3(pixel, 0))
             : LoadBilinear(FilteredSpecular, pixel, size, renderSize)).xyz;
@@ -220,6 +225,14 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
             ? HitDistance.Load(int3(pixel, 0))
             : LoadBilinear(HitDistance, pixel, size, renderSize);
         color = (1.0 - exp(-hitDistance * 0.25)).xxx;
+    }
+    else if (DebugMode == 11u)
+    {
+        color = DenoiserMode == 1u
+            ? (nativeSize
+                ? NrdValidation.Load(int3(pixel, 0))
+                : LoadBilinear(NrdValidation, pixel, size, renderSize)).xyz
+            : 0.0.xxx;
     }
     else
     {

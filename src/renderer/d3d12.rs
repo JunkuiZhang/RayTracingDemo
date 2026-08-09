@@ -1,3 +1,6 @@
+#[cfg(feature = "nrd")]
+#[cfg(feature = "nrd")]
+use std::ptr::null_mut;
 use std::{
     collections::VecDeque,
     ffi::c_void,
@@ -23,6 +26,8 @@ use winit::{
     window::Window,
 };
 
+#[cfg(feature = "nrd")]
+use crate::reconstruction;
 use crate::{
     as_policy::AccelerationStructureStats,
     debug_view::DebugView,
@@ -59,6 +64,85 @@ struct RetiredRenderResourceGeneration {
     resources: RenderResourceGeneration,
 }
 
+#[cfg(feature = "nrd")]
+struct NrdBackend {
+    handle: *mut reconstruction::NrdBridgeOpaque,
+    extent: Extent2D,
+}
+
+#[cfg(feature = "nrd")]
+impl NrdBackend {
+    fn new(device: &ID3D12Device, extent: Extent2D) -> Result<Self> {
+        let description = reconstruction::NrdBridgeCreateDesc {
+            abi_version: reconstruction::NRD_BRIDGE_ABI_VERSION,
+            resource_width: extent.width,
+            resource_height: extent.height,
+            queued_frames: reconstruction::RECONSTRUCTION_FRAMES_IN_FLIGHT,
+            device: device.as_raw() as usize,
+        };
+        let mut handle = null_mut();
+        let status = unsafe { reconstruction::nrd_bridge_create(&description, &mut handle) };
+        if status != reconstruction::NRD_BRIDGE_STATUS_OK || handle.is_null() {
+            return Err(WindowsError::new(
+                windows::core::HRESULT(0x80004005_u32 as i32),
+                format!("创建 NRD bridge 失败，status={status}"),
+            ));
+        }
+        Ok(Self { handle, extent })
+    }
+
+    unsafe fn denoise(
+        &mut self,
+        frame_state: &ReconstructionFrameState,
+        resources: &mut reconstruction::NrdBridgeResources,
+        command_list: &ID3D12GraphicsCommandList,
+        enable_validation: bool,
+    ) -> Result<()> {
+        debug_assert_eq!(
+            (frame_state.render_width, frame_state.render_height),
+            (self.extent.width, self.extent.height)
+        );
+        let frame = reconstruction::NrdBridgeFrameDesc {
+            state: frame_state,
+            enable_validation: u32::from(enable_validation),
+        };
+        let status = unsafe {
+            reconstruction::nrd_bridge_denoise(
+                self.handle,
+                &frame,
+                resources,
+                command_list.as_raw(),
+            )
+        };
+        if status != reconstruction::NRD_BRIDGE_STATUS_OK {
+            let mut message = [0_u8; 256];
+            let length = unsafe {
+                reconstruction::nrd_bridge_copy_last_error(
+                    self.handle,
+                    message.as_mut_ptr(),
+                    message.len(),
+                )
+            };
+            let message = String::from_utf8_lossy(&message[..length.min(message.len())]);
+            return Err(WindowsError::new(
+                windows::core::HRESULT(0x80004005_u32 as i32),
+                format!("NRD denoise 失败，status={status}: {message}"),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "nrd")]
+impl Drop for NrdBackend {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe { reconstruction::nrd_bridge_destroy(self.handle) };
+            self.handle = null_mut();
+        }
+    }
+}
+
 mod capture;
 mod descriptor;
 mod memory;
@@ -79,13 +163,83 @@ const ATROUS_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage6_at
 const ATROUS_SHARED_SHADER: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/stage8_atrous_shared.dxil"));
 const TONEMAP_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage6_tonemap.dxil"));
+#[cfg(feature = "nrd")]
+const NRD_PREP_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage9_nrd_prep.dxil"));
+#[cfg(feature = "nrd")]
+const NRD_COMPOSE_SHADER: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/stage9_nrd_compose.dxil"));
 
 const DXR_TABLE_BASE: usize = 0;
-const TEMPORAL_TABLE_BASES: [usize; 2] = [152, 184];
-const ATROUS_HISTORY_TABLE_BASES: [usize; 2] = [216, 228];
-const ATROUS_PING_TO_PONG_BASES: [usize; 2] = [240, 252];
-const ATROUS_PONG_TO_PING_BASES: [usize; 2] = [264, 276];
-const TONEMAP_TABLE_BASES: [usize; 2] = [288, 304];
+#[cfg(feature = "nrd")]
+const NRD_PREP_TABLE_BASE: usize = 296;
+#[cfg(feature = "nrd")]
+const NRD_COMPOSE_TABLE_BASE: usize = 313;
+const TEMPORAL_TABLE_BASES: [usize; 2] = [150, 178];
+const ATROUS_HISTORY_TABLE_BASES: [usize; 2] = [206, 216];
+const ATROUS_PING_TO_PONG_BASES: [usize; 2] = [226, 236];
+const ATROUS_PONG_TO_PING_BASES: [usize; 2] = [246, 256];
+const TONEMAP_TABLE_BASES: [usize; 2] = [266, 281];
+
+#[cfg(feature = "nrd")]
+fn bridge_resource(resource: &TrackedResource) -> reconstruction::NrdBridgeResource {
+    reconstruction::NrdBridgeResource {
+        resource: resource.resource().as_raw() as usize,
+        state: resource.state().0 as u32,
+        format: resource.format().0 as u32,
+    }
+}
+
+#[cfg(feature = "nrd")]
+fn set_bridge_resource_state(resource: &mut TrackedResource, state: u32) -> Result<()> {
+    let state = match state {
+        value if value == D3D12_RESOURCE_STATE_UNORDERED_ACCESS.0 as u32 => {
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+        }
+        value if value == D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE.0 as u32 => {
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+        }
+        _ => {
+            return Err(WindowsError::new(
+                windows::core::HRESULT(0x80004005_u32 as i32),
+                format!("NRD 返回不支持的 D3D12 资源状态 0x{state:08x}"),
+            ));
+        }
+    };
+    resource.set_known_state_after_external_recording(state);
+    Ok(())
+}
+
+fn active_gpu_passes(denoiser: DenoiserBackend) -> [bool; profiler::PASS_COUNT] {
+    let mut active = [false; profiler::PASS_COUNT];
+    for pass in [
+        GpuPass::Total,
+        GpuPass::AccelerationStructure,
+        GpuPass::PathTrace,
+        GpuPass::ToneMap,
+    ] {
+        active[pass as usize] = true;
+    }
+    match denoiser {
+        DenoiserBackend::Svgf => {
+            for pass in [
+                GpuPass::Temporal,
+                GpuPass::Atrous,
+                GpuPass::Atrous0,
+                GpuPass::Atrous1,
+                GpuPass::Atrous2,
+                GpuPass::Atrous3,
+            ] {
+                active[pass as usize] = true;
+            }
+        }
+        DenoiserBackend::NrdReblur => {
+            for pass in [GpuPass::NrdPrep, GpuPass::NrdDenoise, GpuPass::NrdCompose] {
+                active[pass as usize] = true;
+            }
+        }
+    }
+    active
+}
 
 struct FrameContext {
     allocator: ID3D12CommandAllocator,
@@ -159,6 +313,12 @@ pub struct Dx12Renderer {
     atrous_baseline_pipeline: ComputePipeline,
     atrous_shared_pipeline: ComputePipeline,
     tonemap_pipeline: ComputePipeline,
+    #[cfg(feature = "nrd")]
+    nrd_prep_pipeline: ComputePipeline,
+    #[cfg(feature = "nrd")]
+    nrd_compose_pipeline: ComputePipeline,
+    #[cfg(feature = "nrd")]
+    nrd_backend: Option<NrdBackend>,
     shader_reloader: ShaderReloader,
     frames: Vec<FrameContext>,
     command_list: ID3D12GraphicsCommandList,
@@ -217,6 +377,15 @@ impl Dx12Renderer {
             return Err(WindowsError::new(
                 windows::core::HRESULT(0x80070057_u32 as i32),
                 error,
+            ));
+        }
+        if cfg!(feature = "nrd")
+            && config.denoiser == DenoiserBackend::NrdReblur
+            && matches!(config.resolution_mode, ResolutionMode::Dynamic(_))
+        {
+            return Err(WindowsError::new(
+                windows::core::HRESULT(0x80070057_u32 as i32),
+                "9D NRD 后端暂只支持固定内部尺寸；动态分辨率将在 9E 接入",
             ));
         }
         unsafe {
@@ -362,8 +531,28 @@ impl Dx12Renderer {
             )
             .map_err(|error| dx_error("创建 À-Trous shared 管线", error))?;
             let tonemap_pipeline =
-                ComputePipeline::new(&device, TONEMAP_SHADER, 13, 1, 2, "Tone Map 与调试视图")
+                ComputePipeline::new(&device, TONEMAP_SHADER, 14, 1, 3, "Tone Map 与调试视图")
                     .map_err(|error| dx_error("创建 Tone Map 管线", error))?;
+            #[cfg(feature = "nrd")]
+            let nrd_prep_pipeline = ComputePipeline::new(
+                &device,
+                NRD_PREP_SHADER,
+                10,
+                7,
+                1,
+                "阶段 9 NRD REBLUR 输入准备",
+            )
+            .map_err(|error| dx_error("创建 NRD 输入准备管线", error))?;
+            #[cfg(feature = "nrd")]
+            let nrd_compose_pipeline = ComputePipeline::new(
+                &device,
+                NRD_COMPOSE_SHADER,
+                5,
+                2,
+                1,
+                "阶段 9 NRD REBLUR 输出合成",
+            )
+            .map_err(|error| dx_error("创建 NRD 输出合成管线", error))?;
             command_list.Close()?;
 
             let fence: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_NONE)?;
@@ -433,6 +622,15 @@ impl Dx12Renderer {
                 1,
             )
             .map_err(|error| dx_error("创建初始渲染资源代际", error))?;
+            #[cfg(feature = "nrd")]
+            let nrd_backend = if config.denoiser == DenoiserBackend::NrdReblur {
+                Some(
+                    NrdBackend::new(&device, render_extent)
+                        .map_err(|error| dx_error("创建 NRD REBLUR backend", error))?,
+                )
+            } else {
+                None
+            };
             let mut renderer = Self {
                 device,
                 _adapter: adapter,
@@ -480,6 +678,12 @@ impl Dx12Renderer {
                 atrous_baseline_pipeline,
                 atrous_shared_pipeline,
                 tonemap_pipeline,
+                #[cfg(feature = "nrd")]
+                nrd_prep_pipeline,
+                #[cfg(feature = "nrd")]
+                nrd_compose_pipeline,
+                #[cfg(feature = "nrd")]
+                nrd_backend,
                 shader_reloader: ShaderReloader::new(),
                 frames,
                 command_list,
@@ -564,9 +768,12 @@ impl Dx12Renderer {
             self.wait_for_frame(frame_index)?;
             let fence_completed =
                 previous_fence_value != 0 && self.fence.GetCompletedValue() >= previous_fence_value;
-            let timing_sample =
-                self.gpu_profiler
-                    .collect(frame_index, fence_completed, previous_timing_valid)?;
+            let timing_sample = self.gpu_profiler.collect(
+                frame_index,
+                fence_completed,
+                previous_timing_valid,
+                active_gpu_passes(self.denoiser),
+            )?;
             if let Some(sample) = timing_sample {
                 self.apply_dynamic_resolution_sample(
                     sample.total_ms,
@@ -704,237 +911,253 @@ impl Dx12Renderer {
                 .end(&self.command_list, frame_index, GpuPass::PathTrace);
             self.gpu_profiler.end_event(&self.command_list);
 
-            self.collect_frame_input_transitions(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             let current_history = self.history_index;
             let previous_history = 1 - current_history;
-            self.active_generation.histories[previous_history].collect_all(
-                &mut self.transition_batch,
-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-            );
-            self.active_generation.histories[current_history].collect_all(
-                &mut self.transition_batch,
-                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-            );
-            self.active_generation.rejection_mask.collect_transition(
-                &mut self.transition_batch,
-                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-            );
-            self.submit_transition_batch(&mut command_recording_stats);
-
             let render_groups_x = render_extent.width.div_ceil(8);
             let render_groups_y = render_extent.height.div_ceil(8);
             let output_groups_x = output_extent.width.div_ceil(8);
             let output_groups_y = output_extent.height.div_ceil(8);
-            self.gpu_profiler
-                .begin(&self.command_list, frame_index, GpuPass::Temporal);
-            self.gpu_profiler
-                .begin_event(&self.command_list, GpuPass::Temporal);
-            self.temporal_pipeline.bind(
-                &self.command_list,
-                self.active_generation
-                    .shader_heap
-                    .gpu_handle(TEMPORAL_TABLE_BASES[current_history]),
-                &[u32::from(self.reset_history)],
-            );
-            self.command_list
-                .Dispatch(render_groups_x, render_groups_y, 1);
-            self.gpu_profiler
-                .end(&self.command_list, frame_index, GpuPass::Temporal);
-            self.gpu_profiler.end_event(&self.command_list);
-            self.active_generation.histories[current_history].collect_all(
-                &mut self.transition_batch,
-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-            );
-            self.active_generation.rejection_mask.collect_transition(
-                &mut self.transition_batch,
-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-            );
-            self.submit_transition_batch(&mut command_recording_stats);
+            #[cfg(feature = "nrd")]
+            let use_nrd = self.denoiser == DenoiserBackend::NrdReblur;
+            #[cfg(not(feature = "nrd"))]
+            let use_nrd = false;
+            if use_nrd {
+                #[cfg(feature = "nrd")]
+                self.record_nrd_path(
+                    frame_index,
+                    render_groups_x,
+                    render_groups_y,
+                    &mut command_recording_stats,
+                )?;
+            } else {
+                self.collect_frame_input_transitions(
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                );
+                self.active_generation.histories[previous_history].collect_all(
+                    &mut self.transition_batch,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                );
+                self.active_generation.histories[current_history].collect_all(
+                    &mut self.transition_batch,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                );
+                self.active_generation.rejection_mask.collect_transition(
+                    &mut self.transition_batch,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                );
+                self.submit_transition_batch(&mut command_recording_stats);
 
-            self.gpu_profiler
-                .begin(&self.command_list, frame_index, GpuPass::Atrous);
-            self.gpu_profiler
-                .begin_event(&self.command_list, GpuPass::Atrous);
-            let mut atrous_pipeline_identity: Option<*const ComputePipeline> = None;
-            self.active_generation
-                .filter_diffuse_ping
-                .collect_transition(
-                    &mut self.transition_batch,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                self.gpu_profiler
+                    .begin(&self.command_list, frame_index, GpuPass::Temporal);
+                self.gpu_profiler
+                    .begin_event(&self.command_list, GpuPass::Temporal);
+                self.temporal_pipeline.bind(
+                    &self.command_list,
+                    self.active_generation
+                        .shader_heap
+                        .gpu_handle(TEMPORAL_TABLE_BASES[current_history]),
+                    &[u32::from(self.reset_history)],
                 );
-            self.active_generation
-                .filter_specular_ping
-                .collect_transition(
-                    &mut self.transition_batch,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                );
-            self.submit_transition_batch(&mut command_recording_stats);
-            self.bind_atrous_arguments(
-                1,
-                self.active_generation
-                    .shader_heap
-                    .gpu_handle(ATROUS_HISTORY_TABLE_BASES[current_history]),
-                &[1, 0],
-                &mut atrous_pipeline_identity,
-                &mut command_recording_stats,
-            );
-            self.gpu_profiler
-                .begin(&self.command_list, frame_index, GpuPass::Atrous0);
-            self.gpu_profiler
-                .begin_event(&self.command_list, GpuPass::Atrous0);
-            self.command_list
-                .Dispatch(render_groups_x, render_groups_y, 1);
-            self.gpu_profiler
-                .end(&self.command_list, frame_index, GpuPass::Atrous0);
-            self.gpu_profiler.end_event(&self.command_list);
-            self.active_generation
-                .filter_diffuse_ping
-                .collect_transition(
+                self.command_list
+                    .Dispatch(render_groups_x, render_groups_y, 1);
+                self.gpu_profiler
+                    .end(&self.command_list, frame_index, GpuPass::Temporal);
+                self.gpu_profiler.end_event(&self.command_list);
+                self.active_generation.histories[current_history].collect_all(
                     &mut self.transition_batch,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 );
-            self.active_generation
-                .filter_specular_ping
-                .collect_transition(
+                self.active_generation.rejection_mask.collect_transition(
                     &mut self.transition_batch,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 );
+                self.submit_transition_batch(&mut command_recording_stats);
 
-            self.active_generation
-                .filter_diffuse_pong
-                .collect_transition(
-                    &mut self.transition_batch,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                );
-            self.active_generation
-                .filter_specular_pong
-                .collect_transition(
-                    &mut self.transition_batch,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                );
-            self.submit_transition_batch(&mut command_recording_stats);
-            self.bind_atrous_arguments(
-                2,
+                self.gpu_profiler
+                    .begin(&self.command_list, frame_index, GpuPass::Atrous);
+                self.gpu_profiler
+                    .begin_event(&self.command_list, GpuPass::Atrous);
+                let mut atrous_pipeline_identity: Option<*const ComputePipeline> = None;
                 self.active_generation
-                    .shader_heap
-                    .gpu_handle(ATROUS_PING_TO_PONG_BASES[current_history]),
-                &[2, 1],
-                &mut atrous_pipeline_identity,
-                &mut command_recording_stats,
-            );
-            self.gpu_profiler
-                .begin(&self.command_list, frame_index, GpuPass::Atrous1);
-            self.gpu_profiler
-                .begin_event(&self.command_list, GpuPass::Atrous1);
-            self.command_list
-                .Dispatch(render_groups_x, render_groups_y, 1);
-            self.gpu_profiler
-                .end(&self.command_list, frame_index, GpuPass::Atrous1);
-            self.gpu_profiler.end_event(&self.command_list);
-            self.active_generation
-                .filter_diffuse_pong
-                .collect_transition(
-                    &mut self.transition_batch,
-                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    .filter_diffuse_ping
+                    .collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    );
+                self.active_generation
+                    .filter_specular_ping
+                    .collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    );
+                self.submit_transition_batch(&mut command_recording_stats);
+                self.bind_atrous_arguments(
+                    1,
+                    self.active_generation
+                        .shader_heap
+                        .gpu_handle(ATROUS_HISTORY_TABLE_BASES[current_history]),
+                    &[1, 0],
+                    &mut atrous_pipeline_identity,
+                    &mut command_recording_stats,
                 );
-            self.active_generation
-                .filter_specular_pong
-                .collect_transition(
-                    &mut self.transition_batch,
-                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                );
+                self.gpu_profiler
+                    .begin(&self.command_list, frame_index, GpuPass::Atrous0);
+                self.gpu_profiler
+                    .begin_event(&self.command_list, GpuPass::Atrous0);
+                self.command_list
+                    .Dispatch(render_groups_x, render_groups_y, 1);
+                self.gpu_profiler
+                    .end(&self.command_list, frame_index, GpuPass::Atrous0);
+                self.gpu_profiler.end_event(&self.command_list);
+                self.active_generation
+                    .filter_diffuse_ping
+                    .collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                self.active_generation
+                    .filter_specular_ping
+                    .collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
 
-            self.active_generation
-                .filter_diffuse_ping
-                .collect_transition(
-                    &mut self.transition_batch,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                );
-            self.active_generation
-                .filter_specular_ping
-                .collect_transition(
-                    &mut self.transition_batch,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                );
-            self.submit_transition_batch(&mut command_recording_stats);
-            self.bind_atrous_arguments(
-                4,
                 self.active_generation
-                    .shader_heap
-                    .gpu_handle(ATROUS_PONG_TO_PING_BASES[current_history]),
-                &[4, 2],
-                &mut atrous_pipeline_identity,
-                &mut command_recording_stats,
-            );
-            self.gpu_profiler
-                .begin(&self.command_list, frame_index, GpuPass::Atrous2);
-            self.gpu_profiler
-                .begin_event(&self.command_list, GpuPass::Atrous2);
-            self.command_list
-                .Dispatch(render_groups_x, render_groups_y, 1);
-            self.gpu_profiler
-                .end(&self.command_list, frame_index, GpuPass::Atrous2);
-            self.gpu_profiler.end_event(&self.command_list);
-            self.active_generation
-                .filter_diffuse_ping
-                .collect_transition(
-                    &mut self.transition_batch,
-                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    .filter_diffuse_pong
+                    .collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    );
+                self.active_generation
+                    .filter_specular_pong
+                    .collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    );
+                self.submit_transition_batch(&mut command_recording_stats);
+                self.bind_atrous_arguments(
+                    2,
+                    self.active_generation
+                        .shader_heap
+                        .gpu_handle(ATROUS_PING_TO_PONG_BASES[current_history]),
+                    &[2, 1],
+                    &mut atrous_pipeline_identity,
+                    &mut command_recording_stats,
                 );
-            self.active_generation
-                .filter_specular_ping
-                .collect_transition(
-                    &mut self.transition_batch,
-                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                );
+                self.gpu_profiler
+                    .begin(&self.command_list, frame_index, GpuPass::Atrous1);
+                self.gpu_profiler
+                    .begin_event(&self.command_list, GpuPass::Atrous1);
+                self.command_list
+                    .Dispatch(render_groups_x, render_groups_y, 1);
+                self.gpu_profiler
+                    .end(&self.command_list, frame_index, GpuPass::Atrous1);
+                self.gpu_profiler.end_event(&self.command_list);
+                self.active_generation
+                    .filter_diffuse_pong
+                    .collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                self.active_generation
+                    .filter_specular_pong
+                    .collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
 
-            self.active_generation
-                .filter_diffuse_pong
-                .collect_transition(
-                    &mut self.transition_batch,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                );
-            self.active_generation
-                .filter_specular_pong
-                .collect_transition(
-                    &mut self.transition_batch,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                );
-            self.submit_transition_batch(&mut command_recording_stats);
-            self.bind_atrous_arguments(
-                8,
                 self.active_generation
-                    .shader_heap
-                    .gpu_handle(ATROUS_PING_TO_PONG_BASES[current_history]),
-                &[8, 3],
-                &mut atrous_pipeline_identity,
-                &mut command_recording_stats,
-            );
-            self.gpu_profiler
-                .begin(&self.command_list, frame_index, GpuPass::Atrous3);
-            self.gpu_profiler
-                .begin_event(&self.command_list, GpuPass::Atrous3);
-            self.command_list
-                .Dispatch(render_groups_x, render_groups_y, 1);
-            self.gpu_profiler
-                .end(&self.command_list, frame_index, GpuPass::Atrous3);
-            self.gpu_profiler.end_event(&self.command_list);
-            self.active_generation
-                .filter_diffuse_pong
-                .collect_transition(
-                    &mut self.transition_batch,
-                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    .filter_diffuse_ping
+                    .collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    );
+                self.active_generation
+                    .filter_specular_ping
+                    .collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    );
+                self.submit_transition_batch(&mut command_recording_stats);
+                self.bind_atrous_arguments(
+                    4,
+                    self.active_generation
+                        .shader_heap
+                        .gpu_handle(ATROUS_PONG_TO_PING_BASES[current_history]),
+                    &[4, 2],
+                    &mut atrous_pipeline_identity,
+                    &mut command_recording_stats,
                 );
-            self.active_generation
-                .filter_specular_pong
-                .collect_transition(
-                    &mut self.transition_batch,
-                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                self.gpu_profiler
+                    .begin(&self.command_list, frame_index, GpuPass::Atrous2);
+                self.gpu_profiler
+                    .begin_event(&self.command_list, GpuPass::Atrous2);
+                self.command_list
+                    .Dispatch(render_groups_x, render_groups_y, 1);
+                self.gpu_profiler
+                    .end(&self.command_list, frame_index, GpuPass::Atrous2);
+                self.gpu_profiler.end_event(&self.command_list);
+                self.active_generation
+                    .filter_diffuse_ping
+                    .collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                self.active_generation
+                    .filter_specular_ping
+                    .collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+
+                self.active_generation
+                    .filter_diffuse_pong
+                    .collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    );
+                self.active_generation
+                    .filter_specular_pong
+                    .collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    );
+                self.submit_transition_batch(&mut command_recording_stats);
+                self.bind_atrous_arguments(
+                    8,
+                    self.active_generation
+                        .shader_heap
+                        .gpu_handle(ATROUS_PING_TO_PONG_BASES[current_history]),
+                    &[8, 3],
+                    &mut atrous_pipeline_identity,
+                    &mut command_recording_stats,
                 );
-            self.submit_transition_batch(&mut command_recording_stats);
-            self.gpu_profiler
-                .end(&self.command_list, frame_index, GpuPass::Atrous);
-            self.gpu_profiler.end_event(&self.command_list);
+                self.gpu_profiler
+                    .begin(&self.command_list, frame_index, GpuPass::Atrous3);
+                self.gpu_profiler
+                    .begin_event(&self.command_list, GpuPass::Atrous3);
+                self.command_list
+                    .Dispatch(render_groups_x, render_groups_y, 1);
+                self.gpu_profiler
+                    .end(&self.command_list, frame_index, GpuPass::Atrous3);
+                self.gpu_profiler.end_event(&self.command_list);
+                self.active_generation
+                    .filter_diffuse_pong
+                    .collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                self.active_generation
+                    .filter_specular_pong
+                    .collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                self.submit_transition_batch(&mut command_recording_stats);
+                self.gpu_profiler
+                    .end(&self.command_list, frame_index, GpuPass::Atrous);
+                self.gpu_profiler.end_event(&self.command_list);
+            }
 
             self.gpu_profiler
                 .begin(&self.command_list, frame_index, GpuPass::ToneMap);
@@ -946,7 +1169,11 @@ impl Dx12Renderer {
                 self.active_generation
                     .shader_heap
                     .gpu_handle(TONEMAP_TABLE_BASES[current_history]),
-                &[self.debug_view.hlsl_value(), 1.0_f32.to_bits()],
+                &[
+                    self.debug_view.hlsl_value(),
+                    1.0_f32.to_bits(),
+                    u32::from(self.denoiser == DenoiserBackend::NrdReblur),
+                ],
             );
             self.command_list
                 .Dispatch(output_groups_x, output_groups_y, 1);
@@ -1313,8 +1540,23 @@ impl Dx12Renderer {
                 new_render_extent,
                 generation_id,
             )?;
+            #[cfg(feature = "nrd")]
+            let new_nrd_backend = if self.denoiser == DenoiserBackend::NrdReblur {
+                Some(
+                    NrdBackend::new(&self.device, new_render_extent)
+                        .map_err(|error| dx_error("resize 后重建 NRD REBLUR backend", error))?,
+                )
+            } else {
+                None
+            };
             self.next_generation_id = self.next_generation_id.saturating_add(1);
+            #[cfg(feature = "nrd")]
+            self.nrd_backend.take();
             self.active_generation = new_generation;
+            #[cfg(feature = "nrd")]
+            {
+                self.nrd_backend = new_nrd_backend;
+            }
             if let Some(controller) = self.dynamic_resolution.as_mut() {
                 controller.reset_after_discontinuity(self.requested_render_scale);
             }
@@ -1396,6 +1638,11 @@ impl Dx12Renderer {
     /// descriptors are fully built before the active generation is replaced;
     /// the old generation remains owned until its submission fence completes.
     pub fn set_render_scale(&mut self, requested: RenderScale) -> Result<()> {
+        #[cfg(feature = "nrd")]
+        if self.denoiser == DenoiserBackend::NrdReblur {
+            eprintln!("render_scale_manual_change blocked=nrd_fixed_extent_9d");
+            return Ok(());
+        }
         let output_extent = self.active_generation.output_extent;
         let new_render_extent = match classify_render_extent_change(
             self.minimized,
@@ -2005,6 +2252,9 @@ fn benchmark_json_line(
             "atrous_2": gpu_pass_json(report.pass(GpuPass::Atrous2)),
             "atrous_3": gpu_pass_json(report.pass(GpuPass::Atrous3)),
             "tone_map": gpu_pass_json(report.pass(GpuPass::ToneMap)),
+            "nrd_prep": gpu_pass_json(report.pass(GpuPass::NrdPrep)),
+            "nrd_denoise": gpu_pass_json(report.pass(GpuPass::NrdDenoise)),
+            "nrd_compose": gpu_pass_json(report.pass(GpuPass::NrdCompose)),
         },
         "memory": {
             "usage_bytes": memory.usage_bytes,
@@ -2151,11 +2401,227 @@ impl Dx12Renderer {
             .reconstruction_motion
             .collect_transition(&mut self.transition_batch, state);
         generation
+            .reconstruction_diffuse_hit_distance
+            .collect_transition(&mut self.transition_batch, state);
+        generation
             .reconstruction_specular_hit_distance
             .collect_transition(&mut self.transition_batch, state);
         generation
             .reconstruction_primary_emissive
             .collect_transition(&mut self.transition_batch, state);
+        generation
+            .nrd_validation
+            .collect_transition(&mut self.transition_batch, state);
+    }
+
+    #[cfg(feature = "nrd")]
+    fn record_nrd_path(
+        &mut self,
+        frame_index: usize,
+        render_groups_x: u32,
+        render_groups_y: u32,
+        command_recording_stats: &mut CommandRecordingFrameStats,
+    ) -> Result<()> {
+        self.collect_frame_input_transitions(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        let generation = &mut self.active_generation;
+        for resource in [
+            &mut generation.nrd_diffuse_input,
+            &mut generation.nrd_specular_input,
+            &mut generation.nrd_normal_roughness,
+            &mut generation.nrd_motion,
+            &mut generation.nrd_view_z,
+            &mut generation.nrd_diffuse_factor,
+            &mut generation.nrd_specular_factor,
+        ] {
+            resource.collect_transition(
+                &mut self.transition_batch,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            );
+        }
+        self.submit_transition_batch(command_recording_stats);
+
+        self.gpu_profiler
+            .begin(&self.command_list, frame_index, GpuPass::NrdPrep);
+        self.gpu_profiler
+            .begin_event(&self.command_list, GpuPass::NrdPrep);
+        self.nrd_prep_pipeline.bind(
+            &self.command_list,
+            self.active_generation
+                .shader_heap
+                .gpu_handle(NRD_PREP_TABLE_BASE),
+            &[0],
+        );
+        unsafe {
+            self.command_list
+                .Dispatch(render_groups_x, render_groups_y, 1);
+        }
+        self.gpu_profiler
+            .end(&self.command_list, frame_index, GpuPass::NrdPrep);
+        self.gpu_profiler.end_event(&self.command_list);
+
+        let generation = &mut self.active_generation;
+        for resource in [
+            &mut generation.nrd_diffuse_input,
+            &mut generation.nrd_specular_input,
+            &mut generation.nrd_normal_roughness,
+            &mut generation.nrd_motion,
+            &mut generation.nrd_view_z,
+            &mut generation.nrd_diffuse_factor,
+            &mut generation.nrd_specular_factor,
+        ] {
+            resource.collect_transition(
+                &mut self.transition_batch,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            );
+        }
+        if self.debug_view == DebugView::NrdValidation {
+            self.active_generation.nrd_validation.collect_transition(
+                &mut self.transition_batch,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            );
+        }
+        self.submit_transition_batch(command_recording_stats);
+
+        let frame_state = self.reconstruction_frame_state;
+        let enable_validation = self.debug_view == DebugView::NrdValidation;
+        let mut bridge_resources = {
+            let generation = &self.active_generation;
+            reconstruction::NrdBridgeResources {
+                motion: bridge_resource(&generation.nrd_motion),
+                normal_roughness: bridge_resource(&generation.nrd_normal_roughness),
+                view_z: bridge_resource(&generation.nrd_view_z),
+                diffuse_radiance_hit_distance: bridge_resource(&generation.nrd_diffuse_input),
+                specular_radiance_hit_distance: bridge_resource(&generation.nrd_specular_input),
+                diffuse_output: bridge_resource(&generation.nrd_diffuse_output),
+                specular_output: bridge_resource(&generation.nrd_specular_output),
+                validation_output: if enable_validation {
+                    bridge_resource(&generation.nrd_validation)
+                } else {
+                    reconstruction::NrdBridgeResource::default()
+                },
+            }
+        };
+        self.gpu_profiler
+            .begin(&self.command_list, frame_index, GpuPass::NrdDenoise);
+        self.gpu_profiler
+            .begin_event(&self.command_list, GpuPass::NrdDenoise);
+        let nrd_backend = self.nrd_backend.as_mut().ok_or_else(|| {
+            WindowsError::new(
+                windows::core::HRESULT(0x80004005_u32 as i32),
+                "NRD backend 未初始化",
+            )
+        })?;
+        unsafe {
+            nrd_backend.denoise(
+                &frame_state,
+                &mut bridge_resources,
+                &self.command_list,
+                enable_validation,
+            )?;
+        }
+        self.gpu_profiler
+            .end(&self.command_list, frame_index, GpuPass::NrdDenoise);
+        self.gpu_profiler.end_event(&self.command_list);
+
+        let generation = &mut self.active_generation;
+        set_bridge_resource_state(&mut generation.nrd_motion, bridge_resources.motion.state)?;
+        set_bridge_resource_state(
+            &mut generation.nrd_normal_roughness,
+            bridge_resources.normal_roughness.state,
+        )?;
+        set_bridge_resource_state(&mut generation.nrd_view_z, bridge_resources.view_z.state)?;
+        set_bridge_resource_state(
+            &mut generation.nrd_diffuse_input,
+            bridge_resources.diffuse_radiance_hit_distance.state,
+        )?;
+        set_bridge_resource_state(
+            &mut generation.nrd_specular_input,
+            bridge_resources.specular_radiance_hit_distance.state,
+        )?;
+        set_bridge_resource_state(
+            &mut generation.nrd_diffuse_output,
+            bridge_resources.diffuse_output.state,
+        )?;
+        set_bridge_resource_state(
+            &mut generation.nrd_specular_output,
+            bridge_resources.specular_output.state,
+        )?;
+        if enable_validation {
+            set_bridge_resource_state(
+                &mut generation.nrd_validation,
+                bridge_resources.validation_output.state,
+            )?;
+        }
+
+        // NRD owns an internal descriptor heap while recording. Restore both
+        // application heaps before any following pipeline/root binding.
+        unsafe {
+            self.command_list.SetDescriptorHeaps(&[
+                Some(self.active_generation.shader_heap.heap().clone()),
+                Some(self._sampler_heap.heap().clone()),
+            ]);
+        }
+        for resource in [
+            &mut self.active_generation.nrd_diffuse_output,
+            &mut self.active_generation.nrd_specular_output,
+        ] {
+            resource.collect_transition(
+                &mut self.transition_batch,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            );
+        }
+        self.active_generation
+            .filter_diffuse_pong
+            .collect_transition(
+                &mut self.transition_batch,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            );
+        self.active_generation
+            .filter_specular_pong
+            .collect_transition(
+                &mut self.transition_batch,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            );
+        if enable_validation {
+            self.active_generation.nrd_validation.collect_transition(
+                &mut self.transition_batch,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            );
+        }
+        self.submit_transition_batch(command_recording_stats);
+
+        self.gpu_profiler
+            .begin(&self.command_list, frame_index, GpuPass::NrdCompose);
+        self.gpu_profiler
+            .begin_event(&self.command_list, GpuPass::NrdCompose);
+        self.nrd_compose_pipeline.bind(
+            &self.command_list,
+            self.active_generation
+                .shader_heap
+                .gpu_handle(NRD_COMPOSE_TABLE_BASE),
+            &[0],
+        );
+        unsafe {
+            self.command_list
+                .Dispatch(render_groups_x, render_groups_y, 1);
+        }
+        self.gpu_profiler
+            .end(&self.command_list, frame_index, GpuPass::NrdCompose);
+        self.gpu_profiler.end_event(&self.command_list);
+        self.active_generation
+            .filter_diffuse_pong
+            .collect_transition(
+                &mut self.transition_batch,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            );
+        self.active_generation
+            .filter_specular_pong
+            .collect_transition(
+                &mut self.transition_batch,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            );
+        self.submit_transition_batch(command_recording_stats);
+        Ok(())
     }
 
     fn submit_transition_batch(&mut self, stats: &mut CommandRecordingFrameStats) {
@@ -2243,9 +2709,9 @@ impl Dx12Renderer {
         let tonemap = ComputePipeline::new(
             &self.device,
             &shaders.tonemap,
-            13,
+            14,
             1,
-            2,
+            3,
             "Tone Map 与调试视图",
         )?;
         self.raytracing_pipeline = raytracing;
@@ -2386,6 +2852,8 @@ impl Drop for Dx12Renderer {
     fn drop(&mut self) {
         unsafe {
             let _ = self.wait_for_gpu();
+            #[cfg(feature = "nrd")]
+            self.nrd_backend.take();
             if cfg!(debug_assertions) {
                 report_debug_messages(&self.device);
             }
@@ -2627,7 +3095,7 @@ mod tests {
 
     #[test]
     fn descriptor_tables_do_not_overlap_and_fit_the_heap() {
-        let mut ranges = vec![(DXR_TABLE_BASE, texture::DXR_UAV_BASE + 17)];
+        let mut ranges = vec![(DXR_TABLE_BASE, texture::DXR_UAV_BASE + 18)];
         for base in TEMPORAL_TABLE_BASES {
             ranges.push((base, base + 28));
         }
@@ -2641,7 +3109,12 @@ mod tests {
             }
         }
         for base in TONEMAP_TABLE_BASES {
-            ranges.push((base, base + 14));
+            ranges.push((base, base + 15));
+        }
+        #[cfg(feature = "nrd")]
+        {
+            ranges.push((NRD_PREP_TABLE_BASE, NRD_PREP_TABLE_BASE + 17));
+            ranges.push((NRD_COMPOSE_TABLE_BASE, NRD_COMPOSE_TABLE_BASE + 7));
         }
         ranges.sort_unstable();
 

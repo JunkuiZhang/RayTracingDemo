@@ -66,6 +66,7 @@ RWTexture2D<float> ReconstructionViewZ : register(u13);
 RWTexture2D<float2> ReconstructionMotion : register(u14);
 RWTexture2D<float> ReconstructionSpecularHitDistance : register(u15);
 RWTexture2D<float4> ReconstructionPrimaryEmissive : register(u16);
+RWTexture2D<float> ReconstructionDiffuseHitDistance : register(u17);
 
 cbuffer FrameConstants : register(b0)
 {
@@ -331,6 +332,7 @@ void RayGen()
     ReconstructionMotion[pixel] = 0;
     ReconstructionSpecularHitDistance[pixel] = 0;
     ReconstructionPrimaryEmissive[pixel] = 0;
+    ReconstructionDiffuseHitDistance[pixel] = 0;
     TraceRay(
         Scene,
         RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
@@ -682,9 +684,11 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
             FiniteNonNegative(payload.rawDiffuse + payload.rawSpecular),
             1.0);
     }
-    if (payload.depth == 0 && sampledSpecular)
+    if (payload.depth == 0)
     {
-        GBufferHitDistance[DispatchRaysIndex().xy] = child.hitDistance;
+        if (sampledSpecular)
+            GBufferHitDistance[DispatchRaysIndex().xy] = child.hitDistance;
+        ReconstructionDiffuseHitDistance[DispatchRaysIndex().xy] = child.hitDistance;
         ReconstructionSpecularHitDistance[DispatchRaysIndex().xy] = child.hitDistance;
     }
     payload.radiance = emissive + directDiffuse + directSpecular + bouncedRadiance;

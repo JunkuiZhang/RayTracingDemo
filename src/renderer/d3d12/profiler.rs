@@ -20,9 +20,12 @@ pub enum GpuPass {
     Atrous2 = 7,
     Atrous3 = 8,
     ToneMap = 9,
+    NrdPrep = 10,
+    NrdDenoise = 11,
+    NrdCompose = 12,
 }
 
-pub const PASS_COUNT: usize = 10;
+pub const PASS_COUNT: usize = 13;
 pub const TIMING_WINDOW_CAPACITY: usize = 240;
 const TIMESTAMPS_PER_FRAME: usize = PASS_COUNT * 2;
 const BENCHMARK_HISTOGRAM_RESOLUTION_MS: f64 = 0.01;
@@ -41,6 +44,9 @@ pub struct GpuTimingSample {
     pub atrous_ms: f64,
     pub atrous_iterations_ms: [f64; 4],
     pub tone_map_ms: f64,
+    pub nrd_prep_ms: f64,
+    pub nrd_denoise_ms: f64,
+    pub nrd_compose_ms: f64,
     pub total_ms: f64,
     pub valid: bool,
 }
@@ -58,6 +64,9 @@ impl GpuTimingSample {
             GpuPass::Atrous2 => self.atrous_iterations_ms[2],
             GpuPass::Atrous3 => self.atrous_iterations_ms[3],
             GpuPass::ToneMap => self.tone_map_ms,
+            GpuPass::NrdPrep => self.nrd_prep_ms,
+            GpuPass::NrdDenoise => self.nrd_denoise_ms,
+            GpuPass::NrdCompose => self.nrd_compose_ms,
         }
     }
 }
@@ -267,9 +276,11 @@ impl Default for BenchmarkAccumulator {
 }
 
 impl BenchmarkAccumulator {
-    fn push(&mut self, values: [f64; PASS_COUNT]) {
-        for (histogram, value) in self.passes.iter_mut().zip(values) {
-            histogram.push(value);
+    fn push(&mut self, values: [f64; PASS_COUNT], active_passes: [bool; PASS_COUNT]) {
+        for (index, (histogram, value)) in self.passes.iter_mut().zip(values).enumerate() {
+            if active_passes[index] {
+                histogram.push(value);
+            }
         }
     }
 
@@ -387,6 +398,9 @@ impl GpuProfiler {
             GpuPass::Atrous2 => b"Stage8 A-Trous 2\0",
             GpuPass::Atrous3 => b"Stage8 A-Trous 3\0",
             GpuPass::ToneMap => b"Stage8 ToneMap\0",
+            GpuPass::NrdPrep => b"Stage9 NRD Prep\0",
+            GpuPass::NrdDenoise => b"Stage9 NRD Denoise\0",
+            GpuPass::NrdCompose => b"Stage9 NRD Compose\0",
             GpuPass::Total => b"Stage8 Total\0",
         };
         self.pix.begin(command_list, label);
@@ -433,6 +447,7 @@ impl GpuProfiler {
         frame_index: usize,
         fence_completed: bool,
         sample_valid: bool,
+        active_passes: [bool; PASS_COUNT],
     ) -> Result<Option<GpuTimingSample>> {
         if !fence_completed {
             return Ok(None);
@@ -463,6 +478,9 @@ impl GpuProfiler {
         let mut values = [0.0_f64; PASS_COUNT];
         let mut valid = sample_valid && self.timestamp_frequency != 0;
         for (pass, value) in values.iter_mut().enumerate() {
+            if !active_passes[pass] {
+                continue;
+            }
             let begin = timestamps[pass * 2];
             let end = timestamps[pass * 2 + 1];
             if begin == 0 || end < begin {
@@ -490,15 +508,20 @@ impl GpuProfiler {
                 values[GpuPass::Atrous3 as usize],
             ],
             tone_map_ms: values[GpuPass::ToneMap as usize],
+            nrd_prep_ms: values[GpuPass::NrdPrep as usize],
+            nrd_denoise_ms: values[GpuPass::NrdDenoise as usize],
+            nrd_compose_ms: values[GpuPass::NrdCompose as usize],
             total_ms: values[GpuPass::Total as usize],
             valid: true,
         };
         self.last_sample = Some(sample);
-        for (window, value) in self.windows.iter_mut().zip(values) {
-            window.push(value);
+        for (index, (window, value)) in self.windows.iter_mut().zip(values).enumerate() {
+            if active_passes[index] {
+                window.push(value);
+            }
         }
         if let Some(benchmark) = self.benchmark.as_mut() {
-            benchmark.push(values);
+            benchmark.push(values, active_passes);
         }
         self.valid_sample_serial = self.valid_sample_serial.wrapping_add(1);
         Ok(Some(sample))
@@ -612,6 +635,9 @@ mod tests {
             atrous_ms: 10.0,
             atrous_iterations_ms: [1.0, 2.0, 3.0, 4.0],
             tone_map_ms: 5.0,
+            nrd_prep_ms: 6.0,
+            nrd_denoise_ms: 7.0,
+            nrd_compose_ms: 8.0,
             total_ms: 30.0,
             valid: true,
         };
@@ -630,7 +656,7 @@ mod tests {
     fn benchmark_accumulator_retains_the_full_measurement_interval() {
         let mut accumulator = BenchmarkAccumulator::default();
         for value in 1..=600 {
-            accumulator.push([value as f64 / 10.0; PASS_COUNT]);
+            accumulator.push([value as f64 / 10.0; PASS_COUNT], [true; PASS_COUNT]);
         }
         let stats = accumulator.report().pass(GpuPass::Total);
         assert_eq!(stats.valid_samples, 600);

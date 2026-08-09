@@ -21,6 +21,7 @@
 static_assert(sizeof(NrdBridgeVersion) == 68, "NRD bridge version ABI changed");
 static_assert(sizeof(NrdBridgeCreateDesc) == 24, "NRD bridge create ABI changed");
 static_assert(sizeof(NrdBridgeFrameState) == 312, "NRD bridge frame ABI changed");
+static_assert(sizeof(NrdBridgeFrameDesc) == 16, "NRD bridge frame description ABI changed");
 static_assert(sizeof(NrdBridgeResource) == 16, "NRD bridge resource ABI changed");
 
 struct NrdBridge {
@@ -117,9 +118,17 @@ nri::AccessLayoutStage state_from_d3d12(uint32_t state) {
 nrd::Resource make_resource(const NrdBridgeResource& input) {
     nrd::Resource resource = {};
     resource.d3d12.resource = input.resource;
-    resource.d3d12.format = DXGI_FORMAT_UNKNOWN;
+    resource.d3d12.format = static_cast<DXGI_FORMAT>(input.format);
     resource.state = state_from_d3d12(input.state);
     return resource;
+}
+
+uint32_t state_to_d3d12(const nri::AccessLayoutStage& state) {
+    if (state.access == nri::AccessBits::SHADER_RESOURCE_STORAGE)
+        return kD3D12ResourceStateUnorderedAccess;
+    if (state.access == nri::AccessBits::SHADER_RESOURCE)
+        return kD3D12ResourceStateNonPixelShaderResource;
+    return 0;
 }
 
 void copy_matrix(float* destination, const float* source) {
@@ -206,7 +215,7 @@ NrdBridgeStatus nrd_bridge_create(const NrdBridgeCreateDesc* desc, NrdBridge** o
 NrdBridgeStatus nrd_bridge_denoise(
     NrdBridge* bridge,
     const NrdBridgeFrameDesc* frame,
-    const NrdBridgeResources* resources,
+    NrdBridgeResources* resources,
     ID3D12GraphicsCommandList* command_list) {
     if (bridge == nullptr || frame == nullptr || frame->state == nullptr || resources == nullptr || command_list == nullptr)
         return NRD_BRIDGE_STATUS_INVALID_ARGUMENT;
@@ -252,7 +261,10 @@ NrdBridgeStatus nrd_bridge_denoise(
         }
 
         nrd::ResourceSnapshot snapshot;
-        snapshot.restoreInitialState = true;
+        // Keep NRD's final states so the caller can update its tracked state
+        // and issue only the next consumer's explicit transition. Restoring
+        // every resource after every dispatch would add hidden barriers.
+        snapshot.restoreInitialState = false;
         const nrd::Resource motion = make_resource(resources->motion);
         const nrd::Resource normal_roughness = make_resource(resources->normal_roughness);
         const nrd::Resource view_z = make_resource(resources->view_z);
@@ -280,6 +292,16 @@ NrdBridgeStatus nrd_bridge_denoise(
         nri::CommandBufferD3D12Desc command_desc = {};
         command_desc.d3d12CommandList = command_list;
         bridge->integration.DenoiseD3D12(&identifier, 1, command_desc, snapshot);
+
+        resources->motion.state = state_to_d3d12(snapshot.slots[static_cast<size_t>(nrd::ResourceType::IN_MV)]->state);
+        resources->normal_roughness.state = state_to_d3d12(snapshot.slots[static_cast<size_t>(nrd::ResourceType::IN_NORMAL_ROUGHNESS)]->state);
+        resources->view_z.state = state_to_d3d12(snapshot.slots[static_cast<size_t>(nrd::ResourceType::IN_VIEWZ)]->state);
+        resources->diffuse_radiance_hit_distance.state = state_to_d3d12(snapshot.slots[static_cast<size_t>(nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST)]->state);
+        resources->specular_radiance_hit_distance.state = state_to_d3d12(snapshot.slots[static_cast<size_t>(nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST)]->state);
+        resources->diffuse_output.state = state_to_d3d12(snapshot.slots[static_cast<size_t>(nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST)]->state);
+        resources->specular_output.state = state_to_d3d12(snapshot.slots[static_cast<size_t>(nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST)]->state);
+        if (resources->validation_output.resource != nullptr)
+            resources->validation_output.state = state_to_d3d12(snapshot.slots[static_cast<size_t>(nrd::ResourceType::OUT_VALIDATION)]->state);
         return NRD_BRIDGE_STATUS_OK;
     } catch (...) {
         set_error(bridge, "exception caught inside NRD bridge");
