@@ -12,6 +12,10 @@ mod debug_view;
 mod entity;
 mod material;
 mod realtime;
+// 9A keeps the ABI/guide structs available for the staged 9B/9C integration;
+// some fields are intentionally not consumed until the optional backend exists.
+#[allow(dead_code)]
+mod reconstruction;
 mod renderer;
 mod resolution;
 mod scene;
@@ -90,11 +94,12 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                 | "--target-gpu-ms"
                 | "--command-recording-mode"
                 | "--acceleration-structure-mode"
+                | "--denoiser"
         )
     });
     if cpu_reference_requested && realtime_requested {
         return Err(
-            "--cpu-reference 不能与实时渲染选项（--model、--animate-model、--benchmark-seconds、--capture-output、--capture-after-spp、--debug-view、--atrous-mode、--output-size、--render-scale、--dynamic-resolution、--target-gpu-ms、--command-recording-mode、--acceleration-structure-mode）同时使用"
+            "--cpu-reference 不能与实时渲染选项（--model、--animate-model、--benchmark-seconds、--capture-output、--capture-after-spp、--debug-view、--atrous-mode、--output-size、--render-scale、--dynamic-resolution、--target-gpu-ms、--command-recording-mode、--acceleration-structure-mode、--denoiser）同时使用"
                 .to_string(),
         );
     }
@@ -195,6 +200,10 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                         .next()
                         .ok_or("--acceleration-structure-mode 缺少模式")?;
                     config.acceleration_structure_mode = parse_acceleration_structure_mode(&value)?;
+                }
+                "--denoiser" => {
+                    let value = arguments.next().ok_or("--denoiser 缺少后端")?;
+                    config.denoiser = parse_denoiser_backend(&value)?;
                 }
                 _ => return Err(format!("未知参数：{argument}")),
             }
@@ -358,12 +367,22 @@ fn parse_acceleration_structure_mode(
     }
 }
 
+fn parse_denoiser_backend(value: &str) -> Result<reconstruction::DenoiserBackend, String> {
+    match value {
+        "svgf" => Ok(reconstruction::DenoiserBackend::Svgf),
+        "nrd-reblur" => Ok(reconstruction::DenoiserBackend::NrdReblur),
+        _ => Err(format!(
+            "无效的降噪后端：{value}（仅支持 svgf 或 nrd-reblur）"
+        )),
+    }
+}
+
 fn print_help() {
     println!(
         "RayTracingDemo\n\n\
          用法：\n  \
          cargo run --release                 启动实时 DX12 窗口\n  \
-         cargo run --release -- --model <路径> [--animate-model] [--benchmark-seconds <秒> | --capture-output <PNG>] [--capture-after-spp <SPP>] [--debug-view <名称>] [--atrous-mode <模式>] [--output-size <宽x高>] [--render-scale <比例> | --dynamic-resolution [--target-gpu-ms <毫秒>]] [--command-recording-mode <模式>] [--acceleration-structure-mode <模式>]\n  \
+         cargo run --release -- --model <路径> [--animate-model] [--benchmark-seconds <秒> | --capture-output <PNG>] [--capture-after-spp <SPP>] [--debug-view <名称>] [--atrous-mode <模式>] [--output-size <宽x高>] [--render-scale <比例> | --dynamic-resolution [--target-gpu-ms <毫秒>]] [--command-recording-mode <模式>] [--acceleration-structure-mode <模式>] [--denoiser <后端>]\n  \
          cargo run --release -- --cpu-reference [选项]\n\n\
          选项：\n  \
          --samples <数量>       每像素采样数，默认 1\n  \
@@ -381,6 +400,7 @@ fn print_help() {
          --target-gpu-ms <毫秒>   动态目标，有限数值 4.0..50.0，默认 14.5\n  \
          --command-recording-mode <模式> 命令记录：baseline 或 optimized，默认 optimized\n  \
          --acceleration-structure-mode <模式> AS 策略：baseline 或 optimized，默认 baseline\n  \
+         --denoiser <后端>       重建后端：svgf 或 nrd-reblur，默认 svgf\n  \
          --help, -h             显示帮助"
     );
 }
@@ -626,6 +646,37 @@ mod tests {
             "--cpu-reference".to_string(),
             "--acceleration-structure-mode".to_string(),
             "baseline".to_string(),
+        ]);
+        assert!(matches!(result, Err(message) if message.contains("不能与")));
+    }
+
+    #[test]
+    fn denoiser_defaults_to_svgf_and_parses_explicit_backend() {
+        assert!(matches!(
+            parse_arguments(Vec::<String>::new()),
+            Ok(Command::Realtime(RealtimeConfig {
+                denoiser: crate::reconstruction::DenoiserBackend::Svgf,
+                ..
+            }))
+        ));
+        let command = parse_arguments(["--denoiser".to_string(), "nrd-reblur".to_string()]);
+        assert!(matches!(
+            command,
+            Ok(Command::Realtime(RealtimeConfig {
+                denoiser: crate::reconstruction::DenoiserBackend::NrdReblur,
+                ..
+            }))
+        ));
+        assert!(parse_denoiser_backend("invalid").is_err());
+        assert!(parse_arguments(["--denoiser".to_string()]).is_err());
+    }
+
+    #[test]
+    fn denoiser_is_covered_by_cpu_reference_conflict_guard() {
+        let result = parse_arguments([
+            "--cpu-reference".to_string(),
+            "--denoiser".to_string(),
+            "svgf".to_string(),
         ]);
         assert!(matches!(result, Err(message) if message.contains("不能与")));
     }

@@ -27,6 +27,9 @@ use crate::{
     as_policy::AccelerationStructureStats,
     debug_view::DebugView,
     realtime::{AtrousMode, CommandRecordingMode, RealtimeConfig},
+    reconstruction::{
+        DenoiserBackend, NRD_COMMIT_PREFIX, NRD_VERSION, RECONSTRUCTION_CONTRACT_VERSION,
+    },
     resolution::{
         DynamicResolutionConfig, DynamicResolutionController, DynamicResolutionDirection, Extent2D,
         RenderExtentChange, RenderScale, ResolutionMode, classify_render_extent_change,
@@ -182,6 +185,7 @@ pub struct Dx12Renderer {
     animate_model: bool,
     atrous_mode: AtrousMode,
     command_recording_mode: CommandRecordingMode,
+    denoiser: DenoiserBackend,
     animation_start: Instant,
     history_reset_count: u64,
     render_extent_change_count: u64,
@@ -206,6 +210,12 @@ pub struct Dx12Renderer {
 
 impl Dx12Renderer {
     pub fn new(window: &Window, width: u32, height: u32, config: &RealtimeConfig) -> Result<Self> {
+        if let Some(error) = config.denoiser.requested_startup_error() {
+            return Err(WindowsError::new(
+                windows::core::HRESULT(0x80070057_u32 as i32),
+                error,
+            ));
+        }
         unsafe {
             enable_debug_interfaces();
 
@@ -479,6 +489,7 @@ impl Dx12Renderer {
                 animate_model: config.animate_model,
                 atrous_mode: config.atrous_mode,
                 command_recording_mode: config.command_recording_mode,
+                denoiser: config.denoiser,
                 animation_start: Instant::now(),
                 history_reset_count: 1,
                 render_extent_change_count: 0,
@@ -1468,6 +1479,10 @@ impl Dx12Renderer {
         self.atrous_mode.as_str()
     }
 
+    pub fn denoiser_name(&self) -> &'static str {
+        self.denoiser.as_str()
+    }
+
     pub fn command_recording_mode_name(&self) -> &'static str {
         self.command_recording_mode.as_str()
     }
@@ -1639,6 +1654,8 @@ impl Dx12Renderer {
                     .saturating_sub(self.benchmark_extent_change_baseline),
                 atrous_mode: self.atrous_mode.as_str(),
                 command_recording_mode: self.command_recording_mode.as_str(),
+                denoiser_backend: self.denoiser.as_str(),
+                nrd_compiled: self.denoiser.nrd_compiled(),
             },
             self.gpu_profiler.benchmark_statistics(),
             self.gpu_profiler.command_recording_statistics(),
@@ -1780,6 +1797,8 @@ struct BenchmarkJsonContext<'a> {
     render_extent_change_count: u64,
     atrous_mode: &'a str,
     command_recording_mode: &'a str,
+    denoiser_backend: &'a str,
+    nrd_compiled: bool,
 }
 
 fn benchmark_json_line(
@@ -1816,6 +1835,8 @@ fn benchmark_json_line(
         render_extent_change_count,
         atrous_mode,
         command_recording_mode,
+        denoiser_backend,
+        nrd_compiled,
     } = context;
     let status = match memory.status {
         VideoMemoryStatus::Available => "available",
@@ -1840,6 +1861,7 @@ fn benchmark_json_line(
         .collect::<Vec<_>>();
     serde_json::json!({
         "schema_version": 1,
+        "reconstruction_contract_version": RECONSTRUCTION_CONTRACT_VERSION,
         "gpu_name": gpu_name,
         "output_width": width,
         "output_height": height,
@@ -1863,6 +1885,15 @@ fn benchmark_json_line(
         "render_scale_quantized_noop_count": render_scale_quantized_noop_count,
         "dynamic_resolution": dynamic_resolution,
         "atrous_mode": atrous_mode,
+        "denoiser": {
+            "requested": denoiser_backend,
+            "active": denoiser_backend,
+            "nrd_compiled": nrd_compiled,
+            "nrd_version": if cfg!(feature = "nrd") { Some(NRD_VERSION) } else { None::<&str> },
+            "nrd_commit": if cfg!(feature = "nrd") { Some(NRD_COMMIT_PREFIX) } else { None::<&str> },
+            "history_reset_count": history_reset_count,
+            "switch_count": 0,
+        },
         "command_recording": {
             "mode": command_recording_mode,
             "cpu_ms": {
@@ -2585,6 +2616,8 @@ mod tests {
                 render_extent_change_count: 1,
                 atrous_mode: "shared",
                 command_recording_mode: "optimized",
+                denoiser_backend: "svgf",
+                nrd_compiled: false,
             },
             report,
             profiler::CommandRecordingStats {
@@ -2613,6 +2646,7 @@ mod tests {
         assert!(!json.contains(['\r', '\n']));
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["reconstruction_contract_version"], 1);
         assert_eq!(value["gpu_name"], "RTX 4060 \"Laptop\"");
         assert_eq!(value["resolution_mode"], "fixed");
         assert!(value["dynamic_resolution"].is_null());
@@ -2622,6 +2656,9 @@ mod tests {
         assert_eq!(value["retired_generation_count"], 0);
         assert_eq!(value["retired_generation_high_watermark"], 2);
         assert_eq!(value["atrous_mode"], "shared");
+        assert_eq!(value["denoiser"]["requested"], "svgf");
+        assert_eq!(value["denoiser"]["active"], "svgf");
+        assert_eq!(value["denoiser"]["nrd_compiled"], false);
         assert_eq!(value["command_recording"]["mode"], "optimized");
         assert_eq!(value["command_recording"]["cpu_ms"]["p95_ms"], 0.61);
         assert_eq!(

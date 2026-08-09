@@ -196,7 +196,8 @@ impl ApplicationHandler for RealtimeApplication {
                     if elapsed >= Duration::from_millis(500) {
                         let fps = self.frames_since_stats as f64 / elapsed.as_secs_f64();
                         window.set_title(&format!(
-                            "RayTracingDemo - 阶段 8 | Cmd {} | FPS {:.0} | GPU {:.2} ms (p95 {:.2}) | 输出 {}x{} | 内部 {}x{} [{}] | Gen {} / retired {} | VRAM {} | AS {:.2} PT {:.2} T {:.2} A {:.2} ({}) | SPP {} | 视图 {} | {} | {}",
+                            "RayTracingDemo - 阶段 9 | {} | Cmd {} | FPS {:.0} | GPU {:.2} ms (p95 {:.2}) | 输出 {}x{} | 内部 {}x{} [{}] | Gen {} / retired {} | VRAM {} | AS {:.2} PT {:.2} T {:.2} A {:.2} ({}) | SPP {} | 视图 {} | {} | {}",
+                            renderer.denoiser_name(),
                             renderer.command_recording_mode_name(),
                             fps,
                             renderer.gpu_time_ms(),

@@ -1,6 +1,6 @@
 use std::{error::Error, path::PathBuf};
 
-use crate::{debug_view::DebugView, resolution::ResolutionMode};
+use crate::{debug_view::DebugView, reconstruction::DenoiserBackend, resolution::ResolutionMode};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RealtimeConfig {
@@ -15,6 +15,7 @@ pub struct RealtimeConfig {
     pub resolution_mode: ResolutionMode,
     pub command_recording_mode: CommandRecordingMode,
     pub acceleration_structure_mode: AccelerationStructureMode,
+    pub denoiser: DenoiserBackend,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
