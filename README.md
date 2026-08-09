@@ -150,7 +150,7 @@ target\release\ray_tracing_demo.exe --benchmark-seconds 30 --output-size 1920x10
 
 JSON 包含实际 GPU 名称、输出/内部尺寸范围、分辨率模式、À-Trous 模式、完整测量区间的有效样本数、Total/AS/Path Trace/Temporal/À-Trous 聚合与四次迭代/ToneMap 的 p50/p95、历史/尺寸重置计数、PIX runtime 状态，以及显存 usage/budget。UI 的最近 240 帧滚动窗口不会截断 benchmark；正式测量开始时也会排除三帧 Frame Context 中尚未完成的预热 timestamp。`Present(1)` 的 FPS 不参与 GPU 统计。
 
-项目随仓库固定包含 Microsoft 官方 `WinPixEventRuntime 1.0.240308001` 的 x64 DLL。`build.rs` 会将 DLL 和许可证复制到 Cargo profile 输出目录，程序只从可执行文件旁的绝对路径加载。它仅用于写入 PIX instrumentation；加载失败不影响渲染，但 JSON 中 `pix_events_available` 会为 `false`。来源、哈希和许可证见 [`third_party/winpix/README.md`](third_party/winpix/README.md)。8B–8E-2 的实测数据、默认决策和未通过项见 [`docs/阶段8性能优化执行计划.md`](docs/阶段8性能优化执行计划.md) 和 [`docs/阶段8E2动态分辨率实测记录.md`](docs/阶段8E2动态分辨率实测记录.md)。下一工作包是阶段 8G 总体验收与债务收口；8F 仍是受数据门槛约束的可选实验，不是默认下一步。
+项目随仓库固定包含 Microsoft 官方 `WinPixEventRuntime 1.0.240308001` 的 x64 DLL。`build.rs` 会将 DLL 和许可证复制到 Cargo profile 输出目录，程序只从可执行文件旁的绝对路径加载。它仅用于写入 PIX instrumentation；加载失败不影响渲染，但 JSON 中 `pix_events_available` 会为 `false`。来源、哈希和许可证见 [`third_party/winpix/README.md`](third_party/winpix/README.md)。8B–8E-2 的实测数据、默认决策和未通过项见 [`docs/阶段8性能优化执行计划.md`](docs/阶段8性能优化执行计划.md) 和 [`docs/阶段8E2动态分辨率实测记录.md`](docs/阶段8E2动态分辨率实测记录.md)。下一工作包是按 [`docs/阶段8G总体验收与债务收口执行方案.md`](docs/阶段8G总体验收与债务收口执行方案.md) 补齐确定性截图、bounded 显存测量和最终矩阵；8F 因 1080p Path Trace 占比约 43.7% 未达到 45% 入口，本轮不实施。
 
 ## 检查项目
 
