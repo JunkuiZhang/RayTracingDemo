@@ -859,10 +859,13 @@ H1–I3 最新状态（2026-08-09）：median/环境来源修复和五条 Debug 
 
 ### 阶段 9：NRD 可选后端
 
+执行细则：[`阶段9重建输入契约与NRD最小后端执行方案.md`](阶段9重建输入契约与NRD最小后端执行方案.md)。阶段 9 采用缩减路线：先建立 NRD 与 DLSS Ray Reconstruction 共用的重建输入契约，只实现 `REBLUR_DIFFUSE_SPECULAR` 最小对照后端；不在本阶段实现 RELAX、SH、SIGMA、Streamline 或 DLSS。默认仍为自研 SVGF，没有 NRD SDK 时基础版本必须继续构建和运行。
+
 工作内容：
 
-- 建立 C++ C ABI 桥接层。
-- 接入 NRD 漫反射和镜面降噪。
+- 建立可复用给 NRD/DLSS RR 的矩阵、viewZ、运动矢量、材质反照率与 hit-distance 契约。
+- 建立可选 C++ C ABI 桥接层并固定 NRD/NRI 版本与许可。
+- 接入最小 NRD REBLUR 漫反射和镜面降噪。
 - UI 支持自研降噪与 NRD 对比。
 
 验收条件：
@@ -990,6 +993,6 @@ H1–I3 最新状态（2026-08-09）：median/环境来源修复和五条 Debug 
 - DirectX Graphics Samples：<https://github.com/microsoft/DirectX-Graphics-Samples>
 - PIX on Windows：<https://devblogs.microsoft.com/pix/>
 - NVIDIA Streamline：<https://github.com/NVIDIAGameWorks/Streamline>
-- NVIDIA NRD：<https://github.com/NVIDIAGameWorks/RayTracingDenoiser>
+- NVIDIA NRD：<https://github.com/NVIDIA-RTX/NRD>
 - NVIDIA Nsight Graphics：<https://developer.nvidia.com/nsight-graphics>
 - Intel Open Image Denoise：<https://www.openimagedenoise.org/>
