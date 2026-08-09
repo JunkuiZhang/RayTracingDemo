@@ -20,5 +20,7 @@ performed by `build.rs`, and no NRD binary or SDK is redistributed by this
 repository.
 
 The fetched SDK's NVIDIA RTX SDK License and third-party notices must remain
-available for any local build or distribution review. This notice is not a
-replacement for those license files.
+available for any local build or distribution review. For an `nrd` feature
+build, `build.rs` copies the verified NRD, NRI, MathLib, ShaderMake and
+D3D12MemoryAllocator license/notice files beside the executable. This notice is
+not a replacement for those license files.

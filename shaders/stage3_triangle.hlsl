@@ -63,7 +63,9 @@ RWTexture2D<float4> ReconstructionDiffuseAlbedo : register(u10);
 RWTexture2D<float4> ReconstructionSpecularAlbedo : register(u11);
 RWTexture2D<float4> ReconstructionNormalRoughness : register(u12);
 RWTexture2D<float> ReconstructionViewZ : register(u13);
-RWTexture2D<float2> ReconstructionMotion : register(u14);
+// XY follows NRD's old = new + MV convention in pixel units. Z is the
+// previous/current linear viewZ delta; W is reserved for future adapters.
+RWTexture2D<float4> ReconstructionMotion : register(u14);
 RWTexture2D<float> ReconstructionSpecularHitDistance : register(u15);
 RWTexture2D<float4> ReconstructionPrimaryEmissive : register(u16);
 RWTexture2D<float> ReconstructionDiffuseHitDistance : register(u17);
@@ -143,6 +145,25 @@ float2 ProjectToPreviousUv(float3 worldPosition, uint2 size)
     float3 up;
     CameraBasis(PreviousCameraYaw, PreviousCameraPitch, forward, right, up);
     float3 relative = worldPosition - PreviousCameraPosition;
+    float forwardDistance = dot(relative, forward);
+    if (forwardDistance <= 0.0001)
+        return float2(-2.0, -2.0);
+
+    float aspect = float(size.x) / float(size.y);
+    float2 screen;
+    screen.x = focalLength * dot(relative, right) / forwardDistance;
+    screen.y = -focalLength * dot(relative, up) / forwardDistance;
+    return float2(screen.x / aspect, screen.y) * 0.5 + 0.5;
+}
+
+float2 ProjectToCurrentUv(float3 worldPosition, uint2 size)
+{
+    const float focalLength = 2.747477419;
+    float3 forward;
+    float3 right;
+    float3 up;
+    CameraBasis(CameraYaw, CameraPitch, forward, right, up);
+    float3 relative = worldPosition - CameraPosition;
     float forwardDistance = dot(relative, forward);
     if (forwardDistance <= 0.0001)
         return float2(-2.0, -2.0);
@@ -442,7 +463,10 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         GBufferDepth[pixel] = RayTCurrent();
         GBufferId[pixel] = instanceData.stableSurfaceId;
         GBufferWorldPosition[pixel] = float4(hitPosition, 1.0);
-        float2 currentUv = (float2(pixel) + 0.5) / float2(size);
+        // Project the actual jittered primary hit through both non-jittered
+        // cameras. Using the pixel center here would turn per-pixel ray jitter
+        // into false motion even for a fully static scene.
+        float2 currentUv = ProjectToCurrentUv(hitPosition, size);
         float2 previousUv = ProjectToPreviousUv(previousHitPosition, size);
         GBufferMotion[pixel] = ResetHistory != 0u
             ? 0
@@ -469,9 +493,12 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         float NoV = saturate(dot(normal, firstViewDirection));
         float3 f0 = lerp(0.04.xxx, baseColor.xyz, metallic);
         ReconstructionNoisyHdr[pixel] = 0;
+        // RGB is the shared diffuse albedo guide. Alpha has one explicit
+        // consumer in the NRD adapter and stores metallic for reconstructing
+        // the true dielectric/metal F0 without overloading GBufferAlbedo.a.
         ReconstructionDiffuseAlbedo[pixel] = float4(
             FiniteNonNegative(baseColor.xyz * (1.0 - metallic)),
-            1.0);
+            metallic);
         ReconstructionSpecularAlbedo[pixel] = float4(
             FiniteNonNegative(ComputeReconstructionSpecularAlbedo(f0, roughness, NoV)),
             1.0);
@@ -479,7 +506,10 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         ReconstructionViewZ[pixel] = viewZ > 0.0 && isfinite(viewZ) ? viewZ : 1001.0;
         ReconstructionMotion[pixel] = ResetHistory != 0u
             ? 0
-            : (previousUv - currentUv) * float2(size);
+            : float4(
+                (previousUv - currentUv) * float2(size),
+                previousViewZ - viewZ,
+                0.0);
         ReconstructionPrimaryEmissive[pixel] = float4(FiniteNonNegative(emissive), 1.0);
     }
 
@@ -513,6 +543,8 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     float3 viewDirection = normalize(-WorldRayDirection());
     float3 directDiffuse = 0;
     float3 directSpecular = 0;
+    float diffuseHitDistance = 0.0;
+    float specularHitDistance = 0.0;
     if (kind == 0u)
     {
         float2 lightRandom = float2(RandomFloat(payload.seed), RandomFloat(payload.seed));
@@ -574,6 +606,10 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
                 * misWeight / max(lightPdf, 1.0e-6);
             directSpecular = visibility * lightRadiance * brdf.specular * NoL
                 * misWeight / max(lightPdf, 1.0e-6);
+            if (any(directDiffuse > 0.0))
+                diffuseHitDistance = lightDistance;
+            if (any(directSpecular > 0.0))
+                specularHitDistance = lightDistance;
         }
     }
 
@@ -680,6 +716,13 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         payload.rawSpecular = emissive
             + directSpecular
             + specularBounceWeight * child.radiance;
+        // The continuation ray belongs to exactly one probabilistically
+        // selected lobe. Keep the other lobe's NEE distance (or zero when it
+        // has no sample) instead of attaching an unrelated child hit to both.
+        if (sampledSpecular && any(specularBounceWeight > 0.0))
+            specularHitDistance = child.hitDistance;
+        else if (any(diffuseBounceWeight > 0.0))
+            diffuseHitDistance = child.hitDistance;
         ReconstructionNoisyHdr[DispatchRaysIndex().xy] = float4(
             FiniteNonNegative(payload.rawDiffuse + payload.rawSpecular),
             1.0);
@@ -688,8 +731,8 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     {
         if (sampledSpecular)
             GBufferHitDistance[DispatchRaysIndex().xy] = child.hitDistance;
-        ReconstructionDiffuseHitDistance[DispatchRaysIndex().xy] = child.hitDistance;
-        ReconstructionSpecularHitDistance[DispatchRaysIndex().xy] = child.hitDistance;
+        ReconstructionDiffuseHitDistance[DispatchRaysIndex().xy] = diffuseHitDistance;
+        ReconstructionSpecularHitDistance[DispatchRaysIndex().xy] = specularHitDistance;
     }
     payload.radiance = emissive + directDiffuse + directSpecular + bouncedRadiance;
 }

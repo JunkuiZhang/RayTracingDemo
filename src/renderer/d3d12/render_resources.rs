@@ -262,8 +262,8 @@ impl RenderResourceGeneration {
         let reconstruction_motion = create_uav_texture(
             device,
             render_extent,
-            DXGI_FORMAT_R16G16_FLOAT,
-            format!("代际 {id} Reconstruction motion old=new+MV"),
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            format!("代际 {id} Reconstruction 2.5D motion old=new+MV"),
         )?;
         let reconstruction_diffuse_hit_distance = create_uav_texture(
             device,
@@ -307,8 +307,8 @@ impl RenderResourceGeneration {
                 motion: create_uav_texture(
                     device,
                     render_extent,
-                    DXGI_FORMAT_R16G16_FLOAT,
-                    format!("代际 {id} NRD motion"),
+                    DXGI_FORMAT_R16G16B16A16_FLOAT,
+                    format!("代际 {id} NRD 2.5D motion"),
                 )?,
                 view_z: create_uav_texture(
                     device,
@@ -492,7 +492,8 @@ impl RenderResourceGeneration {
                 reconstruction_diffuse_hit_distance,
                 reconstruction_specular_hit_distance,
                 reconstruction_primary_emissive,
-                reconstruction_specular_albedo,
+                reconstruction_diffuse_albedo,
+                world_position,
             ];
             let prep_uavs = [
                 &nrd.diffuse_input,

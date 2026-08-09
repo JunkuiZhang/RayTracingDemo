@@ -502,6 +502,30 @@ mod tests {
     }
 
     #[test]
+    fn static_subpixel_surface_has_zero_2_5d_motion() {
+        let (view, projection) = camera_matrices(
+            CameraPose {
+                position: [0.0, 0.0, -2.0],
+                yaw: 0.0,
+                pitch: 0.0,
+            },
+            16.0 / 9.0,
+        );
+        let (current_uv, current_view_z) =
+            project_world_to_uv([0.137, -0.083, 1.25], view, projection).unwrap();
+        let (previous_uv, previous_view_z) =
+            project_world_to_uv([0.137, -0.083, 1.25], view, projection).unwrap();
+        assert_eq!(
+            nrd_motion_pixels(current_uv, previous_uv, 1280, 720, false),
+            [0.0; 2]
+        );
+        assert_eq!(
+            nrd_view_z_motion(current_view_z, previous_view_z, false),
+            0.0
+        );
+    }
+
+    #[test]
     fn frame_snapshot_reset_makes_previous_extent_and_jitter_explicit() {
         let state = ReconstructionFrameState::from_camera(ReconstructionFrameInput {
             current_camera: CameraPose {

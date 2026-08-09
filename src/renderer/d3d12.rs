@@ -164,7 +164,7 @@ mod shader;
 mod texture;
 
 const FRAME_COUNT: usize = 3;
-const SHADER_DESCRIPTOR_COUNT: usize = 320;
+const SHADER_DESCRIPTOR_COUNT: usize = 321;
 const STAGE3_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage3_triangle.dxil"));
 const TEMPORAL_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage6_temporal.dxil"));
 const ATROUS_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage6_atrous.dxil"));
@@ -181,7 +181,7 @@ const DXR_TABLE_BASE: usize = 0;
 #[cfg(feature = "nrd")]
 const NRD_PREP_TABLE_BASE: usize = 296;
 #[cfg(feature = "nrd")]
-const NRD_COMPOSE_TABLE_BASE: usize = 313;
+const NRD_COMPOSE_TABLE_BASE: usize = 314;
 const TEMPORAL_TABLE_BASES: [usize; 2] = [150, 178];
 const ATROUS_HISTORY_TABLE_BASES: [usize; 2] = [206, 216];
 const ATROUS_PING_TO_PONG_BASES: [usize; 2] = [226, 236];
@@ -547,9 +547,9 @@ impl Dx12Renderer {
             let nrd_prep_pipeline = ComputePipeline::new(
                 &device,
                 NRD_PREP_SHADER,
-                10,
+                11,
                 7,
-                1,
+                3,
                 "阶段 9 NRD REBLUR 输入准备",
             )
             .map_err(|error| dx_error("创建 NRD 输入准备管线", error))?;
@@ -2555,7 +2555,10 @@ impl Dx12Renderer {
             self.active_generation
                 .shader_heap
                 .gpu_handle(NRD_PREP_TABLE_BASE),
-            &[0],
+            &self
+                .reconstruction_frame_state
+                .camera_position
+                .map(f32::to_bits),
         );
         unsafe {
             self.command_list
@@ -3261,7 +3264,7 @@ mod tests {
         }
         #[cfg(feature = "nrd")]
         {
-            ranges.push((NRD_PREP_TABLE_BASE, NRD_PREP_TABLE_BASE + 17));
+            ranges.push((NRD_PREP_TABLE_BASE, NRD_PREP_TABLE_BASE + 18));
             ranges.push((NRD_COMPOSE_TABLE_BASE, NRD_COMPOSE_TABLE_BASE + 7));
         }
         ranges.sort_unstable();

@@ -11,6 +11,12 @@ param(
     [int]$Seconds = 3,
     [ValidateRange(10, 300)]
     [int]$TimeoutSeconds = 60,
+    [ValidateRange(16, 256)]
+    [int]$CaptureSpp = 64,
+    [ValidateRange(0, 255)]
+    [double]$MaxCaptureMae = 66.0,
+    [ValidateRange(0, 255)]
+    [double]$MaxCaptureRmse = 106.0,
     [string]$FixedOutputSize = "1280x720",
     [string]$DynamicOutputSize = "1920x1080",
     [string]$OutputRoot = "output/stage9"
@@ -294,6 +300,80 @@ function Add-Case(
     $Cases.Add([pscustomobject]$summary)
 }
 
+function Add-CaptureComparison(
+    [string]$Name,
+    [string]$OutputSize,
+    [string[]]$CommonArguments,
+    [System.Collections.Generic.List[object]]$Cases,
+    [string]$Root,
+    [string]$Executable
+) {
+    $caseRoot = Join-Path $Root $Name
+    New-Item -ItemType Directory -Path $caseRoot -Force | Out-Null
+    $svgfPath = Join-Path $caseRoot "svgf-final.png"
+    $nrdPath = Join-Path $caseRoot "nrd-final.png"
+    $svgf = Invoke-RecordedProcess $Executable `
+        (@("--output-size", $OutputSize, "--denoiser", "svgf", "--capture-output", $svgfPath, "--capture-after-spp", "$CaptureSpp") + $CommonArguments) `
+        $caseRoot "svgf-capture"
+    $nrd = Invoke-RecordedProcess $Executable `
+        (@("--output-size", $OutputSize, "--denoiser", "nrd-reblur", "--capture-output", $nrdPath, "--capture-after-spp", "$CaptureSpp") + $CommonArguments) `
+        $caseRoot "nrd-capture"
+
+    $failures = [System.Collections.Generic.List[string]]::new()
+    foreach ($capture in @(
+        [pscustomobject]@{ run = $svgf; backend = "svgf"; path = $svgfPath }
+        [pscustomobject]@{ run = $nrd; backend = "nrd-reblur"; path = $nrdPath }
+    )) {
+        $run = $capture.run
+        $backend = [string]$capture.backend
+        $pngPath = [string]$capture.path
+        if ($run.exit_code -ne 0 -or $run.timed_out -or $run.stdout_nonempty_lines -ne 1 -or $null -eq $run.json) {
+            $failures.Add("$backend capture process failed")
+            continue
+        }
+        if ([string]$run.json.modes.denoiser -ne $backend) { $failures.Add("$backend capture denoiser mismatch") }
+        if ([int64]$run.json.actual_spp -ne $CaptureSpp) { $failures.Add("$backend capture SPP mismatch") }
+        if ([int64]$run.json.png_bytes -le 0 -or -not (Test-Path -LiteralPath $pngPath)) {
+            $failures.Add("$backend capture PNG is missing or empty")
+        }
+    }
+
+    $diff = $null
+    $diffExecutable = Join-Path (Split-Path -Parent $Executable) "image_diff.exe"
+    if ($failures.Count -eq 0 -and (Test-Path -LiteralPath $diffExecutable)) {
+        $diff = Invoke-RecordedProcess $diffExecutable @($svgfPath, $nrdPath) $caseRoot "image-diff"
+        if ($diff.exit_code -ne 0 -or $diff.timed_out -or $diff.stdout_nonempty_lines -ne 1 -or $null -eq $diff.json) {
+            $failures.Add("image_diff failed")
+        } else {
+            if (-not (Test-Finite $diff.json.mae) -or [double]$diff.json.mae -gt $MaxCaptureMae) {
+                $failures.Add("SVGF/NRD capture MAE exceeds $MaxCaptureMae")
+            }
+            if (-not (Test-Finite $diff.json.rmse) -or [double]$diff.json.rmse -gt $MaxCaptureRmse) {
+                $failures.Add("SVGF/NRD capture RMSE exceeds $MaxCaptureRmse")
+            }
+            if ([int64]$diff.json.alpha_mismatch_count -ne 0) {
+                $failures.Add("SVGF/NRD capture alpha differs")
+            }
+        }
+    } elseif (-not (Test-Path -LiteralPath $diffExecutable)) {
+        $failures.Add("image_diff executable not found: $diffExecutable")
+    }
+
+    $Cases.Add([pscustomobject][ordered]@{
+        name = $Name
+        backend = "svgf-vs-nrd-reblur"
+        mode = "fixed-capture"
+        run_count = 2
+        valid_run_count = if ($failures.Count -eq 0) { 2 } else { 0 }
+        passed = $failures.Count -eq 0
+        failures = $failures.ToArray()
+        capture_spp = $CaptureSpp
+        thresholds = [ordered]@{ mae = $MaxCaptureMae; rmse = $MaxCaptureRmse }
+        quality = if ($null -ne $diff) { $diff.json } else { $null }
+        runs = @($svgf, $nrd, $diff)
+    })
+}
+
 $repoRoot = (Get-Location).Path
 $configurationName = $Configuration.ToLowerInvariant()
 if ([string]::IsNullOrWhiteSpace($Exe)) {
@@ -321,6 +401,7 @@ if ($Suite -eq "Smoke") {
     Add-Case "svgf-fixed" (@("--benchmark-seconds", "$Seconds", "--output-size", $FixedOutputSize, "--denoiser", "svgf") + $common) "svgf" "fixed" $false 1 $cases $runRoot $Executable $enforcePerformance
     Add-Case "nrd-fixed" (@("--benchmark-seconds", "$Seconds", "--output-size", $FixedOutputSize, "--denoiser", "nrd-reblur") + $common) "nrd-reblur" "fixed" $false 1 $cases $runRoot $Executable $enforcePerformance
     Add-Case "nrd-dynamic" (@("--benchmark-seconds", "$Seconds", "--output-size", $DynamicOutputSize, "--dynamic-resolution", "--target-gpu-ms", "4.0", "--denoiser", "nrd-reblur") + $common) "nrd-reblur" "dynamic" $true 1 $cases $runRoot $Executable $enforcePerformance
+    Add-CaptureComparison "svgf-vs-nrd-final" $FixedOutputSize $common $cases $runRoot $Executable
 } elseif ($Suite -eq "Matrix") {
     Add-Case "svgf-1280x720-fixed" (@("--benchmark-seconds", "$Seconds", "--output-size", "1280x720", "--denoiser", "svgf") + $common) "svgf" "fixed" $false $Runs $cases $runRoot $Executable $enforcePerformance
     Add-Case "nrd-1280x720-fixed" (@("--benchmark-seconds", "$Seconds", "--output-size", "1280x720", "--denoiser", "nrd-reblur") + $common) "nrd-reblur" "fixed" $false $Runs $cases $runRoot $Executable $enforcePerformance
@@ -368,6 +449,7 @@ $summary = [ordered]@{
     timeout_seconds = $TimeoutSeconds
     seconds_per_process = $Seconds
     runs_per_case = if ($Suite -eq "Matrix") { $Runs } else { 1 }
+    quality_capture_spp = if ($Suite -eq "Smoke") { $CaptureSpp } else { $null }
     environment = $environment
     cases = $cases.ToArray()
     passed = $passed

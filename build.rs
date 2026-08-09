@@ -128,6 +128,14 @@ fn build_nrd_bridge(output_directory: &Path, dxc: &Path) {
             );
         }
     }
+    deploy_nrd_notices(
+        output_directory,
+        &nrd_source,
+        &nri_source,
+        &mathlib_source,
+        &shadermake_source,
+        &d3d12ma_source,
+    );
 
     let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
     let build_type = if profile == "release" {
@@ -298,6 +306,47 @@ fn deploy_winpix_runtime(output_directory: &Path) {
     ] {
         let destination = profile_directory.join(destination);
         copy_if_changed(source, &destination);
+    }
+}
+
+fn deploy_nrd_notices(
+    output_directory: &Path,
+    nrd_source: &Path,
+    nri_source: &Path,
+    mathlib_source: &Path,
+    shadermake_source: &Path,
+    d3d12ma_source: &Path,
+) {
+    let profile_directory = output_directory
+        .ancestors()
+        .nth(3)
+        .expect("无法从 OUT_DIR 定位 Cargo profile 输出目录");
+    for (source, destination) in [
+        (nrd_source.join("LICENSE.txt"), "NVIDIA-NRD.LICENSE.txt"),
+        (nri_source.join("LICENSE.txt"), "NVIDIA-NRI.LICENSE.txt"),
+        (
+            mathlib_source.join("LICENSE.txt"),
+            "NVIDIA-MathLib.LICENSE.txt",
+        ),
+        (
+            shadermake_source.join("LICENSE.txt"),
+            "NVIDIA-ShaderMake.LICENSE.txt",
+        ),
+        (
+            shadermake_source.join("ThirdPartyLicenses.txt"),
+            "NVIDIA-ShaderMake.ThirdPartyLicenses.txt",
+        ),
+        (
+            d3d12ma_source.join("LICENSE.txt"),
+            "D3D12MemoryAllocator.LICENSE.txt",
+        ),
+        (
+            d3d12ma_source.join("NOTICES.txt"),
+            "D3D12MemoryAllocator.NOTICES.txt",
+        ),
+    ] {
+        println!("cargo:rerun-if-changed={}", source.display());
+        copy_if_changed(&source, &profile_directory.join(destination));
     }
 }
 

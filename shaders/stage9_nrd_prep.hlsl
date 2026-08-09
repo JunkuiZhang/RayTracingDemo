@@ -5,22 +5,28 @@
 
 Texture2D<float4> RawDiffuse : register(t0);
 Texture2D<float4> RawSpecular : register(t1);
-Texture2D<float4> Albedo : register(t2);
+Texture2D<float4> BaseColor : register(t2);
 Texture2D<float4> NormalRoughness : register(t3);
 Texture2D<float> ViewZ : register(t4);
-Texture2D<float2> Motion : register(t5);
+Texture2D<float4> Motion : register(t5);
 Texture2D<float> DiffuseHitDistance : register(t6);
 Texture2D<float> SpecularHitDistance : register(t7);
 Texture2D<float4> PrimaryEmissive : register(t8);
-Texture2D<float4> SpecularGuide : register(t9);
+Texture2D<float4> DiffuseGuideMetallic : register(t9);
+Texture2D<float4> WorldPosition : register(t10);
 
 RWTexture2D<float4> DiffuseRadianceHitDistance : register(u0);
 RWTexture2D<float4> SpecularRadianceHitDistance : register(u1);
 RWTexture2D<float4> PackedNormalRoughness : register(u2);
-RWTexture2D<float2> NrdMotion : register(u3);
+RWTexture2D<float4> NrdMotion : register(u3);
 RWTexture2D<float> NrdViewZ : register(u4);
 RWTexture2D<float4> DiffuseFactor : register(u5);
 RWTexture2D<float4> SpecularFactor : register(u6);
+
+cbuffer NrdPrepConstants : register(b0)
+{
+    float3 CameraPosition;
+}
 
 // The hit-distance defaults are the v4.17.3 ReblurSettings defaults. Keeping
 // them here and in the bridge in lockstep is part of the 9D input contract.
@@ -44,12 +50,19 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     float3 normal = normalize(normalRoughness.xyz * 2.0 - 1.0);
     float roughness = saturate(normalRoughness.w);
     float viewZ = ViewZ.Load(pixel);
-    float3 baseColor = max(Albedo.Load(pixel).xyz, 0.0.xxx);
-    float3 approximateF0 = max(SpecularGuide.Load(pixel).xyz, 0.04.xxx);
-    float3 view = float3(0.0, 0.0, 1.0);
+    float3 baseColor = max(BaseColor.Load(pixel).xyz, 0.0.xxx);
+    float4 diffuseGuideMetallic = DiffuseGuideMetallic.Load(pixel);
+    float3 diffuseAlbedo = max(diffuseGuideMetallic.xyz, 0.0.xxx);
+    float metallic = saturate(diffuseGuideMetallic.w);
+    float3 rf0 = lerp(0.04.xxx, baseColor, metallic);
+    float3 toCamera = CameraPosition - WorldPosition.Load(pixel).xyz;
+    float toCameraLengthSquared = dot(toCamera, toCamera);
+    float3 view = toCameraLengthSquared > 1.0e-12
+        ? toCamera * rsqrt(toCameraLengthSquared)
+        : normal;
     float3 diffFactor;
     float3 specFactor;
-    NRD_MaterialFactors(normal, view, baseColor, approximateF0, roughness, diffFactor, specFactor);
+    NRD_MaterialFactors(normal, view, diffuseAlbedo, rf0, roughness, diffFactor, specFactor);
 
     float3 emissive = max(PrimaryEmissive.Load(pixel).xyz, 0.0.xxx);
     float3 diffuse = SafeDivide(RawDiffuse.Load(pixel).xyz, diffFactor);

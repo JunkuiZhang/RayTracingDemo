@@ -322,7 +322,7 @@ struct ReconstructionFrameState {
 | `reconstruction_specular_albedo` | `R16G16B16A16_FLOAT` | 按 NVIDIA RR 参考 EnvBRDF 计算的 specular reflectance，不能只写 metallic 或裸 F0 |
 | `reconstruction_normal_roughness` | `R16G16B16A16_FLOAT` | RGB 世界空间归一化 shading normal，A 为 linear roughness |
 | `reconstruction_view_z` | `R32_FLOAT` | 与 worldToView 一致的主表面 linear viewZ；miss 写无效范围外值 |
-| `reconstruction_motion` | `R16G16_FLOAT` | 稠密 pixel-space surface motion，包含 camera 与 object motion；方向由类型/注释固定 |
+| `reconstruction_motion` | `R16G16B16A16_FLOAT` | 稠密 2.5D surface motion：XY 为 pixel-space `previous-current`，Z 为 `viewZprev-viewZ`，W 保留；包含 camera 与 object motion，bridge 使用 `[1/width, 1/height, 1]` 缩放 |
 | `reconstruction_specular_hit_distance` | `R32_FLOAT` | primary surface 到第一 specular bounce hit 的世界距离，不含 primary RayT |
 | `reconstruction_primary_emissive` | `R16G16B16A16_FLOAT`（若需要） | 只存主表面 emissive，供 NRD 前后正确分离/加回 |
 

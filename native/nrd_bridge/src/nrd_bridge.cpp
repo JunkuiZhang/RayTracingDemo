@@ -245,8 +245,14 @@ NrdBridgeStatus nrd_bridge_denoise(
         common.frameIndex = state.frame_index;
         common.accumulationMode = state.reset != 0 ? nrd::AccumulationMode::RESTART : nrd::AccumulationMode::CONTINUE;
         common.isMotionVectorInWorldSpace = false;
+        common.motionVectorScale[0] = 1.0f / std::max(1u, state.render_width);
+        common.motionVectorScale[1] = 1.0f / std::max(1u, state.render_height);
+        common.motionVectorScale[2] = 1.0f;
         common.enableValidation = frame->enable_validation != 0;
 
+        // NRD owns frame-indexed descriptor pools and requires NewFrame once
+        // before any per-frame settings are submitted.
+        bridge->integration.NewFrame();
         const nrd::Result common_result = bridge->integration.SetCommonSettings(common);
         if (common_result != nrd::Result::SUCCESS) {
             set_error(bridge, "NRD SetCommonSettings failed");
@@ -254,6 +260,14 @@ NrdBridgeStatus nrd_bridge_denoise(
         }
 
         nrd::ReblurSettings reblur_settings = {};
+        // The renderer feeds one white-noise path sample per pixel. NRD's own
+        // integration guidance recommends a 60-frame history for this case;
+        // keep fast/stabilized histories proportional and maximize isolated
+        // firefly suppression without changing the locked hit-distance model.
+        reblur_settings.maxAccumulatedFrameNum = 60;
+        reblur_settings.maxFastAccumulatedFrameNum = 10;
+        reblur_settings.maxStabilizedFrameNum = 60;
+        reblur_settings.fireflySuppressorMinRelativeScale = 1.0f;
         const nrd::Result settings_result = bridge->integration.SetDenoiserSettings(bridge->denoiser_identifier, &reblur_settings);
         if (settings_result != nrd::Result::SUCCESS) {
             set_error(bridge, "NRD SetDenoiserSettings failed");
@@ -287,7 +301,6 @@ NrdBridgeStatus nrd_bridge_denoise(
             return NRD_BRIDGE_STATUS_INVALID_ARGUMENT;
         }
 
-        bridge->integration.NewFrame();
         const nrd::Identifier identifier = bridge->denoiser_identifier;
         nri::CommandBufferD3D12Desc command_desc = {};
         command_desc.d3d12CommandList = command_list;
