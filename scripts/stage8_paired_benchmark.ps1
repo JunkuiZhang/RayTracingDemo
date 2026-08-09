@@ -200,7 +200,7 @@ $sequence = @(
     [pscustomobject]@{ side = "candidate"; index = 3 },
     [pscustomobject]@{ side = "reference"; index = 3 }
 )
-$runs = [System.Collections.Generic.List[object]]::new()
+$runRecords = [System.Collections.Generic.List[object]]::new()
 $invalid = $false
 foreach ($item in $sequence) {
     if ($invalid) { break }
@@ -211,12 +211,12 @@ foreach ($item in $sequence) {
     $run | Add-Member -NotePropertyName side -NotePropertyValue $item.side
     $run | Add-Member -NotePropertyName index -NotePropertyValue $item.index
     $run | Add-Member -NotePropertyName validation -NotePropertyValue (Test-PairedRun $run)
-    $runs.Add($run)
+    $runRecords.Add($run)
     if (-not $run.validation.passed) { $invalid = $true }
 }
 
-$candidateRuns = @($runs | Where-Object { $_.side -eq "candidate" -and $_.validation.passed })
-$referenceRuns = @($runs | Where-Object { $_.side -eq "reference" -and $_.validation.passed })
+$candidateRuns = @($runRecords | Where-Object { $_.side -eq "candidate" -and $_.validation.passed })
+$referenceRuns = @($runRecords | Where-Object { $_.side -eq "reference" -and $_.validation.passed })
 $candidateP95 = @($candidateRuns | ForEach-Object { [double]$_.json.passes.total.p95_ms })
 $referenceP95 = @($referenceRuns | ForEach-Object { [double]$_.json.passes.total.p95_ms })
 $candidateMedian = Get-Median $candidateP95
@@ -251,7 +251,7 @@ $summary = [ordered]@{
     order = @($sequence | ForEach-Object { "{0}-{1}" -f $_.side, $_.index })
     candidate_runs = $candidateRuns
     reference_runs = $referenceRuns
-    runs = $runs.ToArray()
+    runs = $runRecords.ToArray()
     candidate_p95_ms = $candidateP95
     reference_p95_ms = $referenceP95
     candidate_median_p95_ms = $candidateMedian
