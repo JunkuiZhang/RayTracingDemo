@@ -1284,7 +1284,7 @@ fn create_raytracing_root_signature(device: &ID3D12Device) -> Result<ID3D12RootS
         },
         D3D12_DESCRIPTOR_RANGE {
             RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
-            NumDescriptors: 18,
+            NumDescriptors: 20,
             BaseShaderRegister: 0,
             RegisterSpace: 0,
             OffsetInDescriptorsFromTableStart: super::texture::DXR_UAV_BASE as u32,

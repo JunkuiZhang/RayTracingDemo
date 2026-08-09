@@ -44,10 +44,11 @@ impl UpscalerMode {
     /// Return a stable mode number for the later Streamline adapter.
     pub const fn dlss_mode(self) -> Option<u32> {
         match self {
-            Self::DlssQuality => Some(0),
-            Self::DlssBalanced => Some(1),
-            Self::DlssPerformance => Some(2),
-            Self::Native | Self::Dlaa => None,
+            Self::Dlaa => Some(1),
+            Self::DlssQuality => Some(2),
+            Self::DlssBalanced => Some(3),
+            Self::DlssPerformance => Some(4),
+            Self::Native => None,
         }
     }
 
@@ -350,7 +351,7 @@ mod tests {
         assert_eq!(UpscalerMode::default(), UpscalerMode::Native);
         assert!(UpscalerMode::Native.is_native());
         assert!(UpscalerMode::Dlaa.uses_streamline());
-        assert_eq!(UpscalerMode::DlssBalanced.dlss_mode(), Some(1));
+        assert_eq!(UpscalerMode::DlssBalanced.dlss_mode(), Some(3));
         assert_eq!(UpscalerMode::Native.dlss_mode(), None);
     }
 

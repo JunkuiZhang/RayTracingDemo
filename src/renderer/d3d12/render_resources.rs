@@ -18,6 +18,8 @@ use super::{
     texture::{DXR_UAV_BASE, TextureSet},
 };
 
+#[cfg(feature = "streamline")]
+use super::{DLSS_COMPOSE_TABLE_BASES, DLSS_TONEMAP_TABLE_BASE};
 #[cfg(feature = "nrd")]
 use super::{NRD_COMPOSE_TABLE_BASE, NRD_PREP_TABLE_BASE};
 
@@ -73,8 +75,6 @@ pub(super) struct DlssGenerationResources {
     pub(super) input_hdr: TrackedResource,
     /// Streamline's output-resolution DLSS result before ToneMap.
     pub(super) output_hdr: TrackedResource,
-    pub(super) depth: TrackedResource,
-    pub(super) motion: TrackedResource,
     pub(super) exposure: TrackedResource,
 }
 
@@ -93,6 +93,8 @@ pub(super) struct RenderResourceGeneration {
     pub(super) gbuffer_normal_roughness: TrackedResource,
     pub(super) gbuffer_depth: TrackedResource,
     pub(super) gbuffer_motion: TrackedResource,
+    pub(super) dlss_depth: TrackedResource,
+    pub(super) dlss_motion: TrackedResource,
     pub(super) gbuffer_id: TrackedResource,
     pub(super) gbuffer_world_position: TrackedResource,
     pub(super) gbuffer_hit_distance: TrackedResource,
@@ -231,6 +233,18 @@ impl RenderResourceGeneration {
             DXGI_FORMAT_R16G16_FLOAT,
             format!("代际 {id} 当前到上一帧像素运动矢量"),
         )?;
+        let dlss_depth = create_uav_texture(
+            device,
+            render_extent,
+            DXGI_FORMAT_R32_FLOAT,
+            format!("代际 {id} DLSS device depth"),
+        )?;
+        let dlss_motion = create_uav_texture(
+            device,
+            render_extent,
+            DXGI_FORMAT_R16G16_FLOAT,
+            format!("代际 {id} DLSS pixel motion"),
+        )?;
         let gbuffer_id = create_uav_texture(
             device,
             render_extent,
@@ -317,18 +331,6 @@ impl RenderResourceGeneration {
                     output_extent,
                     DXGI_FORMAT_R16G16B16A16_FLOAT,
                     format!("代际 {id} DLSS HDR 输出"),
-                )?,
-                depth: create_uav_texture(
-                    device,
-                    render_extent,
-                    DXGI_FORMAT_R32_FLOAT,
-                    format!("代际 {id} DLSS depth"),
-                )?,
-                motion: create_uav_texture(
-                    device,
-                    render_extent,
-                    DXGI_FORMAT_R16G16_FLOAT,
-                    format!("代际 {id} DLSS motion vectors"),
                 )?,
                 exposure: create_uav_texture(
                     device,
@@ -462,6 +464,8 @@ impl RenderResourceGeneration {
             gbuffer_normal_roughness,
             gbuffer_depth,
             gbuffer_motion,
+            dlss_depth,
+            dlss_motion,
             gbuffer_id,
             gbuffer_world_position,
             gbuffer_hit_distance,
@@ -499,6 +503,8 @@ impl RenderResourceGeneration {
         let normal = &self.gbuffer_normal_roughness;
         let depth = &self.gbuffer_depth;
         let motion = &self.gbuffer_motion;
+        let dlss_depth = &self.dlss_depth;
+        let dlss_motion = &self.dlss_motion;
         let id = &self.gbuffer_id;
         let world_position = &self.gbuffer_world_position;
         let hit_distance = &self.gbuffer_hit_distance;
@@ -546,6 +552,8 @@ impl RenderResourceGeneration {
                 RECONSTRUCTION_PRIMARY_EMISSIVE_UAV_REGISTER,
                 reconstruction_primary_emissive,
             ),
+            (super::DLSS_DEPTH_UAV_REGISTER, dlss_depth),
+            (super::DLSS_MOTION_UAV_REGISTER, dlss_motion),
         ];
         debug_assert_eq!(dxr_uavs.len(), DXR_UAV_REGISTER_COUNT);
         for (register, resource) in dxr_uavs {
@@ -729,6 +737,46 @@ impl RenderResourceGeneration {
                     &[display_output],
                 )
             };
+
+            #[cfg(feature = "streamline")]
+            if let Some(dlss) = self.dlss.as_ref() {
+                let compose_srvs = [diffuse_pong, specular_pong];
+                let compose_uavs = [&dlss.input_hdr, &dlss.exposure];
+                unsafe {
+                    populate_texture_table(
+                        device,
+                        &self.shader_heap,
+                        DLSS_COMPOSE_TABLE_BASES[current_index],
+                        &compose_srvs,
+                        &compose_uavs,
+                    )
+                };
+                let dlss_tonemap_srvs = [
+                    &dlss.output_hdr,
+                    &dlss.output_hdr,
+                    raw_diffuse,
+                    raw_specular,
+                    albedo,
+                    normal,
+                    depth,
+                    motion,
+                    &current.moments,
+                    rejection,
+                    &current.length,
+                    id,
+                    hit_distance,
+                    &self.nrd_validation,
+                ];
+                unsafe {
+                    populate_texture_table(
+                        device,
+                        &self.shader_heap,
+                        DLSS_TONEMAP_TABLE_BASE,
+                        &dlss_tonemap_srvs,
+                        &[display_output],
+                    )
+                };
+            }
         }
     }
 }

@@ -26,6 +26,8 @@ pub struct ReloadedShaders {
     pub atrous: Vec<u8>,
     pub atrous_shared: Vec<u8>,
     pub tonemap: Vec<u8>,
+    #[cfg(feature = "streamline")]
+    pub dlss_compose: Vec<u8>,
     #[cfg(feature = "nrd")]
     pub nrd_prep: Vec<u8>,
     #[cfg(feature = "nrd")]
@@ -70,6 +72,17 @@ impl ShaderReloader {
             ),
             ("stage6_tonemap.hlsl", "stage6_tonemap.dxil", "cs_6_6", None),
         ];
+        #[cfg(feature = "streamline")]
+        let descriptions = {
+            let mut descriptions = descriptions;
+            descriptions.push((
+                "stage10_dlss_input.hlsl",
+                "stage10_dlss_input.dxil",
+                "cs_6_6",
+                None,
+            ));
+            descriptions
+        };
         #[cfg(feature = "nrd")]
         let descriptions = {
             let mut descriptions = descriptions;
@@ -191,13 +204,18 @@ impl ShaderReloader {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             },
-            #[cfg(feature = "nrd")]
-            nrd_prep: match read(5) {
+            #[cfg(feature = "streamline")]
+            dlss_compose: match read(5) {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             },
             #[cfg(feature = "nrd")]
-            nrd_compose: match read(6) {
+            nrd_prep: match read(if cfg!(feature = "streamline") { 6 } else { 5 }) {
+                Ok(value) => value,
+                Err(error) => return Some(Err(error)),
+            },
+            #[cfg(feature = "nrd")]
+            nrd_compose: match read(if cfg!(feature = "streamline") { 7 } else { 6 }) {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             },
@@ -283,6 +301,12 @@ mod tests {
             "stage8_atrous_shared.hlsl",
             "stage6_tonemap.hlsl",
         ];
+        #[cfg(feature = "streamline")]
+        let expected = {
+            let mut expected = expected;
+            expected.push("stage10_dlss_input.hlsl");
+            expected
+        };
         #[cfg(feature = "nrd")]
         let expected = {
             let mut expected = expected;
@@ -293,8 +317,11 @@ mod tests {
 
         #[cfg(feature = "nrd")]
         {
-            assert!(reloader.sources[5].extra_include.is_some());
-            assert!(reloader.sources[6].extra_include.is_some());
+            let nrd_base = if cfg!(feature = "streamline") { 6 } else { 5 };
+            assert!(reloader.sources[nrd_base].extra_include.is_some());
+            assert!(reloader.sources[nrd_base + 1].extra_include.is_some());
         }
+        #[cfg(feature = "streamline")]
+        assert_eq!(names[5], "stage10_dlss_input.hlsl");
     }
 }

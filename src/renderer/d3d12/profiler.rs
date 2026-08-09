@@ -23,9 +23,11 @@ pub enum GpuPass {
     NrdPrep = 10,
     NrdDenoise = 11,
     NrdCompose = 12,
+    DlssCompose = 13,
+    DlssEvaluate = 14,
 }
 
-pub const PASS_COUNT: usize = 13;
+pub const PASS_COUNT: usize = 15;
 pub const TIMING_WINDOW_CAPACITY: usize = 240;
 const TIMESTAMPS_PER_FRAME: usize = PASS_COUNT * 2;
 const BENCHMARK_HISTOGRAM_RESOLUTION_MS: f64 = 0.01;
@@ -47,6 +49,8 @@ pub struct GpuTimingSample {
     pub nrd_prep_ms: f64,
     pub nrd_denoise_ms: f64,
     pub nrd_compose_ms: f64,
+    pub dlss_compose_ms: f64,
+    pub dlss_evaluate_ms: f64,
     pub total_ms: f64,
     pub valid: bool,
 }
@@ -67,6 +71,8 @@ impl GpuTimingSample {
             GpuPass::NrdPrep => self.nrd_prep_ms,
             GpuPass::NrdDenoise => self.nrd_denoise_ms,
             GpuPass::NrdCompose => self.nrd_compose_ms,
+            GpuPass::DlssCompose => self.dlss_compose_ms,
+            GpuPass::DlssEvaluate => self.dlss_evaluate_ms,
         }
     }
 }
@@ -401,6 +407,8 @@ impl GpuProfiler {
             GpuPass::NrdPrep => b"Stage9 NRD Prep\0",
             GpuPass::NrdDenoise => b"Stage9 NRD Denoise\0",
             GpuPass::NrdCompose => b"Stage9 NRD Compose\0",
+            GpuPass::DlssCompose => b"Stage10 DLSS HDR Compose\0",
+            GpuPass::DlssEvaluate => b"Stage10 DLSS Evaluate\0",
             GpuPass::Total => b"Stage8 Total\0",
         };
         self.pix.begin(command_list, label);
@@ -529,6 +537,8 @@ impl GpuProfiler {
             nrd_prep_ms: values[GpuPass::NrdPrep as usize],
             nrd_denoise_ms: values[GpuPass::NrdDenoise as usize],
             nrd_compose_ms: values[GpuPass::NrdCompose as usize],
+            dlss_compose_ms: values[GpuPass::DlssCompose as usize],
+            dlss_evaluate_ms: values[GpuPass::DlssEvaluate as usize],
             total_ms: values[GpuPass::Total as usize],
             valid: true,
         };
@@ -656,6 +666,8 @@ mod tests {
             nrd_prep_ms: 6.0,
             nrd_denoise_ms: 7.0,
             nrd_compose_ms: 8.0,
+            dlss_compose_ms: 9.0,
+            dlss_evaluate_ms: 10.0,
             total_ms: 30.0,
             valid: true,
         };

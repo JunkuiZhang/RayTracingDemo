@@ -6,6 +6,10 @@ pub const SDK_VERSION: &str = "2.12.0";
 pub const ABI_VERSION: u32 = 1;
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_INVALID_ARGUMENT: u32 = 1;
+pub const STATUS_SDK_ERROR: u32 = 2;
+pub const STATUS_EXCEPTION: u32 = 3;
+pub const STATUS_NOT_INITIALIZED: u32 = 4;
+pub const STATUS_UNSUPPORTED: u32 = 5;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -19,7 +23,7 @@ pub struct InitDesc {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Support {
     pub struct_size: u32,
     pub abi_version: u32,
@@ -34,7 +38,7 @@ pub struct Support {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct OptimalSettings {
     pub struct_size: u32,
     pub abi_version: u32,
@@ -48,7 +52,7 @@ pub struct OptimalSettings {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct FrameToken {
     pub struct_size: u32,
     pub abi_version: u32,
@@ -58,7 +62,7 @@ pub struct FrameToken {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Viewport {
     pub struct_size: u32,
     pub abi_version: u32,
@@ -67,7 +71,7 @@ pub struct Viewport {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct DlssOptions {
     pub struct_size: u32,
     pub abi_version: u32,
@@ -83,7 +87,7 @@ pub struct DlssOptions {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Constants {
     pub struct_size: u32,
     pub abi_version: u32,
@@ -109,7 +113,7 @@ pub struct Constants {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct ResourceTag {
     pub struct_size: u32,
     pub abi_version: u32,
@@ -124,7 +128,7 @@ pub struct ResourceTag {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct ReflexState {
     pub struct_size: u32,
     pub abi_version: u32,
@@ -205,6 +209,11 @@ unsafe extern "C" {
         interface_ptr: *mut *mut c_void,
     ) -> u32;
     pub fn streamline_bridge_shutdown(bridge: *mut RawBridge) -> u32;
+    pub fn streamline_bridge_copy_last_error(
+        bridge: *const RawBridge,
+        destination: *mut i8,
+        capacity: usize,
+    ) -> usize;
 }
 
 pub struct Bridge {
@@ -212,12 +221,36 @@ pub struct Bridge {
 }
 
 impl Bridge {
+    pub fn create(desc: &InitDesc) -> Result<Self, u32> {
+        let mut raw = std::ptr::null_mut();
+        let status = unsafe { streamline_bridge_create(desc, &mut raw) };
+        NonNull::new(raw)
+            .map(Self::from_raw)
+            .ok_or(if status == STATUS_OK {
+                STATUS_INVALID_ARGUMENT
+            } else {
+                status
+            })
+    }
+
     pub fn from_raw(raw: NonNull<RawBridge>) -> Self {
         Self { raw }
     }
 
     pub fn as_raw(&self) -> *mut RawBridge {
         self.raw.as_ptr()
+    }
+
+    pub fn last_error(&self) -> String {
+        let mut buffer = [0_i8; 256];
+        let length = unsafe {
+            streamline_bridge_copy_last_error(self.raw.as_ptr(), buffer.as_mut_ptr(), buffer.len())
+        };
+        let bytes = buffer[..length.min(buffer.len())]
+            .iter()
+            .map(|value| *value as u8)
+            .collect::<Vec<_>>();
+        String::from_utf8_lossy(&bytes).into_owned()
     }
 
     pub fn shutdown(self) -> u32 {

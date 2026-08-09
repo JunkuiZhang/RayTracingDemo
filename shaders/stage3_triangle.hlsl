@@ -69,6 +69,10 @@ RWTexture2D<float4> ReconstructionMotion : register(u14);
 RWTexture2D<float> ReconstructionDiffuseHitDistance : register(u15);
 RWTexture2D<float> ReconstructionSpecularHitDistance : register(u16);
 RWTexture2D<float4> ReconstructionPrimaryEmissive : register(u17);
+// DLSS owns separate dense depth/motion resources. GBufferMotion retains its
+// existing Stage 6 direction for SVGF and NRD.
+RWTexture2D<float> DlssDepth : register(u18);
+RWTexture2D<float2> DlssMotion : register(u19);
 
 cbuffer FrameConstants : register(b0)
 {
@@ -76,11 +80,11 @@ cbuffer FrameConstants : register(b0)
     float3 CameraPosition;
     float CameraYaw;
     float CameraPitch;
-    float2 CameraPadding;
+    float2 CameraJitterPx;
     float3 PreviousCameraPosition;
     float PreviousCameraYaw;
     float PreviousCameraPitch;
-    float2 PreviousCameraPadding;
+    float2 PreviousCameraJitterPx;
     uint ResetHistory;
 };
 
@@ -173,6 +177,21 @@ float2 ProjectToCurrentUv(float3 worldPosition, uint2 size)
     screen.x = focalLength * dot(relative, right) / forwardDistance;
     screen.y = -focalLength * dot(relative, up) / forwardDistance;
     return float2(screen.x / aspect, screen.y) * 0.5 + 0.5;
+}
+
+float DlssDeviceDepth(float3 worldPosition)
+{
+    float3 forward;
+    float3 right;
+    float3 up;
+    CameraBasis(CameraYaw, CameraPitch, forward, right, up);
+    float viewZ = dot(worldPosition - CameraPosition, forward);
+    const float nearPlane = 0.001;
+    const float farPlane = 1000.0;
+    return viewZ > nearPlane
+        ? farPlane / (farPlane - nearPlane)
+            - nearPlane * farPlane / ((farPlane - nearPlane) * viewZ)
+        : 1.0;
 }
 
 float3 PreviousWorldPosition(float3 localPosition, InstanceGpu instanceData)
@@ -313,7 +332,7 @@ void RayGen()
     uint2 size = DispatchRaysDimensions().xy;
     uint seed = pixel.x * 1973u + pixel.y * 9277u + FrameIndex * 26699u + 89173u;
     float2 jitter = float2(RandomFloat(seed), RandomFloat(seed));
-    float2 uv = (float2(pixel) + jitter) / float2(size);
+    float2 uv = (float2(pixel) + jitter + CameraJitterPx) / float2(size);
     float2 screen = uv * 2.0 - 1.0;
     screen.x *= float(size.x) / float(size.y);
 
@@ -345,6 +364,8 @@ void RayGen()
     GBufferId[pixel] = 0xFFFFFFFFu;
     GBufferWorldPosition[pixel] = 0;
     GBufferHitDistance[pixel] = 0;
+    DlssDepth[pixel] = 1.0;
+    DlssMotion[pixel] = 0;
     ReconstructionNoisyHdr[pixel] = 0;
     ReconstructionDiffuseAlbedo[pixel] = 0;
     ReconstructionSpecularAlbedo[pixel] = 0;
@@ -471,6 +492,10 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         GBufferMotion[pixel] = ResetHistory != 0u
             ? 0
             : (currentUv - previousUv) * float2(size);
+        DlssDepth[pixel] = DlssDeviceDepth(hitPosition);
+        DlssMotion[pixel] = ResetHistory != 0u
+            ? 0
+            : (previousUv - currentUv) * float2(size);
 
         float3 cameraForward;
         float3 cameraRight;
@@ -798,6 +823,10 @@ void LegacyClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttri
         GBufferMotion[pixel] = ResetHistory != 0u
             ? 0
             : (currentUv - previousUv) * float2(size);
+        DlssDepth[pixel] = DlssDeviceDepth(hitPosition);
+        DlssMotion[pixel] = ResetHistory != 0u
+            ? 0
+            : (previousUv - currentUv) * float2(size);
     }
 
     if (kind == 3u)
