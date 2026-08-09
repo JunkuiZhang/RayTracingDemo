@@ -1,5 +1,7 @@
 # 阶段 8G：配对归因 Review 修复与动态模式归因执行方案
 
+> 执行状态（2026-08-09）：I1 已由 `0fdcb7f` 实现，I2 已由 `067a3f5` 实现；自认证 commit paired run 为 `paired-auth-1080-20260809-202926-33a32298`，dynamic/fixed run 为 `paired-resolution-1080-20260809-204146-98dcbc25`。结果分别为 `ABSOLUTE GATE FAIL / NO PAIRED REGRESSION` 和 `ABSOLUTE GATE FAIL / NO DYNAMIC-MODE REGRESSION`。真实数据和最终证据边界见 [`阶段8G总体验收记录.md`](阶段8G总体验收记录.md)。本文以下内容保留为实施契约，不再是待执行提示词。
+
 ## 1. 文档目的
 
 本文审查 Luna 在 `3d55830` 之后提交的阶段 8G H1–H4 实现，并给出下一轮可直接执行的修复包。下一轮只修验收证据链并做短时动态模式归因，不修改 renderer、Rust 渲染路径或 HLSL。
