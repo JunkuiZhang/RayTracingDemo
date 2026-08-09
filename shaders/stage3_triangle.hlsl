@@ -55,6 +55,17 @@ RWTexture2D<float2> GBufferMotion : register(u5);
 RWTexture2D<uint> GBufferId : register(u6);
 RWTexture2D<float4> GBufferWorldPosition : register(u7);
 RWTexture2D<float> GBufferHitDistance : register(u8);
+// Stage 9 reconstruction guides. Existing G-buffer resources above retain
+// their Stage 6 SVGF semantics; these resources use the explicit NRD/RR
+// contract and are not consumed by SVGF.
+RWTexture2D<float4> ReconstructionNoisyHdr : register(u9);
+RWTexture2D<float4> ReconstructionDiffuseAlbedo : register(u10);
+RWTexture2D<float4> ReconstructionSpecularAlbedo : register(u11);
+RWTexture2D<float4> ReconstructionNormalRoughness : register(u12);
+RWTexture2D<float> ReconstructionViewZ : register(u13);
+RWTexture2D<float2> ReconstructionMotion : register(u14);
+RWTexture2D<float> ReconstructionSpecularHitDistance : register(u15);
+RWTexture2D<float4> ReconstructionPrimaryEmissive : register(u16);
 
 cbuffer FrameConstants : register(b0)
 {
@@ -228,6 +239,25 @@ BrdfEvaluation EvaluateBrdf(
     return value;
 }
 
+// This is the split-sum EnvBRDF approximation used for the reconstruction
+// material factor, rather than a bare F0. It keeps the view-angle and
+// roughness dependence required by the reconstruction contract. The exact
+// backend will use the same material-factor convention when it unpacks.
+float3 ComputeReconstructionSpecularAlbedo(float3 f0, float roughness, float NoV)
+{
+    float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022);
+    float4 c1 = float4(1.0, 0.0425, 1.04, -0.04);
+    float4 r = roughness * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * NoV)) * r.x + r.y;
+    float2 ab = float2(-1.04, 1.04) * a004 + r.zw;
+    return max(f0 * ab.x + ab.y, 0.0.xxx);
+}
+
+float3 FiniteNonNegative(float3 value)
+{
+    return all(isfinite(value)) ? max(value, 0.0.xxx) : 0.0.xxx;
+}
+
 float3 SampleGgxDirection(
     float3 normal,
     float3 viewDirection,
@@ -293,6 +323,14 @@ void RayGen()
     GBufferId[pixel] = 0xFFFFFFFFu;
     GBufferWorldPosition[pixel] = 0;
     GBufferHitDistance[pixel] = 0;
+    ReconstructionNoisyHdr[pixel] = 0;
+    ReconstructionDiffuseAlbedo[pixel] = 0;
+    ReconstructionSpecularAlbedo[pixel] = 0;
+    ReconstructionNormalRoughness[pixel] = 0;
+    ReconstructionViewZ[pixel] = 1001.0;
+    ReconstructionMotion[pixel] = 0;
+    ReconstructionSpecularHitDistance[pixel] = 0;
+    ReconstructionPrimaryEmissive[pixel] = 0;
     TraceRay(
         Scene,
         RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
@@ -407,6 +445,40 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         GBufferMotion[pixel] = ResetHistory != 0u
             ? 0
             : (currentUv - previousUv) * float2(size);
+
+        float3 cameraForward;
+        float3 cameraRight;
+        float3 cameraUp;
+        CameraBasis(CameraYaw, CameraPitch, cameraForward, cameraRight, cameraUp);
+        float3 previousCameraForward;
+        float3 previousCameraRight;
+        float3 previousCameraUp;
+        CameraBasis(
+            PreviousCameraYaw,
+            PreviousCameraPitch,
+            previousCameraForward,
+            previousCameraRight,
+            previousCameraUp);
+        float viewZ = dot(hitPosition - CameraPosition, cameraForward);
+        float previousViewZ = dot(
+            previousHitPosition - PreviousCameraPosition,
+            previousCameraForward);
+        float3 firstViewDirection = normalize(-WorldRayDirection());
+        float NoV = saturate(dot(normal, firstViewDirection));
+        float3 f0 = lerp(0.04.xxx, baseColor.xyz, metallic);
+        ReconstructionNoisyHdr[pixel] = 0;
+        ReconstructionDiffuseAlbedo[pixel] = float4(
+            FiniteNonNegative(baseColor.xyz * (1.0 - metallic)),
+            1.0);
+        ReconstructionSpecularAlbedo[pixel] = float4(
+            FiniteNonNegative(ComputeReconstructionSpecularAlbedo(f0, roughness, NoV)),
+            1.0);
+        ReconstructionNormalRoughness[pixel] = float4(normal * 0.5 + 0.5, roughness);
+        ReconstructionViewZ[pixel] = viewZ > 0.0 && isfinite(viewZ) ? viewZ : 1001.0;
+        ReconstructionMotion[pixel] = ResetHistory != 0u
+            ? 0
+            : (previousUv - currentUv) * float2(size);
+        ReconstructionPrimaryEmissive[pixel] = float4(FiniteNonNegative(emissive), 1.0);
     }
 
     if (kind == 3u)
@@ -422,7 +494,12 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         }
         payload.radiance = emissive * weight;
         if (payload.depth == 0)
+        {
             payload.rawSpecular = payload.radiance;
+            ReconstructionNoisyHdr[DispatchRaysIndex().xy] = float4(
+                FiniteNonNegative(payload.rawSpecular),
+                1.0);
+        }
         return;
     }
     if (payload.depth >= 3)
@@ -601,9 +678,15 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         payload.rawSpecular = emissive
             + directSpecular
             + specularBounceWeight * child.radiance;
+        ReconstructionNoisyHdr[DispatchRaysIndex().xy] = float4(
+            FiniteNonNegative(payload.rawDiffuse + payload.rawSpecular),
+            1.0);
     }
     if (payload.depth == 0 && sampledSpecular)
+    {
         GBufferHitDistance[DispatchRaysIndex().xy] = child.hitDistance;
+        ReconstructionSpecularHitDistance[DispatchRaysIndex().xy] = child.hitDistance;
+    }
     payload.radiance = emissive + directDiffuse + directSpecular + bouncedRadiance;
 }
 

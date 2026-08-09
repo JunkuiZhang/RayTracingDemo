@@ -28,7 +28,8 @@ use crate::{
     debug_view::DebugView,
     realtime::{AtrousMode, CommandRecordingMode, RealtimeConfig},
     reconstruction::{
-        DenoiserBackend, NRD_COMMIT_PREFIX, NRD_VERSION, RECONSTRUCTION_CONTRACT_VERSION,
+        CameraPose, DenoiserBackend, NRD_COMMIT_PREFIX, NRD_VERSION,
+        RECONSTRUCTION_CONTRACT_VERSION, ReconstructionFrameInput, ReconstructionFrameState,
     },
     resolution::{
         DynamicResolutionConfig, DynamicResolutionController, DynamicResolutionDirection, Extent2D,
@@ -80,11 +81,11 @@ const ATROUS_SHARED_SHADER: &[u8] =
 const TONEMAP_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage6_tonemap.dxil"));
 
 const DXR_TABLE_BASE: usize = 0;
-const TEMPORAL_TABLE_BASES: [usize; 2] = [144, 176];
-const ATROUS_HISTORY_TABLE_BASES: [usize; 2] = [208, 220];
-const ATROUS_PING_TO_PONG_BASES: [usize; 2] = [232, 244];
-const ATROUS_PONG_TO_PING_BASES: [usize; 2] = [256, 268];
-const TONEMAP_TABLE_BASES: [usize; 2] = [280, 296];
+const TEMPORAL_TABLE_BASES: [usize; 2] = [152, 184];
+const ATROUS_HISTORY_TABLE_BASES: [usize; 2] = [216, 228];
+const ATROUS_PING_TO_PONG_BASES: [usize; 2] = [240, 252];
+const ATROUS_PONG_TO_PING_BASES: [usize; 2] = [264, 276];
+const TONEMAP_TABLE_BASES: [usize; 2] = [288, 304];
 
 struct FrameContext {
     allocator: ID3D12CommandAllocator,
@@ -179,6 +180,8 @@ pub struct Dx12Renderer {
     camera_position: [f32; 3],
     camera_yaw: f32,
     camera_pitch: f32,
+    reconstruction_frame_state: ReconstructionFrameState,
+    last_reconstruction_update: Instant,
     previous_camera_position: [f32; 3],
     previous_camera_yaw: f32,
     previous_camera_pitch: f32,
@@ -402,6 +405,24 @@ impl Dx12Renderer {
                 ResolutionMode::Dynamic(_) => RenderScale::NATIVE,
             };
             let render_extent = render_extent(output_extent, initial_scale);
+            let initial_reconstruction_frame_state =
+                ReconstructionFrameState::from_camera(ReconstructionFrameInput {
+                    current_camera: CameraPose {
+                        position: [0.0, 0.0, -2.666_666_7],
+                        yaw: 0.0,
+                        pitch: 0.0,
+                    },
+                    previous_camera: CameraPose {
+                        position: [0.0, 0.0, -2.666_666_7],
+                        yaw: 0.0,
+                        pitch: 0.0,
+                    },
+                    render_extent: [render_extent.width, render_extent.height],
+                    previous_render_extent: [render_extent.width, render_extent.height],
+                    frame_index: 0,
+                    reset: true,
+                    delta_time_ms: 0.0,
+                });
             let active_generation = RenderResourceGeneration::new(
                 &device,
                 &texture_set,
@@ -483,6 +504,8 @@ impl Dx12Renderer {
                 camera_position: [0.0, 0.0, -2.666_666_7],
                 camera_yaw: 0.0,
                 camera_pitch: 0.0,
+                reconstruction_frame_state: initial_reconstruction_frame_state,
+                last_reconstruction_update: Instant::now(),
                 previous_camera_position: [0.0, 0.0, -2.666_666_7],
                 previous_camera_yaw: 0.0,
                 previous_camera_pitch: 0.0,
@@ -553,6 +576,41 @@ impl Dx12Renderer {
             self.reclaim_retired_generations();
             let output_extent = self.active_generation.output_extent;
             let render_extent = self.active_generation.render_extent;
+            let previous_render_extent = if self.reset_history {
+                render_extent
+            } else {
+                Extent2D {
+                    width: self.reconstruction_frame_state.render_width,
+                    height: self.reconstruction_frame_state.render_height,
+                }
+            };
+            let now = Instant::now();
+            let delta_time_ms = now
+                .duration_since(self.last_reconstruction_update)
+                .as_secs_f32()
+                * 1_000.0;
+            self.last_reconstruction_update = now;
+            self.reconstruction_frame_state =
+                ReconstructionFrameState::from_camera(ReconstructionFrameInput {
+                    current_camera: CameraPose {
+                        position: self.camera_position,
+                        yaw: self.camera_yaw,
+                        pitch: self.camera_pitch,
+                    },
+                    previous_camera: CameraPose {
+                        position: self.previous_camera_position,
+                        yaw: self.previous_camera_yaw,
+                        pitch: self.previous_camera_pitch,
+                    },
+                    render_extent: [render_extent.width, render_extent.height],
+                    previous_render_extent: [
+                        previous_render_extent.width,
+                        previous_render_extent.height,
+                    ],
+                    frame_index: self.frame_number,
+                    reset: self.reset_history,
+                    delta_time_ms,
+                });
             let command_recording_started = Instant::now();
             let mut command_recording_stats = CommandRecordingFrameStats::default();
             let frame = &self.frames[frame_index];
@@ -1115,6 +1173,7 @@ impl Dx12Renderer {
                     .mode
                     .as_str()
                     .to_string(),
+                denoiser_backend: self.denoiser.as_str().to_string(),
             },
             fence_value: 0,
         })
@@ -2073,6 +2132,30 @@ impl Dx12Renderer {
         generation
             .gbuffer_hit_distance
             .collect_transition(&mut self.transition_batch, state);
+        generation
+            .reconstruction_noisy_hdr
+            .collect_transition(&mut self.transition_batch, state);
+        generation
+            .reconstruction_diffuse_albedo
+            .collect_transition(&mut self.transition_batch, state);
+        generation
+            .reconstruction_specular_albedo
+            .collect_transition(&mut self.transition_batch, state);
+        generation
+            .reconstruction_normal_roughness
+            .collect_transition(&mut self.transition_batch, state);
+        generation
+            .reconstruction_view_z
+            .collect_transition(&mut self.transition_batch, state);
+        generation
+            .reconstruction_motion
+            .collect_transition(&mut self.transition_batch, state);
+        generation
+            .reconstruction_specular_hit_distance
+            .collect_transition(&mut self.transition_batch, state);
+        generation
+            .reconstruction_primary_emissive
+            .collect_transition(&mut self.transition_batch, state);
     }
 
     fn submit_transition_batch(&mut self, stats: &mut CommandRecordingFrameStats) {
@@ -2544,7 +2627,7 @@ mod tests {
 
     #[test]
     fn descriptor_tables_do_not_overlap_and_fit_the_heap() {
-        let mut ranges = vec![(DXR_TABLE_BASE, texture::DXR_UAV_BASE + 9)];
+        let mut ranges = vec![(DXR_TABLE_BASE, texture::DXR_UAV_BASE + 17)];
         for base in TEMPORAL_TABLE_BASES {
             ranges.push((base, base + 28));
         }

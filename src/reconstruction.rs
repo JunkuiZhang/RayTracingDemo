@@ -12,6 +12,24 @@ pub const NRD_MATHLIB_VERSION: &str = "v11";
 pub const NRD_SHADERMAKE_COMMIT: &str = "18f5a344e7ca8fa65daaf079d07bc8ce38453e05";
 pub const RECONSTRUCTION_FRAMES_IN_FLIGHT: u32 = 3;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CameraPose {
+    pub position: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReconstructionFrameInput {
+    pub current_camera: CameraPose,
+    pub previous_camera: CameraPose,
+    pub render_extent: [u32; 2],
+    pub previous_render_extent: [u32; 2],
+    pub frame_index: u32,
+    pub reset: bool,
+    pub delta_time_ms: f32,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DenoiserBackend {
     #[default]
@@ -96,6 +114,33 @@ impl Default for ReconstructionFrameState {
 }
 
 impl ReconstructionFrameState {
+    pub fn from_camera(input: ReconstructionFrameInput) -> Self {
+        let [render_width, render_height] = input.render_extent;
+        let [previous_render_width, previous_render_height] = input.previous_render_extent;
+        let aspect = render_width.max(1) as f32 / render_height.max(1) as f32;
+        let (world_to_view, view_to_clip) = camera_matrices(input.current_camera, aspect);
+        let (world_to_view_prev, view_to_clip_prev) = camera_matrices(
+            input.previous_camera,
+            previous_render_width.max(1) as f32 / previous_render_height.max(1) as f32,
+        );
+        Self {
+            world_to_view,
+            world_to_view_prev,
+            view_to_clip,
+            view_to_clip_prev,
+            camera_position: input.current_camera.position,
+            frame_index: input.frame_index,
+            render_width: render_width.max(1),
+            render_height: render_height.max(1),
+            previous_render_width: previous_render_width.max(1),
+            previous_render_height: previous_render_height.max(1),
+            camera_jitter_px: [0.0; 2],
+            camera_jitter_prev_px: [0.0; 2],
+            reset: u32::from(input.reset),
+            delta_time_ms: input.delta_time_ms.clamp(0.0, 1_000.0),
+        }
+    }
+
     pub fn reset_for_extent(mut self, render_width: u32, render_height: u32) -> Self {
         self.render_width = render_width.max(1);
         self.render_height = render_height.max(1);
@@ -106,6 +151,82 @@ impl ReconstructionFrameState {
         self.camera_jitter_prev_px = [0.0; 2];
         self
     }
+}
+
+/// Build the non-jittered camera matrices used by all reconstruction adapters.
+/// View space is right-handed in the renderer's convention: +Z points forward,
+/// matching the ray-generation camera basis and positive linear viewZ.
+pub fn camera_matrices(camera: CameraPose, aspect: f32) -> ([f32; 16], [f32; 16]) {
+    let forward = glam::Vec3::new(
+        camera.yaw.sin() * camera.pitch.cos(),
+        camera.pitch.sin(),
+        camera.yaw.cos() * camera.pitch.cos(),
+    )
+    .normalize();
+    let right = glam::Vec3::Y.cross(forward).normalize();
+    let up = forward.cross(right).normalize();
+    let position = glam::Vec3::from_array(camera.position);
+    let view = glam::Mat4::from_cols(
+        glam::Vec4::new(right.x, up.x, forward.x, 0.0),
+        glam::Vec4::new(right.y, up.y, forward.y, 0.0),
+        glam::Vec4::new(right.z, up.z, forward.z, 0.0),
+        glam::Vec4::new(
+            -right.dot(position),
+            -up.dot(position),
+            -forward.dot(position),
+            1.0,
+        ),
+    );
+    let focal_length = 1.0 / (40.0_f32.to_radians() * 0.5).tan();
+    let near = 0.001;
+    let far = 1_000.0;
+    let projection = glam::Mat4::from_cols(
+        glam::Vec4::new(focal_length / aspect.max(1.0e-6), 0.0, 0.0, 0.0),
+        glam::Vec4::new(0.0, focal_length, 0.0, 0.0),
+        glam::Vec4::new(0.0, 0.0, far / (far - near), 1.0),
+        glam::Vec4::new(0.0, 0.0, -near * far / (far - near), 0.0),
+    );
+    (view.to_cols_array(), projection.to_cols_array())
+}
+
+pub fn project_world_to_uv(
+    world_position: [f32; 3],
+    world_to_view: [f32; 16],
+    view_to_clip: [f32; 16],
+) -> Option<([f32; 2], f32)> {
+    let view = glam::Mat4::from_cols_array(&world_to_view)
+        * glam::Vec4::from((glam::Vec3::from_array(world_position), 1.0));
+    let clip = glam::Mat4::from_cols_array(&view_to_clip) * view;
+    if !clip.w.is_finite() || clip.w <= 0.0 {
+        return None;
+    }
+    let ndc = clip.truncate() / clip.w;
+    let uv = [ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5];
+    if uv.iter().all(|value| value.is_finite()) && view.z.is_finite() && view.z > 0.0 {
+        Some((uv, view.z))
+    } else {
+        None
+    }
+}
+
+pub fn nrd_motion_pixels(
+    current_uv: [f32; 2],
+    previous_uv: [f32; 2],
+    width: u32,
+    height: u32,
+    reset: bool,
+) -> [f32; 2] {
+    if reset {
+        return [0.0; 2];
+    }
+    [
+        (previous_uv[0] - current_uv[0]) * width.max(1) as f32,
+        (previous_uv[1] - current_uv[1]) * height.max(1) as f32,
+    ]
+}
+
+pub fn nrd_view_z_motion(view_z: f32, previous_view_z: f32, reset: bool) -> f32 {
+    if reset { 0.0 } else { previous_view_z - view_z }
 }
 
 /// Fixed POD create description mirrored by `native/nrd_bridge/include`.
@@ -228,5 +349,79 @@ mod tests {
             abi_version: 0,
             ..valid
         }));
+    }
+
+    #[test]
+    fn camera_projection_and_view_z_follow_the_renderer_convention() {
+        let (view, projection) = camera_matrices(
+            CameraPose {
+                position: [0.0, 0.0, 0.0],
+                yaw: 0.0,
+                pitch: 0.0,
+            },
+            16.0 / 9.0,
+        );
+        let (uv, view_z) = project_world_to_uv([0.0, 0.0, 1.0], view, projection).unwrap();
+        assert!((uv[0] - 0.5).abs() < 1.0e-6);
+        assert!((uv[1] - 0.5).abs() < 1.0e-6);
+        assert!((view_z - 1.0).abs() < 1.0e-6);
+
+        let (translated_view, translated_projection) = camera_matrices(
+            CameraPose {
+                position: [1.0, 0.0, 0.0],
+                yaw: 0.0,
+                pitch: 0.0,
+            },
+            16.0 / 9.0,
+        );
+        let (translated_uv, translated_z) =
+            project_world_to_uv([1.0, 0.0, 1.0], translated_view, translated_projection).unwrap();
+        assert!((translated_uv[0] - 0.5).abs() < 1.0e-6);
+        assert!((translated_z - 1.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn nrd_motion_has_previous_equals_current_plus_motion_direction() {
+        let current = [0.4, 0.5];
+        let previous = [0.5, 0.25];
+        let motion = nrd_motion_pixels(current, previous, 100, 200, false);
+        assert!((current[0] + motion[0] / 100.0 - previous[0]).abs() < 1.0e-6);
+        assert!((current[1] + motion[1] / 200.0 - previous[1]).abs() < 1.0e-6);
+        assert_eq!(
+            nrd_motion_pixels(current, previous, 100, 200, true),
+            [0.0; 2]
+        );
+        assert_eq!(nrd_view_z_motion(3.0, 4.0, false), 1.0);
+        assert_eq!(nrd_view_z_motion(3.0, 4.0, true), 0.0);
+    }
+
+    #[test]
+    fn frame_snapshot_reset_makes_previous_extent_and_jitter_explicit() {
+        let state = ReconstructionFrameState::from_camera(ReconstructionFrameInput {
+            current_camera: CameraPose {
+                position: [0.0, 0.0, 0.0],
+                yaw: 0.2,
+                pitch: -0.1,
+            },
+            previous_camera: CameraPose {
+                position: [0.5, 0.0, 0.0],
+                yaw: 0.1,
+                pitch: -0.1,
+            },
+            render_extent: [1280, 720],
+            previous_render_extent: [960, 540],
+            frame_index: 7,
+            reset: true,
+            delta_time_ms: 16.0,
+        });
+        assert_eq!(state.frame_index, 7);
+        assert_eq!((state.render_width, state.render_height), (1280, 720));
+        assert_eq!(
+            (state.previous_render_width, state.previous_render_height),
+            (960, 540)
+        );
+        assert_eq!(state.camera_jitter_px, [0.0; 2]);
+        assert_eq!(state.reset, 1);
+        assert_eq!(state.delta_time_ms, 16.0);
     }
 }

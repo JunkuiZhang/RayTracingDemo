@@ -64,6 +64,14 @@ pub(super) struct RenderResourceGeneration {
     pub(super) gbuffer_id: TrackedResource,
     pub(super) gbuffer_world_position: TrackedResource,
     pub(super) gbuffer_hit_distance: TrackedResource,
+    pub(super) reconstruction_noisy_hdr: TrackedResource,
+    pub(super) reconstruction_diffuse_albedo: TrackedResource,
+    pub(super) reconstruction_specular_albedo: TrackedResource,
+    pub(super) reconstruction_normal_roughness: TrackedResource,
+    pub(super) reconstruction_view_z: TrackedResource,
+    pub(super) reconstruction_motion: TrackedResource,
+    pub(super) reconstruction_specular_hit_distance: TrackedResource,
+    pub(super) reconstruction_primary_emissive: TrackedResource,
     pub(super) histories: [DenoiseHistory; 2],
     pub(super) filter_diffuse_ping: TrackedResource,
     pub(super) filter_diffuse_pong: TrackedResource,
@@ -188,6 +196,54 @@ impl RenderResourceGeneration {
             DXGI_FORMAT_R32_FLOAT,
             format!("代际 {id} 镜面反射命中距离"),
         )?;
+        let reconstruction_noisy_hdr = create_uav_texture(
+            device,
+            render_extent,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            format!("代际 {id} Reconstruction noisy HDR"),
+        )?;
+        let reconstruction_diffuse_albedo = create_uav_texture(
+            device,
+            render_extent,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            format!("代际 {id} Reconstruction diffuse albedo"),
+        )?;
+        let reconstruction_specular_albedo = create_uav_texture(
+            device,
+            render_extent,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            format!("代际 {id} Reconstruction specular albedo"),
+        )?;
+        let reconstruction_normal_roughness = create_uav_texture(
+            device,
+            render_extent,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            format!("代际 {id} Reconstruction normal roughness"),
+        )?;
+        let reconstruction_view_z = create_uav_texture(
+            device,
+            render_extent,
+            DXGI_FORMAT_R32_FLOAT,
+            format!("代际 {id} Reconstruction linear viewZ"),
+        )?;
+        let reconstruction_motion = create_uav_texture(
+            device,
+            render_extent,
+            DXGI_FORMAT_R16G16_FLOAT,
+            format!("代际 {id} Reconstruction motion old=new+MV"),
+        )?;
+        let reconstruction_specular_hit_distance = create_uav_texture(
+            device,
+            render_extent,
+            DXGI_FORMAT_R32_FLOAT,
+            format!("代际 {id} Reconstruction specular hit distance"),
+        )?;
+        let reconstruction_primary_emissive = create_uav_texture(
+            device,
+            render_extent,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            format!("代际 {id} Reconstruction primary emissive"),
+        )?;
         let histories = [
             create_history(device, render_extent, 0, id)?,
             create_history(device, render_extent, 1, id)?,
@@ -238,6 +294,14 @@ impl RenderResourceGeneration {
             gbuffer_id,
             gbuffer_world_position,
             gbuffer_hit_distance,
+            reconstruction_noisy_hdr,
+            reconstruction_diffuse_albedo,
+            reconstruction_specular_albedo,
+            reconstruction_normal_roughness,
+            reconstruction_view_z,
+            reconstruction_motion,
+            reconstruction_specular_hit_distance,
+            reconstruction_primary_emissive,
             histories,
             filter_diffuse_ping,
             filter_diffuse_pong,
@@ -261,6 +325,14 @@ impl RenderResourceGeneration {
         let id = &self.gbuffer_id;
         let world_position = &self.gbuffer_world_position;
         let hit_distance = &self.gbuffer_hit_distance;
+        let reconstruction_noisy_hdr = &self.reconstruction_noisy_hdr;
+        let reconstruction_diffuse_albedo = &self.reconstruction_diffuse_albedo;
+        let reconstruction_specular_albedo = &self.reconstruction_specular_albedo;
+        let reconstruction_normal_roughness = &self.reconstruction_normal_roughness;
+        let reconstruction_view_z = &self.reconstruction_view_z;
+        let reconstruction_motion = &self.reconstruction_motion;
+        let reconstruction_specular_hit_distance = &self.reconstruction_specular_hit_distance;
+        let reconstruction_primary_emissive = &self.reconstruction_primary_emissive;
         let rejection = &self.rejection_mask;
         let display_output = &self.display_output;
         let diffuse_ping = &self.filter_diffuse_ping;
@@ -278,6 +350,14 @@ impl RenderResourceGeneration {
             id,
             world_position,
             hit_distance,
+            reconstruction_noisy_hdr,
+            reconstruction_diffuse_albedo,
+            reconstruction_specular_albedo,
+            reconstruction_normal_roughness,
+            reconstruction_view_z,
+            reconstruction_motion,
+            reconstruction_specular_hit_distance,
+            reconstruction_primary_emissive,
         ];
         for (offset, resource) in dxr_uavs.into_iter().enumerate() {
             unsafe {

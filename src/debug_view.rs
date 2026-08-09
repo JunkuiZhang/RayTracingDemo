@@ -15,10 +15,11 @@ pub enum DebugView {
     HistoryLength = 8,
     ObjectMaterialId = 9,
     SpecularHitDistance = 10,
+    NrdValidation = 11,
 }
 
 impl DebugView {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Final,
         Self::Raw,
         Self::Albedo,
@@ -30,6 +31,7 @@ impl DebugView {
         Self::HistoryLength,
         Self::ObjectMaterialId,
         Self::SpecularHitDistance,
+        Self::NrdValidation,
     ];
 
     pub const fn from_index(index: u32) -> Option<Self> {
@@ -45,6 +47,7 @@ impl DebugView {
             8 => Some(Self::HistoryLength),
             9 => Some(Self::ObjectMaterialId),
             10 => Some(Self::SpecularHitDistance),
+            11 => Some(Self::NrdValidation),
             _ => None,
         }
     }
@@ -62,6 +65,7 @@ impl DebugView {
             "history-length" => Some(Self::HistoryLength),
             "object-material-id" => Some(Self::ObjectMaterialId),
             "specular-hit-distance" => Some(Self::SpecularHitDistance),
+            "nrd-validation" => Some(Self::NrdValidation),
             _ => None,
         }
     }
@@ -87,6 +91,7 @@ impl DebugView {
             Self::HistoryLength => "history-length",
             Self::ObjectMaterialId => "object-material-id",
             Self::SpecularHitDistance => "specular-hit-distance",
+            Self::NrdValidation => "nrd-validation",
         }
     }
 
@@ -103,6 +108,7 @@ impl DebugView {
             Self::HistoryLength => "历史长度",
             Self::ObjectMaterialId => "物体/材质 ID",
             Self::SpecularHitDistance => "镜面命中距离",
+            Self::NrdValidation => "NRD guide validation",
         }
     }
 
@@ -126,7 +132,7 @@ mod tests {
             assert_eq!(DebugView::from_name(view.name()), Some(view));
             assert!(!view.title().is_empty());
         }
-        assert_eq!(DebugView::from_index(11), None);
+        assert_eq!(DebugView::from_index(12), None);
         assert_eq!(DebugView::from_name("unknown"), None);
     }
 

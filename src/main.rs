@@ -340,7 +340,7 @@ fn parse_capture_after_spp(value: &str) -> Result<u32, String> {
 fn parse_debug_view(value: &str) -> Result<DebugView, String> {
     DebugView::from_name(value).ok_or_else(|| {
         format!(
-            "无效的 --debug-view：{value}（支持 final、raw、albedo、normal-roughness、depth、motion、variance、history-rejection、history-length、object-material-id、specular-hit-distance）"
+            "无效的 --debug-view：{value}（支持 final、raw、albedo、normal-roughness、depth、motion、variance、history-rejection、history-length、object-material-id、specular-hit-distance、nrd-validation）"
         )
     })
 }
@@ -392,7 +392,7 @@ fn print_help() {
          --benchmark-seconds <秒> 预热后输出固定格式 GPU JSON 报告（1..3600）\n  \
          --capture-output <PNG>   fence-safe 截图并输出一行 capture JSON\n  \
          --capture-after-spp <SPP> 截图目标 SPP（1..4096，默认 128）\n  \
-         --debug-view <名称>      final/raw/albedo/normal-roughness/depth/motion/variance/history-rejection/history-length/object-material-id/specular-hit-distance\n  \
+         --debug-view <名称>      final/raw/albedo/normal-roughness/depth/motion/variance/history-rejection/history-length/object-material-id/specular-hit-distance/nrd-validation\n  \
          --atrous-mode <模式>      À-Trous 路径：baseline 或 shared，默认 baseline\n  \
          --output-size <宽x高>     窗口物理像素尺寸，范围 320x180..7680x4320\n  \
          --render-scale <比例>    固定内部渲染比例，有限数值 0.5..1.0，默认 1.0\n  \

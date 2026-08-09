@@ -25,6 +25,7 @@ pub struct CaptureMetadata {
     pub atrous_mode: String,
     pub command_recording_mode: String,
     pub acceleration_structure_mode: String,
+    pub denoiser_backend: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -172,6 +173,7 @@ pub fn capture_json_line(metadata: &CaptureMetadata, png_bytes: u64) -> String {
             "atrous": metadata.atrous_mode,
             "command_recording": metadata.command_recording_mode,
             "acceleration_structure": metadata.acceleration_structure_mode,
+            "denoiser": metadata.denoiser_backend,
         },
         "png_bytes": png_bytes,
     })
@@ -227,12 +229,14 @@ mod tests {
             atrous_mode: "baseline".to_string(),
             command_recording_mode: "optimized".to_string(),
             acceleration_structure_mode: "baseline".to_string(),
+            denoiser_backend: "svgf".to_string(),
         };
         let value: serde_json::Value =
             serde_json::from_str(&capture_json_line(&metadata, 256)).unwrap();
         assert_eq!(value["schema_version"], CAPTURE_SCHEMA_VERSION);
         assert_eq!(value["debug_view"]["index"], 8);
         assert_eq!(value["modes"]["command_recording"], "optimized");
+        assert_eq!(value["modes"]["denoiser"], "svgf");
         assert_eq!(value["png_bytes"], 256);
     }
 }

@@ -214,12 +214,26 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
             ? 0
             : frac(float3(0.1031, 0.11369, 0.13787) * float(id + 1u));
     }
-    else
+    else if (DebugMode == 10u)
     {
         float hitDistance = nativeSize
             ? HitDistance.Load(int3(pixel, 0))
             : LoadBilinear(HitDistance, pixel, size, renderSize);
         color = (1.0 - exp(-hitDistance * 0.25)).xxx;
+    }
+    else
+    {
+        uint2 sourcePixel = nativeSize
+            ? pixel
+            : DiscreteSourcePixel(pixel, size, renderSize);
+        float depth = Depth.Load(int3(sourcePixel, 0));
+        float2 motion = Motion.Load(int3(sourcePixel, 0));
+        float3 normal = NormalRoughness.Load(int3(sourcePixel, 0)).xyz * 2.0 - 1.0;
+        float hitDistance = HitDistance.Load(int3(sourcePixel, 0));
+        color = float3(
+            depth > 0.0 && isfinite(depth),
+            all(isfinite(motion)),
+            hitDistance > 0.0 && all(isfinite(normal)));
     }
     Output[pixel] = float4(color, 1.0);
 }
