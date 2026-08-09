@@ -203,6 +203,15 @@ fn set_bridge_resource_state(resource: &mut TrackedResource, state: u32) -> Resu
         value if value == D3D12_RESOURCE_STATE_UNORDERED_ACCESS.0 as u32 => {
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS
         }
+        value
+            if value
+                == (D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+                    | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
+                    .0 as u32 =>
+        {
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+                | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+        }
         value if value == D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE.0 as u32 => {
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
         }
@@ -1209,8 +1218,11 @@ impl Dx12Renderer {
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             );
             self.submit_transition_batch(&mut command_recording_stats);
-            self.gpu_profiler
-                .resolve_frame(&self.command_list, frame_index);
+            self.gpu_profiler.resolve_frame(
+                &self.command_list,
+                frame_index,
+                active_gpu_passes(self.denoiser),
+            );
             self.command_list.Close()?;
             self.gpu_profiler.record_command_recording(
                 command_recording_started.elapsed(),
@@ -2565,9 +2577,14 @@ impl Dx12Renderer {
                 &mut nrd.normal_roughness,
                 &mut nrd.motion,
                 &mut nrd.view_z,
-                &mut nrd.diffuse_factor,
-                &mut nrd.specular_factor,
             ] {
+                resource.collect_transition(
+                    &mut self.transition_batch,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+                        | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                );
+            }
+            for resource in [&mut nrd.diffuse_factor, &mut nrd.specular_factor] {
                 resource.collect_transition(
                     &mut self.transition_batch,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,

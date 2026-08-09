@@ -424,17 +424,35 @@ impl GpuProfiler {
         }
     }
 
-    pub fn resolve_frame(&mut self, command_list: &ID3D12GraphicsCommandList, frame_index: usize) {
+    pub fn resolve_frame(
+        &mut self,
+        command_list: &ID3D12GraphicsCommandList,
+        frame_index: usize,
+        active_passes: [bool; PASS_COUNT],
+    ) {
         let query_start = frame_index * TIMESTAMPS_PER_FRAME;
-        unsafe {
-            command_list.ResolveQueryData(
-                &self.query_heap,
-                D3D12_QUERY_TYPE_TIMESTAMP,
-                query_start as u32,
-                TIMESTAMPS_PER_FRAME as u32,
-                &self.readback,
-                (query_start * size_of::<u64>()) as u64,
-            );
+        let mut pass = 0;
+        while pass < PASS_COUNT {
+            if !active_passes[pass] {
+                pass += 1;
+                continue;
+            }
+            let first_pass = pass;
+            while pass < PASS_COUNT && active_passes[pass] {
+                pass += 1;
+            }
+            let query_offset = query_start + first_pass * 2;
+            let query_count = (pass - first_pass) * 2;
+            unsafe {
+                command_list.ResolveQueryData(
+                    &self.query_heap,
+                    D3D12_QUERY_TYPE_TIMESTAMP,
+                    query_offset as u32,
+                    query_count as u32,
+                    &self.readback,
+                    (query_offset * size_of::<u64>()) as u64,
+                );
+            }
         }
         self.collected_frames[frame_index] = false;
     }

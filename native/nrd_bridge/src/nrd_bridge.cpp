@@ -127,7 +127,7 @@ uint32_t state_to_d3d12(const nri::AccessLayoutStage& state) {
     if (state.access == nri::AccessBits::SHADER_RESOURCE_STORAGE)
         return kD3D12ResourceStateUnorderedAccess;
     if (state.access == nri::AccessBits::SHADER_RESOURCE)
-        return kD3D12ResourceStateNonPixelShaderResource;
+        return kD3D12ResourceStateNonPixelShaderResource | kD3D12ResourceStatePixelShaderResource;
     return 0;
 }
 
