@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ReferenceExe,
     [string]$OutputRoot = "output/stage8g",
+    [string]$RunId,
     [ValidateRange(1, 10)]
     [int]$Runs = 3,
     [ValidateRange(1, 3600)]
@@ -171,7 +172,11 @@ $reference = [IO.Path]::GetFullPath($ReferenceExe)
 if (-not (Test-Path -LiteralPath $candidate)) { throw "candidate executable not found: $candidate" }
 if (-not (Test-Path -LiteralPath $reference)) { throw "reference executable not found: $reference" }
 $resolvedOutputRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot))
-$runId = "paired-1080-{0}-{1}" -f (Get-Date -Format "yyyyMMdd-HHmmss"), ([guid]::NewGuid().ToString("N").Substring(0, 8))
+if ([string]::IsNullOrWhiteSpace($RunId)) {
+    $runId = "paired-1080-{0}-{1}" -f (Get-Date -Format "yyyyMMdd-HHmmss"), ([guid]::NewGuid().ToString("N").Substring(0, 8))
+} else {
+    $runId = $RunId
+}
 $runRoot = Join-Path $resolvedOutputRoot $runId
 New-Item -ItemType Directory -Path $runRoot -Force | Out-Null
 $startedAt = Get-Date
