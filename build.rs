@@ -50,6 +50,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=D3D12MA_SOURCE_DIR");
     println!("cargo:rerun-if-env-changed=VSDEVCMD_BAT");
     println!("cargo:rerun-if-env-changed=CMAKE");
+    println!("cargo:rerun-if-env-changed=STREAMLINE_SOURCE_DIR");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         if env::var_os("CARGO_FEATURE_NRD").is_some() {
             panic!("NRD feature 仅支持 Windows D3D12 目标");
@@ -94,12 +95,103 @@ fn main() {
         );
     }
     deploy_winpix_runtime(&output_directory);
+    if env::var_os("CARGO_FEATURE_STREAMLINE").is_some() {
+        validate_streamline_sdk(&output_directory);
+    }
     println!("cargo:rustc-env=RAY_TRACING_DXC={}", dxc.display());
     println!("cargo:rustc-env=WINPIX_RUNTIME_VERSION=1.0.240308001");
 
     if env::var_os("CARGO_FEATURE_NRD").is_some() {
         build_nrd_bridge(&output_directory, &dxc);
     }
+}
+
+fn validate_streamline_sdk(output_directory: &Path) {
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sdk = dependency_path(
+        "STREAMLINE_SOURCE_DIR",
+        &repository_root.join("external/streamline-v2.12.0"),
+    );
+    let required = [
+        "include/sl.h",
+        "include/sl_consts.h",
+        "include/sl_core_api.h",
+        "include/sl_core_types.h",
+        "include/sl_dlss.h",
+        "include/sl_reflex.h",
+        "include/sl_pcl.h",
+        "include/sl_hooks.h",
+        "lib/x64/sl.interposer.lib",
+    ];
+    for relative in required {
+        if !sdk.join(relative).is_file() {
+            panic!(
+                "Streamline SDK 文件缺失：{}；请先运行 scripts/fetch_streamline.ps1",
+                sdk.join(relative).display()
+            );
+        }
+    }
+    let flavor = if env::var("PROFILE").as_deref() == Ok("release") {
+        ""
+    } else {
+        "development/"
+    };
+    for name in [
+        "sl.interposer.dll",
+        "sl.common.dll",
+        "sl.dlss.dll",
+        "sl.reflex.dll",
+        "sl.pcl.dll",
+        "nvngx_dlss.dll",
+    ] {
+        let relative = format!("bin/x64/{flavor}{name}");
+        if !sdk.join(&relative).is_file() {
+            panic!(
+                "Streamline {} DLL 缺失：{}；请先运行 scripts/fetch_streamline.ps1",
+                if flavor.is_empty() {
+                    "production"
+                } else {
+                    "development"
+                },
+                sdk.join(&relative).display()
+            );
+        }
+    }
+    let profile_directory = output_directory
+        .ancestors()
+        .nth(3)
+        .expect("无法从 OUT_DIR 定位 Cargo profile 输出目录");
+    for name in [
+        "sl.interposer.dll",
+        "sl.common.dll",
+        "sl.dlss.dll",
+        "sl.reflex.dll",
+        "sl.pcl.dll",
+        "nvngx_dlss.dll",
+    ] {
+        copy_if_changed(
+            &sdk.join(format!("bin/x64/{flavor}{name}")),
+            &profile_directory.join(name),
+        );
+    }
+    for (source, destination) in [
+        ("license.txt", "Streamline.LICENSE.txt"),
+        ("3rd-party-licenses.md", "Streamline.ThirdPartyLicenses.md"),
+        (
+            "bin/x64/reflex.license.txt",
+            "Streamline.Reflex.LICENSE.txt",
+        ),
+        (
+            "bin/x64/nvngx_dlss.license.txt",
+            "Streamline.NvngxDlss.LICENSE.txt",
+        ),
+    ] {
+        copy_if_changed(&sdk.join(source), &profile_directory.join(destination));
+    }
+    println!(
+        "cargo:rustc-env=RAY_TRACING_STREAMLINE_SOURCE_DIR={}",
+        sdk.display()
+    );
 }
 
 fn build_nrd_bridge(output_directory: &Path, dxc: &Path) {

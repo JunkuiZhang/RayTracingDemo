@@ -21,6 +21,8 @@ mod resolution;
 mod scene;
 mod settings;
 mod some_math;
+#[cfg(feature = "streamline")]
+mod streamline;
 mod systems;
 mod world;
 
@@ -31,6 +33,8 @@ use resolution::{
 };
 
 fn main() -> ExitCode {
+    #[cfg(feature = "streamline")]
+    let _streamline_sdk_version = streamline::SDK_VERSION;
     match parse_arguments(env::args().skip(1)) {
         Ok(Command::CpuReference(config)) => match cpu_reference::run(config) {
             Ok(()) => ExitCode::SUCCESS,
