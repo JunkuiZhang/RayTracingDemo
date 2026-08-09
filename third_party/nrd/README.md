@@ -11,6 +11,14 @@ The application uses NRD only as an optional `REBLUR_DIFFUSE_SPECULAR`
 comparison backend. SVGF remains the default and this repository does not
 include Streamline, DLSS, Ray Reconstruction, RELAX, SIGMA, SH, or ReSTIR.
 
+The 9A–9F integration keeps the C ABI bridge, NRD resources, and descriptor
+state inside a fence-retired render generation. `F3` switches between SVGF and
+NRD only in an `--features nrd` build; it does not make NRD the default. The
+bridge and all dependencies are built from the commits in
+`version.lock.json` with local, disconnected FetchContent. No network access is
+performed by `build.rs`, and no NRD binary or SDK is redistributed by this
+repository.
+
 The fetched SDK's NVIDIA RTX SDK License and third-party notices must remain
 available for any local build or distribution review. This notice is not a
 replacement for those license files.

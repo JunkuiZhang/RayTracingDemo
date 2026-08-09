@@ -861,6 +861,8 @@ H1–I3 最新状态（2026-08-09）：median/环境来源修复和五条 Debug 
 
 执行细则：[`阶段9重建输入契约与NRD最小后端执行方案.md`](阶段9重建输入契约与NRD最小后端执行方案.md)。阶段 9 采用缩减路线：先建立 NRD 与 DLSS Ray Reconstruction 共用的重建输入契约，只实现 `REBLUR_DIFFUSE_SPECULAR` 最小对照后端；不在本阶段实现 RELAX、SH、SIGMA、Streamline 或 DLSS。默认仍为自研 SVGF，没有 NRD SDK 时基础版本必须继续构建和运行。
 
+当前状态（2026-08-10）：9A–9F 已按独立 commit 实现。`--features nrd` 的 NRD v4.17.3 bridge、REBLUR diffuse/specular、输入契约、descriptor heap 恢复、资源状态和 fence-retired generation 已在 RTX 4060 Laptop GPU 上通过 Release 3 秒 Smoke、18 进程 Release 短矩阵和五项 Debug GPU-Based Validation；默认路径仍是 SVGF，NRD inactive pass 在 JSON 中保持 `null`。Debug validation capture 的 spp=2 PNG 非黑且 InfoQueue 为 0。实际 F3/F1/F2/resize/最小化恢复/hot reload 与持续画质观察仍为 `PENDING MANUAL`，公开 PBR/大模型未提供，600/1800 秒长测未执行，因此阶段 9 仍不能标记为完成。详细 raw run-id、pass 数据和风险见 [`阶段9验收记录.md`](阶段9验收记录.md)。
+
 工作内容：
 
 - 建立可复用给 NRD/DLSS RR 的矩阵、viewZ、运动矢量、材质反照率与 hit-distance 契约。

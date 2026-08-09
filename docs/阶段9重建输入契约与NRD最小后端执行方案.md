@@ -10,7 +10,7 @@
 - 阶段 9 新路径：可选的 `NRD REBLUR_DIFFUSE_SPECULAR`。
 - 后续目标：阶段 10 接入 DLSS Super Resolution/Reflex，阶段 11 接入 DLSS Ray Reconstruction（RR）。
 - 文档日期：2026-08-09。
-- 实现状态：尚未开始；本文提交只定义范围、接口、提交顺序和验收标准，不代表任何 NRD 代码已经完成。
+- 实现状态（2026-08-10 更新）：9A–9F 代码工作包、可选 NRD v4.17.3 后端、generation/fence 退休、短 Release 矩阵和五项 Debug Validation 已完成自动验证；默认仍为 SVGF。F3/F1/F2/resize/最小化恢复/hot reload 的真实交互与连续画质观察仍为 `PENDING MANUAL`，公开 PBR 大模型未提供，600/1800 秒长测不执行，因此本文不把阶段 9 标记为完成。详细结果见 [`阶段9验收记录.md`](阶段9验收记录.md)。
 
 本阶段采用“缩减方案”：优先建立 NRD 与 DLSS RR 都能复用的重建输入契约，只实现一个最小、正确、可切换的 NRD REBLUR 对照后端。不得在本阶段加入 RELAX、SH、SIGMA、Streamline、DLSS、复杂 NRD 调参或新的采样架构。
 

@@ -134,6 +134,18 @@ cargo run --release -- --model assets/gltf/NonIndexedMultiNode/NonIndexedMultiNo
 
 仓库内的 `assets/gltf/TextureSampler` 是项目内生成的离线回归夹具；公开 Khronos `BoxTextured`/`DamagedHelmet` 资产不随仓库自动下载。
 
+## 阶段 9：重建输入契约与可选 NRD
+
+阶段 9 建立了可复用给 NRD 与未来 Ray Reconstruction 的矩阵、viewZ、稠密 motion、材质反照率和 hit-distance 输入契约，并以本地锁定源码提供可选的 NRD v4.17.3 `REBLUR_DIFFUSE_SPECULAR` 对照后端。默认仍为 SVGF；没有 NRD SDK 或不启用 feature 时，基础构建和默认 Cornell Box 不变：
+
+```powershell
+cargo run --release
+cargo run --release --features nrd -- --denoiser nrd-reblur
+cargo run --release --features nrd -- --benchmark-seconds 3 --denoiser nrd-reblur
+```
+
+`F3` 可在支持 `nrd` feature 的构建中创建新 generation，在 SVGF 与 NRD 间切换；旧代按 fence 退休，历史显式 reset。NRD 调度会恢复应用 descriptor heap，inactive profiler pass 在 JSON 中为 `null`。离线版本、桥接说明和第三方许可见 [`third_party/nrd/README.md`](third_party/nrd/README.md)，短矩阵和未完成人工验收见 [`docs/阶段9验收记录.md`](docs/阶段9验收记录.md)。本阶段不包含 Streamline、DLSS、Ray Reconstruction、RELAX、SIGMA、SH 或 ReSTIR。
+
 ## 阶段 8：性能优化（8A–8E-2、8G）
 
 8A 已建立可信 GPU 基线和显存遥测；8B 的 À-Trous shared tile 实验因 RTX 4060 Laptop 三档实测回退而未采纳；8C 的 barrier/bind 优化已设为默认并保留 baseline 回退；8D 已实现两阶段 AS 初始化、TLAS 策略、profitable BLAS compaction 和 allocation 遥测，但仓库小模型没有触发真实 compact copy，AS 默认仍为 baseline；8E-1 已完成输出/内部尺寸解耦和按 fence 退休的资源代际切换；8E-2 已实现由已完成 GPU Total timestamp 驱动的动态分辨率、旧 generation 样本隔离、双重冷却和 measurement/lifetime 遥测，并完成首轮 review 修复。8G 已补齐 typed DebugView、fence-safe PNG、image_diff、bounded 显存 measurement、正确 median、环境来源、五条 Debug raw 证据和有界 runner。自认证 commit paired 在同一 RTX 4060 Laptop/AC 环境下得到 candidate `0fdcb7f`/reference `2031abf` p95 median `7.91/7.84 ms`，差 `+0.893%`；同一 candidate 的 dynamic/fixed paired 为 `7.89/7.85 ms`，差 `+0.510%`，三次 dynamic 均保持原生 1920×1080、零切换。因此当前是绝对历史门槛 FAIL，但没有 commit regression 或 dynamic-mode regression，不应据此改 renderer。1800/600 秒长测、真实 F1/F2/resize/最小化/恢复/hot-reload、公开 PBR/大模型和 PIX UI 证据仍未执行，阶段 8 尚未完成。窗口标题显示阶段 8、命令记录模式、最近有效 GPU Total、滚动 p95、输出/内部尺寸、动态控制状态、generation、À-Trous 模式和 local VRAM usage/budget。
