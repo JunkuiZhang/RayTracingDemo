@@ -861,7 +861,7 @@ H1–I3 最新状态（2026-08-09）：median/环境来源修复和五条 Debug 
 
 执行细则：[`阶段9重建输入契约与NRD最小后端执行方案.md`](阶段9重建输入契约与NRD最小后端执行方案.md)。阶段 9 采用缩减路线：先建立 NRD 与 DLSS Ray Reconstruction 共用的重建输入契约，只实现 `REBLUR_DIFFUSE_SPECULAR` 最小对照后端；不在本阶段实现 RELAX、SH、SIGMA、Streamline 或 DLSS。默认仍为自研 SVGF，没有 NRD SDK 时基础版本必须继续构建和运行。
 
-当前状态（2026-08-10）：9A–9F 已按独立 commit 实现；Codex review 又修正了 material factors/F0/视线方向、RGBA16F 2.5D motion 与静态子像素运动、REBLUR `NewFrame` 调用顺序、共享 continuation hitT、静态链接许可部署，以及 HLSL/Rust reconstruction UAV 15–17 错位。该错位曾把 diffuse hitT 当作 primary emissive 加回画面，是此前 NRD 全屏盐粒跳噪的根因；修复后 63→64 SPP 的 NRD 时域 MAE/RMSE 从 `32.1200/68.5116` 降至 `0.1003/2.2249`，并增加显式寄存器契约测试和连续帧回归门槛。`--features nrd` 的 NRD v4.17.3 bridge、REBLUR diffuse/specular、descriptor heap 恢复、资源状态和 fence-retired generation 已在 RTX 4060 Laptop GPU 上通过 Release 3 秒 Smoke、18 进程 Release 短矩阵、五项 Debug GPU-Based Validation，以及修复后 1 秒 Smoke 与 63/64 SPP 固定截图回归；默认路径仍是 SVGF，NRD inactive pass 在 JSON 中保持 `null`。实际 F3/F1/F2/resize/最小化恢复/hot reload 与持续画质观察仍为 `PENDING MANUAL`；镜面顶部与强反射边缘仍有少量局部高方差，公开 PBR/大模型未提供，600/1800 秒长测未执行，因此阶段 9 仍不能标记为完成。详细 raw run-id、pass 数据和风险见 [`阶段9验收记录.md`](阶段9验收记录.md)。
+当前状态（2026-08-10）：9A–9F 已按独立 commit 实现；Codex review 又修正了 material factors/F0/视线方向、RGBA16F 2.5D motion 与静态子像素运动、REBLUR `NewFrame` 调用顺序、共享 continuation hitT、静态链接许可部署，以及 HLSL/Rust reconstruction UAV 15–17 错位。该错位曾把 diffuse hitT 当作 primary emissive 加回画面，是此前 NRD 全屏盐粒跳噪的根因；修复后 63→64 SPP 的 NRD 时域 MAE/RMSE 从 `32.1200/68.5116` 降至 `0.1003/2.2249`，并增加显式寄存器契约测试和连续帧回归门槛。`--features nrd` 的 NRD v4.17.3 bridge、REBLUR diffuse/specular、descriptor heap 恢复、资源状态和 fence-retired generation 已在 RTX 4060 Laptop GPU 上通过 Release 3 秒 Smoke、18 进程 Release 短矩阵、五项 Debug GPU-Based Validation，以及修复后 1 秒 Smoke 与 63/64 SPP 固定截图回归。Release 真实窗口的 F3 往返、F1 十二视图回环、F2 四档回环、resize/最小化/恢复均通过；NRD prep/compose hot reload 缺口也已修复并在 Debug 下两次成功、InfoQueue 0。默认路径仍是 SVGF，NRD inactive pass 在 JSON 中保持 `null`。连续相机移动、动画拖影/闪烁和局部高光仍为 `PENDING USER VISUAL CONFIRMATION`；公开 PBR/大模型未提供，600/1800 秒长测未执行，因此阶段 9 仍不标记最终完成，但这些剩余项不阻塞阶段 10。详细 raw run-id、pass 数据和风险见 [`阶段9验收记录.md`](阶段9验收记录.md)。
 
 工作内容：
 
@@ -876,6 +876,8 @@ H1–I3 最新状态（2026-08-09）：median/环境来源修复和五条 Debug 
 - 输入单位、运动矢量和历史重置全部正确。
 
 ### 阶段 10：DLSS Super Resolution 和 Reflex
+
+执行细则：[`阶段10DLSS超分与Reflex执行方案.md`](阶段10DLSS超分与Reflex执行方案.md)。阶段 10 只接入 DLSS Super Resolution、DLAA、Reflex Low Latency 与 PCL 标记；DLSS Ray Reconstruction 和 Frame Generation 明确保留到阶段 11。
 
 工作内容：
 
