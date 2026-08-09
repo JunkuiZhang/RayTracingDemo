@@ -3,7 +3,7 @@ param(
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release",
     [string]$Exe,
-    [ValidateSet("Smoke", "Matrix")]
+    [ValidateSet("Smoke", "Matrix", "DebugValidation")]
     [string]$Suite = "Smoke",
     [ValidateRange(1, 3)]
     [int]$Runs = 1,
@@ -191,7 +191,7 @@ function Invoke-RecordedProcess(
     }
 }
 
-function Test-Run($Run, [string]$Backend, [string]$Mode, [bool]$RequireSwitch) {
+function Test-Run($Run, [string]$Backend, [string]$Mode, [bool]$RequireSwitch, [bool]$EnforcePerformance) {
     $failures = [System.Collections.Generic.List[string]]::new()
     if ($Run.exit_code -ne 0) { $failures.Add("exit_code=$($Run.exit_code)") }
     if ($Run.timed_out) { $failures.Add("timed_out") }
@@ -234,11 +234,13 @@ function Test-Run($Run, [string]$Backend, [string]$Mode, [bool]$RequireSwitch) {
             $failures.Add("inactive pass $name must be null")
         }
     }
-    if ([double]$json.passes.total.p95_ms -gt 16.67) { $failures.Add("Total p95 exceeds 16.67 ms") }
+    if ($EnforcePerformance -and [double]$json.passes.total.p95_ms -gt 16.67) {
+        $failures.Add("Total p95 exceeds 16.67 ms")
+    }
     if ([int64]$json.gpu_idle_wait_count -ne 0) { $failures.Add("gpu_idle_wait_count is nonzero") }
     if ($null -eq $json.memory.measurement -or [int64]$json.memory.measurement.valid_query_count -le 0) {
         $failures.Add("memory measurement is unavailable")
-    } elseif (-not (Test-Finite $json.memory.measurement.peak_usage_ratio) -or [double]$json.memory.measurement.peak_usage_ratio -ge 0.70) {
+    } elseif ($EnforcePerformance -and (-not (Test-Finite $json.memory.measurement.peak_usage_ratio) -or [double]$json.memory.measurement.peak_usage_ratio -ge 0.70)) {
         $failures.Add("memory peak/budget is invalid or >= 70%")
     }
     if ($Mode -eq "fixed" -and [int64]$json.render_generation_switch_count -ne 0) {
@@ -266,14 +268,15 @@ function Add-Case(
     [int]$Count,
     [System.Collections.Generic.List[object]]$Cases,
     [string]$Root,
-    [string]$Executable
+    [string]$Executable,
+    [bool]$EnforcePerformance
 ) {
     $caseRoot = Join-Path $Root $Name
     New-Item -ItemType Directory -Path $caseRoot -Force | Out-Null
     $runs = [System.Collections.Generic.List[object]]::new()
     for ($index = 1; $index -le $Count; $index++) {
         $run = Invoke-RecordedProcess $Executable $Arguments $caseRoot ("run-{0:D2}" -f $index)
-        $run | Add-Member -NotePropertyName validation -NotePropertyValue (Test-Run $run $Backend $Mode $RequireSwitch)
+        $run | Add-Member -NotePropertyName validation -NotePropertyValue (Test-Run $run $Backend $Mode $RequireSwitch $EnforcePerformance)
         $runs.Add($run)
     }
     $valid = @($runs | Where-Object { $_.validation.passed })
@@ -313,22 +316,34 @@ $environment | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $environment_
 
 $common = @("--command-recording-mode", "optimized", "--atrous-mode", "baseline", "--acceleration-structure-mode", "baseline")
 $cases = [System.Collections.Generic.List[object]]::new()
+$enforcePerformance = $Configuration -eq "Release"
 if ($Suite -eq "Smoke") {
-    Add-Case "svgf-fixed" (@("--benchmark-seconds", "$Seconds", "--output-size", $FixedOutputSize, "--denoiser", "svgf") + $common) "svgf" "fixed" $false 1 $cases $runRoot $Executable
-    Add-Case "nrd-fixed" (@("--benchmark-seconds", "$Seconds", "--output-size", $FixedOutputSize, "--denoiser", "nrd-reblur") + $common) "nrd-reblur" "fixed" $false 1 $cases $runRoot $Executable
-    Add-Case "nrd-dynamic" (@("--benchmark-seconds", "$Seconds", "--output-size", $DynamicOutputSize, "--dynamic-resolution", "--target-gpu-ms", "4.0", "--denoiser", "nrd-reblur") + $common) "nrd-reblur" "dynamic" $true 1 $cases $runRoot $Executable
-} else {
-    Add-Case "svgf-1280x720-fixed" (@("--benchmark-seconds", "$Seconds", "--output-size", "1280x720", "--denoiser", "svgf") + $common) "svgf" "fixed" $false $Runs $cases $runRoot $Executable
-    Add-Case "nrd-1280x720-fixed" (@("--benchmark-seconds", "$Seconds", "--output-size", "1280x720", "--denoiser", "nrd-reblur") + $common) "nrd-reblur" "fixed" $false $Runs $cases $runRoot $Executable
-    Add-Case "svgf-1920x1080-fixed" (@("--benchmark-seconds", "$Seconds", "--output-size", "1920x1080", "--denoiser", "svgf") + $common) "svgf" "fixed" $false $Runs $cases $runRoot $Executable
-    Add-Case "nrd-1920x1080-fixed" (@("--benchmark-seconds", "$Seconds", "--output-size", "1920x1080", "--denoiser", "nrd-reblur") + $common) "nrd-reblur" "fixed" $false $Runs $cases $runRoot $Executable
-    Add-Case "nrd-1920x1080-dynamic" (@("--benchmark-seconds", "$Seconds", "--output-size", "1920x1080", "--dynamic-resolution", "--target-gpu-ms", "4.0", "--denoiser", "nrd-reblur") + $common) "nrd-reblur" "dynamic" $true $Runs $cases $runRoot $Executable
+    Add-Case "svgf-fixed" (@("--benchmark-seconds", "$Seconds", "--output-size", $FixedOutputSize, "--denoiser", "svgf") + $common) "svgf" "fixed" $false 1 $cases $runRoot $Executable $enforcePerformance
+    Add-Case "nrd-fixed" (@("--benchmark-seconds", "$Seconds", "--output-size", $FixedOutputSize, "--denoiser", "nrd-reblur") + $common) "nrd-reblur" "fixed" $false 1 $cases $runRoot $Executable $enforcePerformance
+    Add-Case "nrd-dynamic" (@("--benchmark-seconds", "$Seconds", "--output-size", $DynamicOutputSize, "--dynamic-resolution", "--target-gpu-ms", "4.0", "--denoiser", "nrd-reblur") + $common) "nrd-reblur" "dynamic" $true 1 $cases $runRoot $Executable $enforcePerformance
+} elseif ($Suite -eq "Matrix") {
+    Add-Case "svgf-1280x720-fixed" (@("--benchmark-seconds", "$Seconds", "--output-size", "1280x720", "--denoiser", "svgf") + $common) "svgf" "fixed" $false $Runs $cases $runRoot $Executable $enforcePerformance
+    Add-Case "nrd-1280x720-fixed" (@("--benchmark-seconds", "$Seconds", "--output-size", "1280x720", "--denoiser", "nrd-reblur") + $common) "nrd-reblur" "fixed" $false $Runs $cases $runRoot $Executable $enforcePerformance
+    Add-Case "svgf-1920x1080-fixed" (@("--benchmark-seconds", "$Seconds", "--output-size", "1920x1080", "--denoiser", "svgf") + $common) "svgf" "fixed" $false $Runs $cases $runRoot $Executable $enforcePerformance
+    Add-Case "nrd-1920x1080-fixed" (@("--benchmark-seconds", "$Seconds", "--output-size", "1920x1080", "--denoiser", "nrd-reblur") + $common) "nrd-reblur" "fixed" $false $Runs $cases $runRoot $Executable $enforcePerformance
+    Add-Case "nrd-1920x1080-dynamic" (@("--benchmark-seconds", "$Seconds", "--output-size", "1920x1080", "--dynamic-resolution", "--target-gpu-ms", "4.0", "--denoiser", "nrd-reblur") + $common) "nrd-reblur" "dynamic" $true $Runs $cases $runRoot $Executable $enforcePerformance
     $fixture = [IO.Path]::GetFullPath((Join-Path $repoRoot "assets/gltf/Triangle/NonIndexedMultiNode.gltf"))
     if (Test-Path -LiteralPath $fixture) {
-        Add-Case "nrd-animated-gltf-1280x720" (@("--benchmark-seconds", "$Seconds", "--output-size", "1280x720", "--denoiser", "nrd-reblur", "--model", $fixture, "--animate-model") + $common) "nrd-reblur" "fixed" $false $Runs $cases $runRoot $Executable
+        Add-Case "nrd-animated-gltf-1280x720" (@("--benchmark-seconds", "$Seconds", "--output-size", "1280x720", "--denoiser", "nrd-reblur", "--model", $fixture, "--animate-model") + $common) "nrd-reblur" "fixed" $false $Runs $cases $runRoot $Executable $enforcePerformance
     } else {
         $cases.Add([pscustomobject]@{ name = "nrd-animated-gltf-1280x720"; passed = $false; blocked = $true; reason = "fixture missing: $fixture" })
     }
+} else {
+    Add-Case "svgf-static" (@("--benchmark-seconds", "$Seconds", "--output-size", "1280x720", "--denoiser", "svgf") + $common) "svgf" "fixed" $false 1 $cases $runRoot $Executable $false
+    Add-Case "nrd-static" (@("--benchmark-seconds", "$Seconds", "--output-size", "1280x720", "--denoiser", "nrd-reblur") + $common) "nrd-reblur" "fixed" $false 1 $cases $runRoot $Executable $false
+    $fixture = [IO.Path]::GetFullPath((Join-Path $repoRoot "assets/gltf/Triangle/NonIndexedMultiNode.gltf"))
+    if (Test-Path -LiteralPath $fixture) {
+        Add-Case "nrd-animated-gltf" (@("--benchmark-seconds", "$Seconds", "--output-size", "1280x720", "--denoiser", "nrd-reblur", "--model", $fixture, "--animate-model") + $common) "nrd-reblur" "fixed" $false 1 $cases $runRoot $Executable $false
+    } else {
+        $cases.Add([pscustomobject]@{ name = "nrd-animated-gltf"; passed = $false; blocked = $true; reason = "fixture missing: $fixture" })
+    }
+    Add-Case "nrd-dynamic" (@("--benchmark-seconds", "$Seconds", "--output-size", "1920x1080", "--dynamic-resolution", "--target-gpu-ms", "4.0", "--denoiser", "nrd-reblur") + $common) "nrd-reblur" "dynamic" $true 1 $cases $runRoot $Executable $false
+    Add-Case "nrd-validation" (@("--benchmark-seconds", "$Seconds", "--output-size", "1280x720", "--denoiser", "nrd-reblur", "--debug-view", "nrd-validation") + $common) "nrd-reblur" "fixed" $false 1 $cases $runRoot $Executable $false
 }
 
 $passed = @($cases | Where-Object { $_.passed }).Count -eq $cases.Count
@@ -352,7 +367,7 @@ $summary = [ordered]@{
     executable = $Executable
     timeout_seconds = $TimeoutSeconds
     seconds_per_process = $Seconds
-    runs_per_case = if ($Suite -eq "Smoke") { 1 } else { $Runs }
+    runs_per_case = if ($Suite -eq "Matrix") { $Runs } else { 1 }
     environment = $environment
     cases = $cases.ToArray()
     passed = $passed
