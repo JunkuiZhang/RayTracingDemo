@@ -826,7 +826,7 @@ Rust 只传递稳定的句柄、枚举和 POD 结构，禁止跨 FFI 传递 Rust
 
 ### 阶段 8：性能优化
 
-当前状态：**8A 可信 GPU 基线和显存遥测已实现；8B shared tile 实验已完成但因实测回退未采纳；8C 屏障批处理和重复绑定清理已采用 optimized 默认并保留回退路径；8D 两阶段 AS 初始化、TLAS 策略和 allocation 遥测已实现，但真实 compact copy、大模型及画面对比尚未验收，AS 默认仍为 baseline；8E-1 输出/内部尺寸解耦、固定 scale、generation fence 退休和 review 修复已完成；8E-2 GPU 时间控制器、旧代 timestamp 隔离、双重冷却、动态遥测、默认/强制真机矩阵和首轮 review 修复已完成。8F 因 1080p Path Trace 占比约 43.7% 未达到 45% 入口，本轮不实施；8G 详细方案已完成，代码和最终矩阵尚待执行**。8E-1/8E-2 的 F1/F2/截图及无 resize 长时复核、8D 大模型和历史画质债务仍待 8G，详细细则见 [`阶段8G总体验收与债务收口执行方案.md`](阶段8G总体验收与债务收口执行方案.md)，因此本阶段仍不能标记为完成。
+当前状态：**8A 可信 GPU 基线和显存遥测已实现；8B shared tile 实验已完成但因实测回退未采纳；8C 屏障批处理和重复绑定清理已采用 optimized 默认并保留回退路径；8D 两阶段 AS 初始化、TLAS 策略和 allocation 遥测已实现，但真实 compact copy、大模型及画面对比尚未验收，AS 默认仍为 baseline；8E-1 输出/内部尺寸解耦、固定 scale、generation fence 退休和 review 修复已完成；8E-2 GPU 时间控制器、旧代 timestamp 隔离、双重冷却、动态遥测、默认/强制真机矩阵和首轮 review 修复已完成；8G 已完成代码、raw Release 矩阵、deterministic capture/diff、bounded 显存 measurement 和无 resize 长测，但外层 runner 汇总、真实 F1/F2/resize/最小化/恢复/hot-reload、公开 PBR/大模型和 PIX UI 仍有 BLOCKED 项。8F 因 1080p Path Trace 占比约 43.7% 未达到 45% 入口，本轮不实施**。详细数据见 [`阶段8G总体验收记录.md`](阶段8G总体验收记录.md)，因此本阶段仍不能标记为完成。
 
 8A 已将 `Total` 从 AS build/update 前开始到 ToneMap 完成后结束，并排除了 Present/垂直同步；同时记录 AS、Path Trace、Temporal、À-Trous 聚合及 0/1/2/3 子迭代、ToneMap。profiler 使用三帧 Frame Context 的 query/readback 槽，只有对应 fence 完成后才读取；UI 统计窗口固定保留最近 240 个有效样本，benchmark 则使用固定内存直方图覆盖完整测量区间，并在开始时排除尚未完成的预热帧。`--benchmark-seconds <1..3600>` 在 120 个有效帧预热后输出单行稳定 JSON，显存字段来自所选 adapter 的 IDXGIAdapter3 local segment 查询，查询间隔约 500 ms。Microsoft 官方 WinPixEventRuntime x64 DLL 随仓库固定版本部署到可执行文件目录，JSON 会报告 PIX event 是否可用。
 
