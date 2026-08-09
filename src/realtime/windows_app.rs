@@ -196,12 +196,15 @@ impl ApplicationHandler for RealtimeApplication {
                     if elapsed >= Duration::from_millis(500) {
                         let fps = self.frames_since_stats as f64 / elapsed.as_secs_f64();
                         window.set_title(&format!(
-                            "RayTracingDemo - 阶段 9 | {} | Cmd {} | FPS {:.0} | GPU {:.2} ms (p95 {:.2}) | 输出 {}x{} | 内部 {}x{} [{}] | Gen {} / retired {} | VRAM {} | AS {:.2} PT {:.2} T {:.2} A {:.2} ({}) | SPP {} | 视图 {} | {} | {}",
+                            "RayTracingDemo - 阶段 10 | {} | Upscaler {} | Reflex {} | Cmd {} | FPS {:.0} | GPU {:.2} ms (p95 {:.2}) | DLSS {:.2} ms | 输出 {}x{} | 内部 {}x{} [{}] | Gen {} / retired {} | VRAM {} | AS {:.2} PT {:.2} T {:.2} A {:.2} ({}) | SPP {} | 视图 {} | {} | {}",
                             renderer.denoiser_name(),
+                            renderer.upscaler_name(),
+                            renderer.reflex_mode_name(),
                             renderer.command_recording_mode_name(),
                             fps,
                             renderer.gpu_time_ms(),
                             renderer.gpu_time_p95_ms(),
+                            renderer.dlss_evaluate_time_ms(),
                             renderer.output_width(),
                             renderer.output_height(),
                             renderer.render_width(),
@@ -262,6 +265,11 @@ impl ApplicationHandler for RealtimeApplication {
                         PhysicalKey::Code(KeyCode::F3) => {
                             if let Err(error) = renderer.cycle_denoiser() {
                                 eprintln!("切换重建后端失败：{error}");
+                            }
+                        }
+                        PhysicalKey::Code(KeyCode::F4) => {
+                            if let Err(error) = renderer.cycle_upscaler() {
+                                eprintln!("切换 DLSS/DLAA 失败：{error}");
                             }
                         }
                         _ => {}

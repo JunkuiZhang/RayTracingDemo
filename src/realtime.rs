@@ -20,6 +20,34 @@ pub struct RealtimeConfig {
     pub acceleration_structure_mode: AccelerationStructureMode,
     pub denoiser: DenoiserBackend,
     pub upscaler: UpscalerMode,
+    pub reflex_mode: ReflexMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReflexMode {
+    Off,
+    #[default]
+    On,
+    OnBoost,
+}
+
+impl ReflexMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+            Self::OnBoost => "on-boost",
+        }
+    }
+
+    #[cfg(feature = "streamline")]
+    pub const fn sdk_mode(self) -> u32 {
+        match self {
+            Self::Off => 0,
+            Self::On => 1,
+            Self::OnBoost => 2,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

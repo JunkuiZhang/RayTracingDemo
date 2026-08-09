@@ -36,7 +36,7 @@ use crate::upscaler::DlssFrameInput;
 use crate::{
     as_policy::AccelerationStructureStats,
     debug_view::DebugView,
-    realtime::{AtrousMode, CommandRecordingMode, RealtimeConfig},
+    realtime::{AtrousMode, CommandRecordingMode, RealtimeConfig, ReflexMode},
     reconstruction::{
         CameraPose, DenoiserBackend, NRD_COMMIT_PREFIX, NRD_VERSION,
         RECONSTRUCTION_CONTRACT_VERSION, ReconstructionFrameInput, ReconstructionFrameState,
@@ -68,6 +68,8 @@ use raytracing::{AccelerationStructures, RaytracingPipeline, SceneGeometry};
 struct RetiredRenderResourceGeneration {
     retire_fence: u64,
     resources: RenderResourceGeneration,
+    #[cfg(feature = "streamline")]
+    streamline_viewport: Option<StreamlineViewport>,
 }
 
 #[cfg(feature = "nrd")]
@@ -161,6 +163,10 @@ impl Drop for NrdBackend {
 struct StreamlineRuntime {
     bridge: crate::streamline::Bridge,
     _support: crate::streamline::Support,
+}
+
+#[cfg(feature = "streamline")]
+struct StreamlineViewport {
     viewport: crate::streamline::Viewport,
     _options: crate::streamline::DlssOptions,
     optimal: crate::streamline::OptimalSettings,
@@ -196,8 +202,7 @@ impl StreamlineRuntime {
         bridge: crate::streamline::Bridge,
         device: &ID3D12Device,
         adapter: &IDXGIAdapter1,
-        mode: crate::upscaler::UpscalerMode,
-        output_extent: Extent2D,
+        reflex_mode: crate::realtime::ReflexMode,
     ) -> Result<Self> {
         let adapter_description = unsafe { adapter.GetDesc1()? };
         let adapter_luid = u64::from(adapter_description.AdapterLuid.LowPart)
@@ -234,11 +239,97 @@ impl StreamlineRuntime {
                 bridge.last_error(),
             ));
         }
-        if support.dlss_supported == 0 {
+        if support.reflex_supported != 0 {
+            let status = unsafe {
+                crate::streamline::streamline_bridge_reflex_set_mode(
+                    bridge.as_raw(),
+                    reflex_mode.sdk_mode(),
+                )
+            };
+            if status != crate::streamline::STATUS_OK {
+                return Err(streamline_error_with_detail(
+                    "设置 Reflex mode",
+                    status,
+                    bridge.last_error(),
+                ));
+            }
+        }
+        Ok(Self {
+            bridge,
+            _support: support,
+        })
+    }
+
+    fn reflex_supported(&self) -> bool {
+        self._support.reflex_supported != 0
+    }
+
+    fn pcl_supported(&self) -> bool {
+        self._support.pcl_supported != 0
+    }
+
+    unsafe fn get_frame_token(&self, frame_index: u32) -> Result<crate::streamline::FrameToken> {
+        let mut token = crate::streamline::FrameToken {
+            struct_size: size_of::<crate::streamline::FrameToken>() as u32,
+            abi_version: crate::streamline::ABI_VERSION,
+            ..Default::default()
+        };
+        let status = unsafe {
+            crate::streamline::streamline_bridge_get_frame_token(
+                self.bridge.as_raw(),
+                frame_index,
+                &mut token,
+            )
+        };
+        if status != crate::streamline::STATUS_OK {
+            return Err(streamline_error_with_detail(
+                "获取 Streamline frame token",
+                status,
+                self.bridge.last_error(),
+            ));
+        }
+        Ok(token)
+    }
+
+    unsafe fn reflex_sleep(&self, token: &crate::streamline::FrameToken) -> Result<()> {
+        let status = unsafe {
+            crate::streamline::streamline_bridge_reflex_sleep(self.bridge.as_raw(), token)
+        };
+        if status != crate::streamline::STATUS_OK {
+            return Err(streamline_error_with_detail(
+                "调用 Reflex sleep",
+                status,
+                self.bridge.last_error(),
+            ));
+        }
+        Ok(())
+    }
+
+    unsafe fn pcl_marker(&self, token: &crate::streamline::FrameToken, marker: u32) -> Result<()> {
+        let status = unsafe {
+            crate::streamline::streamline_bridge_pcl_marker(self.bridge.as_raw(), token, marker)
+        };
+        if status != crate::streamline::STATUS_OK {
+            return Err(streamline_error_with_detail(
+                "提交 PCL marker",
+                status,
+                self.bridge.last_error(),
+            ));
+        }
+        Ok(())
+    }
+
+    unsafe fn create_viewport(
+        &self,
+        mode: crate::upscaler::UpscalerMode,
+        output_extent: Extent2D,
+        id: u32,
+    ) -> Result<StreamlineViewport> {
+        if self._support.dlss_supported == 0 {
             return Err(streamline_error_with_detail(
                 "DLSS support",
-                support.dlss_result,
-                format!("GPU 不支持 DLSS，SDK result={}", support.dlss_result),
+                self._support.dlss_result,
+                format!("GPU 不支持 DLSS，SDK result={}", self._support.dlss_result),
             ));
         }
         let options = crate::streamline::DlssOptions {
@@ -263,7 +354,7 @@ impl StreamlineRuntime {
         };
         let status = unsafe {
             crate::streamline::streamline_bridge_get_optimal_settings(
-                bridge.as_raw(),
+                self.bridge.as_raw(),
                 &options,
                 &mut optimal,
             )
@@ -272,7 +363,7 @@ impl StreamlineRuntime {
             return Err(streamline_error_with_detail(
                 "查询 DLSS optimal settings",
                 status,
-                bridge.last_error(),
+                self.bridge.last_error(),
             ));
         }
         if optimal.optimal_render_width == 0 || optimal.optimal_render_height == 0 {
@@ -309,12 +400,12 @@ impl StreamlineRuntime {
         let viewport = crate::streamline::Viewport {
             struct_size: size_of::<crate::streamline::Viewport>() as u32,
             abi_version: crate::streamline::ABI_VERSION,
-            id: 1,
+            id,
             reserved: 0,
         };
         let status = unsafe {
             crate::streamline::streamline_bridge_dlss_set_options(
-                bridge.as_raw(),
+                self.bridge.as_raw(),
                 &viewport,
                 &options,
             )
@@ -323,12 +414,10 @@ impl StreamlineRuntime {
             return Err(streamline_error_with_detail(
                 "设置 DLSS options",
                 status,
-                bridge.last_error(),
+                self.bridge.last_error(),
             ));
         }
-        Ok(Self {
-            bridge,
-            _support: support,
+        Ok(StreamlineViewport {
             viewport,
             _options: options,
             optimal,
@@ -336,44 +425,19 @@ impl StreamlineRuntime {
         })
     }
 
-    fn optimal_extent(&self) -> Extent2D {
-        Extent2D {
-            width: self.optimal.optimal_render_width,
-            height: self.optimal.optimal_render_height,
-        }
-    }
-
     unsafe fn begin_frame(
         &self,
-        frame_index: u32,
+        viewport: &StreamlineViewport,
+        token: &crate::streamline::FrameToken,
         input: &DlssFrameInput,
         camera: CameraPose,
     ) -> Result<crate::streamline::FrameToken> {
-        let mut token = crate::streamline::FrameToken {
-            struct_size: size_of::<crate::streamline::FrameToken>() as u32,
-            abi_version: crate::streamline::ABI_VERSION,
-            ..Default::default()
-        };
-        let status = unsafe {
-            crate::streamline::streamline_bridge_get_frame_token(
-                self.bridge.as_raw(),
-                frame_index,
-                &mut token,
-            )
-        };
-        if status != crate::streamline::STATUS_OK {
-            return Err(streamline_error_with_detail(
-                "获取 Streamline frame token",
-                status,
-                self.bridge.last_error(),
-            ));
-        }
         let constants = dlss_streamline_constants(input, camera);
         let status = unsafe {
             crate::streamline::streamline_bridge_set_constants(
                 self.bridge.as_raw(),
-                &token,
-                &self.viewport,
+                token,
+                &viewport.viewport,
                 &constants,
             )
         };
@@ -384,11 +448,12 @@ impl StreamlineRuntime {
                 self.bridge.last_error(),
             ));
         }
-        Ok(token)
+        Ok(*token)
     }
 
     unsafe fn set_tags_and_evaluate(
         &self,
+        viewport: &StreamlineViewport,
         token: &crate::streamline::FrameToken,
         tags: &[crate::streamline::ResourceTag],
         command_list: &ID3D12GraphicsCommandList,
@@ -397,7 +462,7 @@ impl StreamlineRuntime {
             crate::streamline::streamline_bridge_set_tags(
                 self.bridge.as_raw(),
                 token,
-                &self.viewport,
+                &viewport.viewport,
                 tags.as_ptr(),
                 tags.len() as u32,
                 command_list.as_raw(),
@@ -414,7 +479,7 @@ impl StreamlineRuntime {
             crate::streamline::streamline_bridge_evaluate_dlss(
                 self.bridge.as_raw(),
                 token,
-                &self.viewport,
+                &viewport.viewport,
                 command_list.as_raw(),
             )
         };
@@ -429,16 +494,17 @@ impl StreamlineRuntime {
     }
 
     unsafe fn allocate_resources(
-        &mut self,
+        &self,
+        viewport: &mut StreamlineViewport,
         command_list: &ID3D12GraphicsCommandList,
     ) -> Result<()> {
-        if self.resources_allocated {
+        if viewport.resources_allocated {
             return Ok(());
         }
         let status = unsafe {
             crate::streamline::streamline_bridge_allocate_resources(
                 self.bridge.as_raw(),
-                &self.viewport,
+                &viewport.viewport,
                 command_list.as_raw(),
             )
         };
@@ -449,25 +515,41 @@ impl StreamlineRuntime {
                 self.bridge.last_error(),
             ));
         }
-        self.resources_allocated = true;
+        viewport.resources_allocated = true;
         Ok(())
     }
 
-    unsafe fn shutdown_after_gpu(self) {
-        if self.resources_allocated {
-            let status = unsafe {
-                crate::streamline::streamline_bridge_free_resources(
-                    self.bridge.as_raw(),
-                    &self.viewport,
-                )
-            };
-            if status != crate::streamline::STATUS_OK {
-                eprintln!("Streamline free resources 失败：status={status}");
-            }
+    unsafe fn free_resources(&self, viewport: &mut StreamlineViewport) {
+        if !viewport.resources_allocated {
+            return;
         }
+        let status = unsafe {
+            crate::streamline::streamline_bridge_free_resources(
+                self.bridge.as_raw(),
+                &viewport.viewport,
+            )
+        };
+        if status != crate::streamline::STATUS_OK {
+            eprintln!("Streamline free resources 失败：status={status}");
+        } else {
+            viewport.resources_allocated = false;
+        }
+    }
+
+    unsafe fn shutdown_after_gpu(self) {
         let status = self.bridge.shutdown();
         if status != crate::streamline::STATUS_OK {
             eprintln!("Streamline shutdown 失败：status={status}");
+        }
+    }
+}
+
+#[cfg(feature = "streamline")]
+impl StreamlineViewport {
+    fn optimal_extent(&self) -> Extent2D {
+        Extent2D {
+            width: self.optimal.optimal_render_width,
+            height: self.optimal.optimal_render_height,
         }
     }
 }
@@ -586,6 +668,18 @@ const RECONSTRUCTION_SPECULAR_HIT_DISTANCE_UAV_REGISTER: usize = 16;
 const RECONSTRUCTION_PRIMARY_EMISSIVE_UAV_REGISTER: usize = 17;
 const DLSS_DEPTH_UAV_REGISTER: usize = 18;
 const DLSS_MOTION_UAV_REGISTER: usize = 19;
+#[cfg(feature = "streamline")]
+const PCL_SIMULATION_START: u32 = 0;
+#[cfg(feature = "streamline")]
+const PCL_SIMULATION_END: u32 = 1;
+#[cfg(feature = "streamline")]
+const PCL_RENDER_SUBMIT_START: u32 = 2;
+#[cfg(feature = "streamline")]
+const PCL_RENDER_SUBMIT_END: u32 = 3;
+#[cfg(feature = "streamline")]
+const PCL_PRESENT_START: u32 = 4;
+#[cfg(feature = "streamline")]
+const PCL_PRESENT_END: u32 = 5;
 const STAGE3_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage3_triangle.dxil"));
 const TEMPORAL_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage6_temporal.dxil"));
 const ATROUS_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage6_atrous.dxil"));
@@ -741,6 +835,25 @@ pub struct Dx12Renderer {
     retired_generations: VecDeque<RetiredRenderResourceGeneration>,
     resolution_mode: ResolutionMode,
     upscaler: UpscalerMode,
+    reflex_mode: ReflexMode,
+    #[cfg(feature = "streamline")]
+    reflex_token_count: u64,
+    #[cfg(feature = "streamline")]
+    reflex_sleep_count: u64,
+    #[cfg(feature = "streamline")]
+    reflex_marker_counts: [u64; 6],
+    #[cfg(feature = "streamline")]
+    reflex_marker_order_errors: u64,
+    #[cfg(feature = "streamline")]
+    reflex_expected_marker: u32,
+    #[cfg(feature = "streamline")]
+    reflex_present_common_count: u64,
+    #[cfg(feature = "streamline")]
+    benchmark_reflex_token_baseline: u64,
+    #[cfg(feature = "streamline")]
+    benchmark_reflex_sleep_baseline: u64,
+    #[cfg(feature = "streamline")]
+    benchmark_reflex_marker_baseline: [u64; 6],
     dynamic_resolution: Option<DynamicResolutionController>,
     resolution_clock: Instant,
     requested_render_scale: RenderScale,
@@ -772,6 +885,10 @@ pub struct Dx12Renderer {
     nrd_compose_pipeline: ComputePipeline,
     #[cfg(feature = "streamline")]
     streamline: Option<StreamlineRuntime>,
+    #[cfg(feature = "streamline")]
+    active_streamline_viewport: Option<StreamlineViewport>,
+    #[cfg(feature = "streamline")]
+    next_streamline_viewport_id: u32,
     shader_reloader: ShaderReloader,
     frames: Vec<FrameContext>,
     command_list: ID3D12GraphicsCommandList,
@@ -844,11 +961,7 @@ impl Dx12Renderer {
             enable_debug_interfaces();
 
             #[cfg(feature = "streamline")]
-            let streamline_bridge = if config.upscaler.uses_streamline() {
-                Some(StreamlineRuntime::create_before_dxgi()?)
-            } else {
-                None
-            };
+            let streamline_bridge = Some(StreamlineRuntime::create_before_dxgi()?);
 
             let factory_flags = if cfg!(debug_assertions) {
                 DXGI_CREATE_FACTORY_DEBUG
@@ -872,8 +985,7 @@ impl Dx12Renderer {
                     bridge,
                     &device,
                     &adapter,
-                    config.upscaler,
-                    Extent2D { width, height },
+                    config.reflex_mode,
                 )?)
             } else {
                 None
@@ -1076,11 +1188,27 @@ impl Dx12Renderer {
                 ResolutionMode::Dynamic(_) => RenderScale::NATIVE,
             };
             #[cfg(feature = "streamline")]
-            let render_extent = if let Some(streamline) = streamline.as_ref() {
-                streamline.optimal_extent()
+            let mut next_streamline_viewport_id = 1;
+            #[cfg(feature = "streamline")]
+            let active_streamline_viewport = if config.upscaler.uses_streamline() {
+                let streamline = streamline.as_ref().ok_or_else(|| {
+                    streamline_error("DLSS runtime", crate::streamline::STATUS_NOT_INITIALIZED)
+                })?;
+                let viewport = streamline.create_viewport(
+                    config.upscaler,
+                    output_extent,
+                    next_streamline_viewport_id,
+                )?;
+                next_streamline_viewport_id = next_streamline_viewport_id.saturating_add(1);
+                Some(viewport)
             } else {
-                render_extent(output_extent, initial_scale)
+                None
             };
+            #[cfg(feature = "streamline")]
+            let render_extent = active_streamline_viewport.as_ref().map_or_else(
+                || render_extent(output_extent, initial_scale),
+                StreamlineViewport::optimal_extent,
+            );
             #[cfg(not(feature = "streamline"))]
             let render_extent = render_extent(output_extent, initial_scale);
             let initial_reconstruction_frame_state =
@@ -1127,6 +1255,25 @@ impl Dx12Renderer {
                 retired_generations: VecDeque::new(),
                 resolution_mode: config.resolution_mode,
                 upscaler: config.upscaler,
+                reflex_mode: config.reflex_mode,
+                #[cfg(feature = "streamline")]
+                reflex_token_count: 0,
+                #[cfg(feature = "streamline")]
+                reflex_sleep_count: 0,
+                #[cfg(feature = "streamline")]
+                reflex_marker_counts: [0; 6],
+                #[cfg(feature = "streamline")]
+                reflex_marker_order_errors: 0,
+                #[cfg(feature = "streamline")]
+                reflex_expected_marker: PCL_SIMULATION_START,
+                #[cfg(feature = "streamline")]
+                reflex_present_common_count: 0,
+                #[cfg(feature = "streamline")]
+                benchmark_reflex_token_baseline: 0,
+                #[cfg(feature = "streamline")]
+                benchmark_reflex_sleep_baseline: 0,
+                #[cfg(feature = "streamline")]
+                benchmark_reflex_marker_baseline: [0; 6],
                 dynamic_resolution: match config.resolution_mode {
                     ResolutionMode::Fixed(_) => None,
                     ResolutionMode::Dynamic(dynamic_config) => {
@@ -1171,6 +1318,10 @@ impl Dx12Renderer {
                 nrd_compose_pipeline,
                 #[cfg(feature = "streamline")]
                 streamline,
+                #[cfg(feature = "streamline")]
+                active_streamline_viewport,
+                #[cfg(feature = "streamline")]
+                next_streamline_viewport_id,
                 shader_reloader: ShaderReloader::new(),
                 frames,
                 command_list,
@@ -1271,6 +1422,8 @@ impl Dx12Renderer {
                 )?;
             }
             self.reclaim_retired_generations();
+            #[cfg(feature = "streamline")]
+            let frame_token = self.begin_reflex_frame()?;
             let output_extent = self.active_generation.output_extent;
             let render_extent = self.active_generation.render_extent;
             let previous_render_extent = if self.reset_history {
@@ -1308,6 +1461,10 @@ impl Dx12Renderer {
                     reset: self.reset_history,
                     delta_time_ms,
                 });
+            #[cfg(feature = "streamline")]
+            if let Some(token) = frame_token.as_ref() {
+                self.submit_pcl_marker(token, PCL_SIMULATION_END)?;
+            }
             let dlss_active =
                 self.upscaler.uses_streamline() && self.debug_view == DebugView::Final;
             #[cfg(feature = "streamline")]
@@ -1340,15 +1497,32 @@ impl Dx12Renderer {
                 .Reset(&frame.allocator, None::<&ID3D12PipelineState>)?;
 
             #[cfg(feature = "streamline")]
-            if let Some(streamline) = self.streamline.as_mut() {
-                streamline.allocate_resources(&self.command_list)?;
+            if let Some(token) = frame_token.as_ref() {
+                self.submit_pcl_marker(token, PCL_RENDER_SUBMIT_START)?;
+            }
+
+            #[cfg(feature = "streamline")]
+            if let (Some(streamline), Some(viewport)) = (
+                self.streamline.as_ref(),
+                self.active_streamline_viewport.as_mut(),
+            ) {
+                streamline.allocate_resources(viewport, &self.command_list)?;
             }
             #[cfg(feature = "streamline")]
-            let dlss_token = if let (Some(streamline), Some(input)) =
-                (self.streamline.as_ref(), dlss_frame_input.as_ref())
-            {
+            let dlss_token = if let (Some(streamline), Some(viewport), Some(input)) = (
+                self.streamline.as_ref(),
+                self.active_streamline_viewport.as_ref(),
+                dlss_frame_input.as_ref(),
+            ) {
+                let token = frame_token.as_ref().ok_or_else(|| {
+                    streamline_error(
+                        "DLSS frame token",
+                        crate::streamline::STATUS_NOT_INITIALIZED,
+                    )
+                })?;
                 Some(streamline.begin_frame(
-                    self.frame_number,
+                    viewport,
+                    token,
                     input,
                     CameraPose {
                         position: self.camera_position,
@@ -1808,7 +1982,17 @@ impl Dx12Renderer {
                     .ok_or_else(|| {
                         streamline_error("DLSS runtime", crate::streamline::STATUS_NOT_INITIALIZED)
                     })?
-                    .set_tags_and_evaluate(token, &tags, &self.command_list)?;
+                    .set_tags_and_evaluate(
+                        self.active_streamline_viewport.as_ref().ok_or_else(|| {
+                            streamline_error(
+                                "DLSS viewport",
+                                crate::streamline::STATUS_NOT_INITIALIZED,
+                            )
+                        })?,
+                        token,
+                        &tags,
+                        &self.command_list,
+                    )?;
                 // Streamline may bind its own descriptor heaps while recording.
                 // Restore the application's heaps before the next pass records.
                 self.command_list.SetDescriptorHeaps(&[
@@ -1911,8 +2095,17 @@ impl Dx12Renderer {
             let command_list: ID3D12CommandList = self.command_list.cast()?;
             self.command_queue
                 .ExecuteCommandLists(&[Some(command_list)]);
+            #[cfg(feature = "streamline")]
+            if let Some(token) = frame_token.as_ref() {
+                self.submit_pcl_marker(token, PCL_RENDER_SUBMIT_END)?;
+                self.submit_pcl_marker(token, PCL_PRESENT_START)?;
+            }
             if let Err(error) = self.swap_chain.Present(1, DXGI_PRESENT(0)).ok() {
                 return Err(device_removed_error(&self.device, error));
+            }
+            #[cfg(feature = "streamline")]
+            if let Some(token) = frame_token.as_ref() {
+                self.submit_pcl_marker(token, PCL_PRESENT_END)?;
             }
 
             let fence_value = self.next_fence_value;
@@ -2061,6 +2254,19 @@ impl Dx12Renderer {
             ManuallyDrop::drop(&mut source_location.pResource);
         }
 
+        #[cfg(feature = "streamline")]
+        let viewport_id = self
+            .active_streamline_viewport
+            .as_ref()
+            .map(|viewport| viewport.viewport.id);
+        #[cfg(not(feature = "streamline"))]
+        let viewport_id = None;
+        let streamline_sdk_version = if cfg!(feature = "streamline") {
+            Some("2.12.0".to_string())
+        } else {
+            None
+        };
+
         Ok(PendingCapture {
             readback,
             footprint,
@@ -2089,6 +2295,10 @@ impl Dx12Renderer {
                     .as_str()
                     .to_string(),
                 denoiser_backend: self.denoiser.as_str().to_string(),
+                upscaler_mode: self.upscaler.as_str().to_string(),
+                reflex_mode: self.reflex_mode_name().to_string(),
+                streamline_sdk_version,
+                viewport_id,
             },
             fence_value: 0,
         })
@@ -2215,6 +2425,25 @@ impl Dx12Renderer {
             self.previous_camera_yaw = self.camera_yaw;
             self.previous_camera_pitch = self.camera_pitch;
             let output_extent = Extent2D { width, height };
+            #[cfg(feature = "streamline")]
+            let new_streamline_viewport = if self.upscaler.uses_streamline() {
+                let runtime = self.streamline.as_ref().ok_or_else(|| {
+                    streamline_error("DLSS runtime", crate::streamline::STATUS_NOT_INITIALIZED)
+                })?;
+                let viewport_id = self.next_streamline_viewport_id;
+                let viewport =
+                    runtime.create_viewport(self.upscaler, output_extent, viewport_id)?;
+                self.next_streamline_viewport_id = viewport_id.saturating_add(1);
+                Some(viewport)
+            } else {
+                None
+            };
+            #[cfg(feature = "streamline")]
+            let new_render_extent = new_streamline_viewport.as_ref().map_or_else(
+                || render_extent(output_extent, self.requested_render_scale),
+                StreamlineViewport::optimal_extent,
+            );
+            #[cfg(not(feature = "streamline"))]
             let new_render_extent = render_extent(output_extent, self.requested_render_scale);
             if new_render_extent != self.active_generation.render_extent {
                 self.render_extent_change_count = self.render_extent_change_count.saturating_add(1);
@@ -2234,7 +2463,17 @@ impl Dx12Renderer {
                 },
             )?;
             self.next_generation_id = self.next_generation_id.saturating_add(1);
-            self.active_generation = new_generation;
+            let previous = std::mem::replace(&mut self.active_generation, new_generation);
+            #[cfg(feature = "streamline")]
+            let previous_streamline_viewport = std::mem::replace(
+                &mut self.active_streamline_viewport,
+                new_streamline_viewport,
+            );
+            self.retire_generation(
+                previous,
+                #[cfg(feature = "streamline")]
+                previous_streamline_viewport,
+            );
             if let Some(controller) = self.dynamic_resolution.as_mut() {
                 controller.reset_after_discontinuity(self.requested_render_scale);
             }
@@ -2242,11 +2481,7 @@ impl Dx12Renderer {
                 self.render_generation_create_count.saturating_add(1);
             self.render_generation_switch_count =
                 self.render_generation_switch_count.saturating_add(1);
-            let retired_count = self.retired_generations.len() as u64 + 1;
-            self.render_generation_retired_count = self
-                .render_generation_retired_count
-                .saturating_add(retired_count);
-            self.retired_generations.clear();
+            self.reclaim_retired_generations();
             self.create_render_targets()?;
             eprintln!(
                 "resize_diagnostic state=completed output={}x{} render={}x{} generation={} history_reset=1 idle_waits={}",
@@ -2316,10 +2551,49 @@ impl Dx12Renderer {
         Ok(())
     }
 
+    fn retire_generation(
+        &mut self,
+        resources: RenderResourceGeneration,
+        #[cfg(feature = "streamline")] mut streamline_viewport: Option<StreamlineViewport>,
+    ) {
+        let retire_fence = resources.last_used_fence;
+        if retire_fence == 0 {
+            #[cfg(feature = "streamline")]
+            if let (Some(runtime), Some(viewport)) =
+                (self.streamline.as_ref(), streamline_viewport.as_mut())
+            {
+                unsafe { runtime.free_resources(viewport) };
+            }
+            drop(resources);
+            return;
+        }
+        self.retired_generations
+            .push_back(RetiredRenderResourceGeneration {
+                retire_fence,
+                resources,
+                #[cfg(feature = "streamline")]
+                streamline_viewport,
+            });
+        self.retired_generation_high_watermark = self
+            .retired_generation_high_watermark
+            .max(self.retired_generations.len() as u64);
+        if self.benchmark_measurement_active {
+            self.benchmark_retired_high_watermark = self
+                .benchmark_retired_high_watermark
+                .max(self.retired_generations.len() as u64);
+        }
+    }
+
     /// Request a fixed internal scale at a frame boundary. New resources and
     /// descriptors are fully built before the active generation is replaced;
     /// the old generation remains owned until its submission fence completes.
     pub fn set_render_scale(&mut self, requested: RenderScale) -> Result<()> {
+        if self.upscaler.uses_streamline() {
+            return Err(WindowsError::new(
+                windows::core::HRESULT(0x80070057_u32 as i32),
+                "DLSS/DLAA 内部尺寸由 Streamline optimal settings 决定，不能手动设置 render scale",
+            ));
+        }
         let output_extent = self.active_generation.output_extent;
         let new_render_extent = match classify_render_extent_change(
             self.minimized,
@@ -2368,21 +2642,13 @@ impl Dx12Renderer {
         self.render_generation_create_count = self.render_generation_create_count.saturating_add(1);
         self.render_generation_switch_count = self.render_generation_switch_count.saturating_add(1);
         let previous = std::mem::replace(&mut self.active_generation, new_generation);
-        if previous.last_used_fence != 0 {
-            self.retired_generations
-                .push_back(RetiredRenderResourceGeneration {
-                    retire_fence: previous.last_used_fence,
-                    resources: previous,
-                });
-            self.retired_generation_high_watermark = self
-                .retired_generation_high_watermark
-                .max(self.retired_generations.len() as u64);
-            if self.benchmark_measurement_active {
-                self.benchmark_retired_high_watermark = self
-                    .benchmark_retired_high_watermark
-                    .max(self.retired_generations.len() as u64);
-            }
-        }
+        #[cfg(feature = "streamline")]
+        let previous_streamline_viewport = self.active_streamline_viewport.take();
+        self.retire_generation(
+            previous,
+            #[cfg(feature = "streamline")]
+            previous_streamline_viewport,
+        );
         self.render_extent_change_count = self.render_extent_change_count.saturating_add(1);
         self.request_history_reset();
         self.accumulated_frames = 0;
@@ -2429,6 +2695,102 @@ impl Dx12Renderer {
                 || old_extent == self.active_generation.render_extent
         );
         Ok(())
+    }
+
+    /// Switch the Streamline DLSS/DLAA viewport transactionally. The new
+    /// viewport and render generation are completely prepared before the
+    /// active pair is replaced; the previous pair is fence-retired together.
+    pub fn cycle_upscaler(&mut self) -> Result<()> {
+        #[cfg(not(feature = "streamline"))]
+        {
+            Err(WindowsError::new(
+                windows::core::HRESULT(0x80070057_u32 as i32),
+                "F4 切换 DLSS/DLAA 需要使用 cargo run --features streamline 构建",
+            ))
+        }
+
+        #[cfg(feature = "streamline")]
+        {
+            let old = self.upscaler;
+            let next = old.next_mode();
+            let output_extent = self.active_generation.output_extent;
+            let new_streamline_viewport = if next.uses_streamline() {
+                let runtime = self.streamline.as_ref().ok_or_else(|| {
+                    streamline_error("DLSS runtime", crate::streamline::STATUS_NOT_INITIALIZED)
+                })?;
+                let viewport_id = self.next_streamline_viewport_id;
+                let viewport =
+                    unsafe { runtime.create_viewport(next, output_extent, viewport_id) }?;
+                self.next_streamline_viewport_id = viewport_id.saturating_add(1);
+                Some(viewport)
+            } else {
+                None
+            };
+            let new_render_extent = new_streamline_viewport.as_ref().map_or_else(
+                || render_extent(output_extent, self.requested_render_scale),
+                StreamlineViewport::optimal_extent,
+            );
+            let generation_id = self.next_generation_id;
+            let new_generation = RenderResourceGeneration::new(
+                &self.device,
+                &self._textures,
+                &self._scene_geometry,
+                &self._acceleration_structures,
+                RenderGenerationDesc {
+                    output_extent,
+                    render_extent: new_render_extent,
+                    id: generation_id,
+                    with_nrd: self.denoiser == DenoiserBackend::NrdReblur,
+                    with_dlss: next.uses_streamline(),
+                },
+            )
+            .map_err(|error| {
+                WindowsError::new(
+                    windows::core::HRESULT(0x80004005_u32 as i32),
+                    format!("创建 upscaler generation {generation_id} 失败：{error}"),
+                )
+            })?;
+            let previous = std::mem::replace(&mut self.active_generation, new_generation);
+            let previous_streamline_viewport = std::mem::replace(
+                &mut self.active_streamline_viewport,
+                new_streamline_viewport,
+            );
+            let retire_fence = previous.last_used_fence;
+            self.retire_generation(previous, previous_streamline_viewport);
+            self.next_generation_id = self.next_generation_id.saturating_add(1);
+            self.upscaler = next;
+            self.render_generation_create_count =
+                self.render_generation_create_count.saturating_add(1);
+            self.render_generation_switch_count =
+                self.render_generation_switch_count.saturating_add(1);
+            self.history_index = 0;
+            self.accumulated_frames = 0;
+            self.previous_camera_position = self.camera_position;
+            self.previous_camera_yaw = self.camera_yaw;
+            self.previous_camera_pitch = self.camera_pitch;
+            self.request_history_reset();
+            self.reconstruction_frame_state = self
+                .reconstruction_frame_state
+                .reset_for_extent(self.render_width(), self.render_height());
+            self.reclaim_retired_generations();
+            let viewport_id = self
+                .active_streamline_viewport
+                .as_ref()
+                .map_or(0, |viewport| viewport.viewport.id);
+            eprintln!(
+                "upscaler_switch from={} to={} generation={} viewport={} output={}x{} render={}x{} history_reset=1 idle_waits=0 retire_fence={}",
+                old,
+                next,
+                self.active_generation.id,
+                viewport_id,
+                output_extent.width,
+                output_extent.height,
+                new_render_extent.width,
+                new_render_extent.height,
+                retire_fence,
+            );
+            Ok(())
+        }
     }
 
     /// Switch denoisers at a frame boundary without waiting for the GPU. The
@@ -2478,21 +2840,11 @@ impl Dx12Renderer {
             let old_name = self.denoiser.as_str();
             let previous = std::mem::replace(&mut self.active_generation, new_generation);
             let retire_fence = previous.last_used_fence;
-            if retire_fence != 0 {
-                self.retired_generations
-                    .push_back(RetiredRenderResourceGeneration {
-                        retire_fence,
-                        resources: previous,
-                    });
-                self.retired_generation_high_watermark = self
-                    .retired_generation_high_watermark
-                    .max(self.retired_generations.len() as u64);
-                if self.benchmark_measurement_active {
-                    self.benchmark_retired_high_watermark = self
-                        .benchmark_retired_high_watermark
-                        .max(self.retired_generations.len() as u64);
-                }
-            }
+            self.retire_generation(
+                previous,
+                #[cfg(feature = "streamline")]
+                None,
+            );
             self.next_generation_id = self.next_generation_id.saturating_add(1);
             self.render_generation_create_count =
                 self.render_generation_create_count.saturating_add(1);
@@ -2533,6 +2885,15 @@ impl Dx12Renderer {
             if let Some(retired) = self.retired_generations.pop_front() {
                 self.render_generation_retired_count =
                     self.render_generation_retired_count.saturating_add(1);
+                #[cfg(feature = "streamline")]
+                {
+                    let mut viewport = retired.streamline_viewport;
+                    if let (Some(runtime), Some(viewport)) =
+                        (self.streamline.as_ref(), viewport.as_mut())
+                    {
+                        unsafe { runtime.free_resources(viewport) };
+                    }
+                }
                 drop(retired.resources);
             }
         }
@@ -2540,6 +2901,56 @@ impl Dx12Renderer {
 
     pub fn gpu_time_ms(&self) -> f64 {
         self.gpu_profiler.time_ms(GpuPass::Total)
+    }
+
+    #[cfg(feature = "streamline")]
+    unsafe fn begin_reflex_frame(&mut self) -> Result<Option<crate::streamline::FrameToken>> {
+        let Some(streamline) = self.streamline.as_ref() else {
+            return Ok(None);
+        };
+        let token_needed = streamline.reflex_supported()
+            || streamline.pcl_supported()
+            || self.upscaler.uses_streamline();
+        if !token_needed {
+            return Ok(None);
+        }
+        let token = unsafe { streamline.get_frame_token(self.frame_number)? };
+        self.reflex_token_count = self.reflex_token_count.saturating_add(1);
+        if streamline.reflex_supported() {
+            unsafe { streamline.reflex_sleep(&token)? };
+            self.reflex_sleep_count = self.reflex_sleep_count.saturating_add(1);
+        }
+        if streamline.pcl_supported() {
+            unsafe { self.submit_pcl_marker(&token, PCL_SIMULATION_START)? };
+        }
+        Ok(Some(token))
+    }
+
+    #[cfg(feature = "streamline")]
+    unsafe fn submit_pcl_marker(
+        &mut self,
+        token: &crate::streamline::FrameToken,
+        marker: u32,
+    ) -> Result<()> {
+        let Some(streamline) = self.streamline.as_ref() else {
+            return Ok(());
+        };
+        if !streamline.pcl_supported() {
+            return Ok(());
+        }
+        if marker != self.reflex_expected_marker {
+            self.reflex_marker_order_errors = self.reflex_marker_order_errors.saturating_add(1);
+        }
+        unsafe { streamline.pcl_marker(token, marker)? };
+        if let Some(count) = self.reflex_marker_counts.get_mut(marker as usize) {
+            *count = count.saturating_add(1);
+        }
+        self.reflex_expected_marker = if marker == PCL_PRESENT_END {
+            PCL_SIMULATION_START
+        } else {
+            marker.saturating_add(1)
+        };
+        Ok(())
     }
 
     pub fn gpu_time_p95_ms(&self) -> f64 {
@@ -2560,6 +2971,26 @@ impl Dx12Renderer {
 
     pub fn denoiser_name(&self) -> &'static str {
         self.denoiser.as_str()
+    }
+
+    pub fn upscaler_name(&self) -> &'static str {
+        self.upscaler.as_str()
+    }
+
+    pub fn reflex_mode_name(&self) -> &'static str {
+        #[cfg(feature = "streamline")]
+        if self
+            .streamline
+            .as_ref()
+            .is_some_and(StreamlineRuntime::reflex_supported)
+        {
+            return self.reflex_mode.as_str();
+        }
+        "unavailable"
+    }
+
+    pub fn dlss_evaluate_time_ms(&self) -> f64 {
+        self.gpu_profiler.time_ms(GpuPass::DlssEvaluate)
     }
 
     pub fn command_recording_mode_name(&self) -> &'static str {
@@ -2613,6 +3044,12 @@ impl Dx12Renderer {
         }
         self.benchmark_render_min = self.active_generation.render_extent;
         self.benchmark_render_max = self.active_generation.render_extent;
+        #[cfg(feature = "streamline")]
+        {
+            self.benchmark_reflex_token_baseline = self.reflex_token_count;
+            self.benchmark_reflex_sleep_baseline = self.reflex_sleep_count;
+            self.benchmark_reflex_marker_baseline = self.reflex_marker_counts;
+        }
         self.benchmark_measurement_active = true;
     }
 
@@ -2693,6 +3130,13 @@ impl Dx12Renderer {
     }
 
     pub fn benchmark_json(&self, duration_seconds: u64, warmup_valid_frames: u32) -> String {
+        #[cfg(feature = "streamline")]
+        let dlss_viewport_id = self
+            .active_streamline_viewport
+            .as_ref()
+            .map(|viewport| viewport.viewport.id);
+        #[cfg(not(feature = "streamline"))]
+        let dlss_viewport_id = None;
         benchmark_json_line(
             BenchmarkJsonContext {
                 gpu_name: &self.gpu_name,
@@ -2737,6 +3181,8 @@ impl Dx12Renderer {
                 denoiser_backend: self.denoiser.as_str(),
                 upscaler_mode: self.upscaler.as_str(),
                 dlss_optimal: self.dlss_optimal_json(),
+                dlss_viewport_id,
+                reflex: self.reflex_json(),
                 denoiser_switch_count: self
                     .denoiser_switch_count
                     .saturating_sub(self.benchmark_denoiser_switch_baseline),
@@ -2766,18 +3212,82 @@ impl Dx12Renderer {
 
     fn dlss_optimal_json(&self) -> serde_json::Value {
         #[cfg(feature = "streamline")]
-        if let Some(streamline) = self.streamline.as_ref() {
+        if let Some(viewport) = self.active_streamline_viewport.as_ref() {
             return serde_json::json!({
-                "optimal_render_width": streamline.optimal.optimal_render_width,
-                "optimal_render_height": streamline.optimal.optimal_render_height,
-                "render_width_min": streamline.optimal.render_width_min,
-                "render_height_min": streamline.optimal.render_height_min,
-                "render_width_max": streamline.optimal.render_width_max,
-                "render_height_max": streamline.optimal.render_height_max,
-                "optimal_sharpness": streamline.optimal.optimal_sharpness,
+                "optimal_render_width": viewport.optimal.optimal_render_width,
+                "optimal_render_height": viewport.optimal.optimal_render_height,
+                "render_width_min": viewport.optimal.render_width_min,
+                "render_height_min": viewport.optimal.render_height_min,
+                "render_width_max": viewport.optimal.render_width_max,
+                "render_height_max": viewport.optimal.render_height_max,
+                "optimal_sharpness": viewport.optimal.optimal_sharpness,
             });
         }
         serde_json::Value::Null
+    }
+
+    fn reflex_json(&self) -> serde_json::Value {
+        #[cfg(feature = "streamline")]
+        {
+            let (reflex_supported, pcl_supported) =
+                self.streamline.as_ref().map_or((false, false), |runtime| {
+                    (runtime.reflex_supported(), runtime.pcl_supported())
+                });
+            let active_mode = if reflex_supported {
+                self.reflex_mode.as_str()
+            } else {
+                "unavailable"
+            };
+            serde_json::json!({
+                "compiled": true,
+                "sdk_version": crate::streamline::SDK_VERSION,
+                "support": {
+                    "reflex": reflex_supported,
+                    "pcl": pcl_supported,
+                },
+                "requested_mode": self.reflex_mode.as_str(),
+                "active_mode": active_mode,
+                "token_count": self.reflex_token_count.saturating_sub(self.benchmark_reflex_token_baseline),
+                "sleep_count": self.reflex_sleep_count.saturating_sub(self.benchmark_reflex_sleep_baseline),
+                "marker_counts": {
+                    "simulation_start": self.reflex_marker_counts[0].saturating_sub(self.benchmark_reflex_marker_baseline[0]),
+                    "simulation_end": self.reflex_marker_counts[1].saturating_sub(self.benchmark_reflex_marker_baseline[1]),
+                    "render_submit_start": self.reflex_marker_counts[2].saturating_sub(self.benchmark_reflex_marker_baseline[2]),
+                    "render_submit_end": self.reflex_marker_counts[3].saturating_sub(self.benchmark_reflex_marker_baseline[3]),
+                    "present_start": self.reflex_marker_counts[4].saturating_sub(self.benchmark_reflex_marker_baseline[4]),
+                    "present_end": self.reflex_marker_counts[5].saturating_sub(self.benchmark_reflex_marker_baseline[5]),
+                },
+                "present_common_count": self.reflex_present_common_count,
+                "order_errors": self.reflex_marker_order_errors,
+                "report_available": false,
+            })
+        }
+        #[cfg(not(feature = "streamline"))]
+        {
+            serde_json::json!({
+                "compiled": false,
+                "sdk_version": serde_json::Value::Null,
+                "support": {
+                    "reflex": false,
+                    "pcl": false,
+                },
+                "requested_mode": self.reflex_mode.as_str(),
+                "active_mode": "unavailable",
+                "token_count": 0,
+                "sleep_count": 0,
+                "marker_counts": {
+                    "simulation_start": 0,
+                    "simulation_end": 0,
+                    "render_submit_start": 0,
+                    "render_submit_end": 0,
+                    "present_start": 0,
+                    "present_end": 0,
+                },
+                "present_common_count": 0,
+                "order_errors": 0,
+                "report_available": false,
+            })
+        }
     }
 }
 
@@ -2901,6 +3411,8 @@ struct BenchmarkJsonContext<'a> {
     denoiser_backend: &'a str,
     upscaler_mode: &'a str,
     dlss_optimal: serde_json::Value,
+    dlss_viewport_id: Option<u32>,
+    reflex: serde_json::Value,
     denoiser_switch_count: u64,
     nrd_compiled: bool,
 }
@@ -2942,6 +3454,8 @@ fn benchmark_json_line(
         denoiser_backend,
         upscaler_mode,
         dlss_optimal,
+        dlss_viewport_id,
+        reflex,
         denoiser_switch_count,
         nrd_compiled,
     } = context;
@@ -2995,7 +3509,9 @@ fn benchmark_json_line(
         "upscaler": {
             "mode": upscaler_mode,
             "dlss_optimal": dlss_optimal,
+            "viewport_id": dlss_viewport_id,
         },
+        "reflex": reflex,
         "denoiser": {
             "requested": denoiser_backend,
             "active": denoiser_backend,
@@ -3131,7 +3647,14 @@ impl Dx12Renderer {
     }
 
     pub fn cycle_debug_view(&mut self) {
+        let previous = self.debug_view;
         self.debug_view = self.debug_view.next();
+        if self.upscaler.uses_streamline()
+            && (previous == DebugView::Final || self.debug_view == DebugView::Final)
+        {
+            self.request_history_reset();
+            self.accumulated_frames = 0;
+        }
         eprintln!(
             "debug_view_changed index={} name={}",
             self.debug_view.index(),
@@ -3759,6 +4282,15 @@ impl Drop for Dx12Renderer {
         unsafe {
             let _ = self.wait_for_gpu();
             #[cfg(feature = "streamline")]
+            self.reclaim_retired_generations();
+            #[cfg(feature = "streamline")]
+            if let (Some(runtime), Some(viewport)) = (
+                self.streamline.as_ref(),
+                self.active_streamline_viewport.as_mut(),
+            ) {
+                runtime.free_resources(viewport);
+            }
+            #[cfg(feature = "streamline")]
             if let Some(streamline) = self.streamline.take() {
                 streamline.shutdown_after_gpu();
             }
@@ -4112,6 +4644,8 @@ mod tests {
                 denoiser_backend: "svgf",
                 upscaler_mode: "native",
                 dlss_optimal: serde_json::Value::Null,
+                dlss_viewport_id: None,
+                reflex: serde_json::Value::Null,
                 denoiser_switch_count: 0,
                 nrd_compiled: false,
             },

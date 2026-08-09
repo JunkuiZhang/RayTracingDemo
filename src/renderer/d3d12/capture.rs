@@ -26,6 +26,10 @@ pub struct CaptureMetadata {
     pub command_recording_mode: String,
     pub acceleration_structure_mode: String,
     pub denoiser_backend: String,
+    pub upscaler_mode: String,
+    pub reflex_mode: String,
+    pub streamline_sdk_version: Option<String>,
+    pub viewport_id: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -174,6 +178,12 @@ pub fn capture_json_line(metadata: &CaptureMetadata, png_bytes: u64) -> String {
             "command_recording": metadata.command_recording_mode,
             "acceleration_structure": metadata.acceleration_structure_mode,
             "denoiser": metadata.denoiser_backend,
+            "upscaler": metadata.upscaler_mode,
+            "reflex": metadata.reflex_mode,
+        },
+        "streamline": {
+            "sdk_version": metadata.streamline_sdk_version,
+            "viewport_id": metadata.viewport_id,
         },
         "png_bytes": png_bytes,
     })
@@ -230,6 +240,10 @@ mod tests {
             command_recording_mode: "optimized".to_string(),
             acceleration_structure_mode: "baseline".to_string(),
             denoiser_backend: "svgf".to_string(),
+            upscaler_mode: "native".to_string(),
+            reflex_mode: "unavailable".to_string(),
+            streamline_sdk_version: None,
+            viewport_id: None,
         };
         let value: serde_json::Value =
             serde_json::from_str(&capture_json_line(&metadata, 256)).unwrap();

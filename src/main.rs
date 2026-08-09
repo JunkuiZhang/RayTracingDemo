@@ -103,11 +103,12 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                 | "--acceleration-structure-mode"
                 | "--denoiser"
                 | "--upscaler"
+                | "--reflex-mode"
         )
     });
     if cpu_reference_requested && realtime_requested {
         return Err(
-            "--cpu-reference 不能与实时渲染选项（--model、--animate-model、--benchmark-seconds、--capture-output、--capture-after-spp、--debug-view、--atrous-mode、--output-size、--render-scale、--dynamic-resolution、--target-gpu-ms、--command-recording-mode、--acceleration-structure-mode、--denoiser、--upscaler）同时使用"
+            "--cpu-reference 不能与实时渲染选项（--model、--animate-model、--benchmark-seconds、--capture-output、--capture-after-spp、--debug-view、--atrous-mode、--output-size、--render-scale、--dynamic-resolution、--target-gpu-ms、--command-recording-mode、--acceleration-structure-mode、--denoiser、--upscaler、--reflex-mode）同时使用"
                 .to_string(),
         );
     }
@@ -217,6 +218,10 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                 "--upscaler" => {
                     let value = arguments.next().ok_or("--upscaler 缺少模式")?;
                     config.upscaler = parse_upscaler_mode(&value)?;
+                }
+                "--reflex-mode" => {
+                    let value = arguments.next().ok_or("--reflex-mode 缺少模式")?;
+                    config.reflex_mode = parse_reflex_mode(&value)?;
                 }
                 _ => return Err(format!("未知参数：{argument}")),
             }
@@ -411,6 +416,17 @@ fn parse_upscaler_mode(value: &str) -> Result<upscaler::UpscalerMode, String> {
     }
 }
 
+fn parse_reflex_mode(value: &str) -> Result<realtime::ReflexMode, String> {
+    match value {
+        "off" => Ok(realtime::ReflexMode::Off),
+        "on" => Ok(realtime::ReflexMode::On),
+        "on-boost" => Ok(realtime::ReflexMode::OnBoost),
+        _ => Err(format!(
+            "无效的 Reflex 模式：{value}（仅支持 off、on 或 on-boost）"
+        )),
+    }
+}
+
 fn print_help() {
     println!(
         "RayTracingDemo\n\n\
@@ -436,6 +452,7 @@ fn print_help() {
          --acceleration-structure-mode <模式> AS 策略：baseline 或 optimized，默认 baseline\n  \
          --denoiser <后端>       重建后端：svgf 或 nrd-reblur，默认 svgf\n  \
          --upscaler <模式>       上采样：native、dlaa、dlss-quality、dlss-balanced、dlss-performance，默认 native\n  \
+         --reflex-mode <模式>    Reflex：off、on 或 on-boost，默认 on；feature-off 时 unavailable\n  \\
          --help, -h             显示帮助"
     );
 }
@@ -743,6 +760,31 @@ mod tests {
         }
         assert!(parse_upscaler_mode("invalid").is_err());
         assert!(parse_arguments(["--upscaler".to_string()]).is_err());
+    }
+
+    #[test]
+    fn reflex_defaults_and_parses_all_modes() {
+        assert!(matches!(
+            parse_arguments(Vec::<String>::new()),
+            Ok(Command::Realtime(RealtimeConfig {
+                reflex_mode: crate::realtime::ReflexMode::On,
+                ..
+            }))
+        ));
+        for (value, expected) in [
+            ("off", crate::realtime::ReflexMode::Off),
+            ("on", crate::realtime::ReflexMode::On),
+            ("on-boost", crate::realtime::ReflexMode::OnBoost),
+        ] {
+            let command =
+                parse_arguments(["--reflex-mode".to_string(), value.to_string()]).unwrap();
+            assert!(matches!(
+                command,
+                Command::Realtime(RealtimeConfig { reflex_mode, .. }) if reflex_mode == expected
+            ));
+        }
+        assert!(parse_reflex_mode("invalid").is_err());
+        assert!(parse_arguments(["--reflex-mode".to_string()]).is_err());
     }
 
     #[test]

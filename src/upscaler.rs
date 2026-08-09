@@ -41,6 +41,16 @@ impl UpscalerMode {
         !self.is_native()
     }
 
+    pub const fn next_mode(self) -> Self {
+        match self {
+            Self::Native => Self::Dlaa,
+            Self::Dlaa => Self::DlssQuality,
+            Self::DlssQuality => Self::DlssBalanced,
+            Self::DlssBalanced => Self::DlssPerformance,
+            Self::DlssPerformance => Self::Native,
+        }
+    }
+
     /// Return a stable mode number for the later Streamline adapter.
     pub const fn dlss_mode(self) -> Option<u32> {
         match self {
@@ -353,6 +363,22 @@ mod tests {
         assert!(UpscalerMode::Dlaa.uses_streamline());
         assert_eq!(UpscalerMode::DlssBalanced.dlss_mode(), Some(3));
         assert_eq!(UpscalerMode::Native.dlss_mode(), None);
+    }
+
+    #[test]
+    fn mode_cycle_is_deterministic_and_wraps_without_gpu_state() {
+        let mut mode = UpscalerMode::Native;
+        let expected = [
+            UpscalerMode::Dlaa,
+            UpscalerMode::DlssQuality,
+            UpscalerMode::DlssBalanced,
+            UpscalerMode::DlssPerformance,
+            UpscalerMode::Native,
+        ];
+        for next in expected {
+            mode = mode.next_mode();
+            assert_eq!(mode, next);
+        }
     }
 
     #[test]
