@@ -507,10 +507,11 @@ impl GpuProfiler {
     pub fn invalidate(&mut self) {
         self.last_sample = None;
         self.clear_statistics();
-        if self.benchmark.is_some() {
-            self.benchmark = Some(BenchmarkAccumulator::default());
-            self.command_recording = Some(CommandRecordingAccumulator::default());
-        }
+        // Resize and shader reload create a timing discontinuity for the UI,
+        // but they do not restart the application's benchmark timer or the
+        // renderer-side measurement baselines. Preserve the full benchmark
+        // accumulators so every JSON field describes the same interval;
+        // begin_benchmark_measurement is the only explicit epoch reset.
     }
 
     pub fn clear_statistics(&mut self) {

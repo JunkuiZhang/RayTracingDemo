@@ -489,7 +489,9 @@ mod tests {
             .is_err()
         );
         assert!(parse_arguments(["--target-gpu-ms".to_string(), "14.5".to_string(),]).is_err());
-        for value in ["NaN", "inf", "-inf", "3.9", "50.1", "text"] {
+        for value in [
+            "NaN", "inf", "-inf", "3.9", "3.9996", "50.0004", "50.1", "text",
+        ] {
             assert!(
                 parse_arguments([
                     "--dynamic-resolution".to_string(),

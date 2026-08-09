@@ -5,7 +5,7 @@
 - 方案日期：2026-08-09。
 - 目标硬件：NVIDIA GeForce RTX 4060 Laptop GPU。
 - 代码基线：`3728426`（8E-1 首轮 review 修复完成）。
-- 当前状态：**方案已完成，代码尚未实现，等待 Luna 按工作包实现后由 Codex review。**
+- 当前状态：**代码、首轮 RTX 4060 Laptop 真机数据和 Codex review 修复已完成；F1/F2 人工确认及无 output resize 污染的 600 秒 idle-wait 复核转入 8G，8E-2 尚不标记最终验收完成。**
 - 前置工作：8E-1 已具备独立 `output_extent`/`render_extent`、固定 scale、ToneMap/F1 重采样、事务性 generation 创建、按 fence 退休旧代和相关遥测。
 
 本工作包只增加由已完成 GPU Total timestamp 驱动的动态 scale 控制器。它不改变路径追踪、随机采样、Temporal、À-Trous 或 ToneMap 算法，也不关闭 8E-1 尚未完成的人工画质与长时验收债务。

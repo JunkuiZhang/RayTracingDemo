@@ -1342,60 +1342,87 @@ impl Dx12Renderer {
     }
 
     fn dynamic_resolution_json(&self) -> serde_json::Value {
-        let Some(controller) = self.dynamic_resolution.as_ref() else {
-            return serde_json::Value::Null;
-        };
-        let config = controller.config();
-        let state = controller.snapshot();
-        let direction = state.last_direction.map(|direction| match direction {
-            DynamicResolutionDirection::Down => "down",
-            DynamicResolutionDirection::Up => "up",
-        });
-        let lifetime_switches = state.downscale_count.saturating_add(state.upscale_count);
-        serde_json::json!({
-            "config": {
-                "target_gpu_ms": config.target_gpu_time_ms(),
-                "high_threshold_ms": f64::from(config.high_threshold_us()) / 1_000.0,
-                "low_threshold_ms": f64::from(config.low_threshold_us()) / 1_000.0,
-                "min_scale": f64::from(DynamicResolutionConfig::DYNAMIC_MIN_SCALE_MILLI) / 1_000.0,
-                "max_scale": f64::from(DynamicResolutionConfig::DYNAMIC_MAX_SCALE_MILLI) / 1_000.0,
-                "down_streak": DynamicResolutionConfig::DOWN_STREAK,
-                "up_streak": DynamicResolutionConfig::UP_STREAK,
-                "down_step": f64::from(DynamicResolutionConfig::DOWN_STEP_MILLI) / 1_000.0,
-                "up_step": f64::from(DynamicResolutionConfig::UP_STEP_MILLI) / 1_000.0,
-                "cooldown_valid_samples": DynamicResolutionConfig::COOLDOWN_VALID_SAMPLES,
-                "cooldown_seconds": DynamicResolutionConfig::COOLDOWN_TIME.as_secs_f64(),
-                "upscale_warmup": DynamicResolutionConfig::UPSCALE_WARMUP,
+        dynamic_resolution_json_value(
+            self.dynamic_resolution.as_ref(),
+            DynamicResolutionBenchmarkBaseline {
+                valid_samples: self.benchmark_dynamic_valid_samples_baseline,
+                stale_samples: self.benchmark_dynamic_stale_samples_baseline,
+                downscale_count: self.benchmark_dynamic_downscale_baseline,
+                upscale_count: self.benchmark_dynamic_upscale_baseline,
+                at_min_count: self.benchmark_dynamic_at_min_baseline,
+                at_max_count: self.benchmark_dynamic_at_max_baseline,
             },
-            "state": {
-                "current_requested_scale": state.current_scale.get(),
-                "cooldown_valid_samples_remaining": state.cooldown_valid_samples_remaining,
-                "upscale_warmup_remaining": state.upscale_warmup_remaining,
-                "over_budget_streak": state.over_budget_streak,
-                "under_budget_streak": state.under_budget_streak,
-                "last_direction": direction,
-                "last_trigger_total_ms": state.last_trigger_total_us.map(|value| f64::from(value) / 1_000.0),
-            },
-            "measurement": {
-                "valid_samples": state.valid_samples_consumed.saturating_sub(self.benchmark_dynamic_valid_samples_baseline),
-                "stale_generation_samples_ignored": state.stale_generation_samples_ignored.saturating_sub(self.benchmark_dynamic_stale_samples_baseline),
-                "downscale_count": state.downscale_count.saturating_sub(self.benchmark_dynamic_downscale_baseline),
-                "upscale_count": state.upscale_count.saturating_sub(self.benchmark_dynamic_upscale_baseline),
-                "switch_count": lifetime_switches.saturating_sub(self.benchmark_dynamic_downscale_baseline.saturating_add(self.benchmark_dynamic_upscale_baseline)),
-                "at_min_count": state.at_min_count.saturating_sub(self.benchmark_dynamic_at_min_baseline),
-                "at_max_count": state.at_max_count.saturating_sub(self.benchmark_dynamic_at_max_baseline),
-            },
-            "lifetime": {
-                "valid_samples": state.valid_samples_consumed,
-                "stale_generation_samples_ignored": state.stale_generation_samples_ignored,
-                "downscale_count": state.downscale_count,
-                "upscale_count": state.upscale_count,
-                "switch_count": lifetime_switches,
-                "at_min_count": state.at_min_count,
-                "at_max_count": state.at_max_count,
-            },
-        })
+        )
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct DynamicResolutionBenchmarkBaseline {
+    valid_samples: u64,
+    stale_samples: u64,
+    downscale_count: u64,
+    upscale_count: u64,
+    at_min_count: u64,
+    at_max_count: u64,
+}
+
+fn dynamic_resolution_json_value(
+    controller: Option<&DynamicResolutionController>,
+    baseline: DynamicResolutionBenchmarkBaseline,
+) -> serde_json::Value {
+    let Some(controller) = controller else {
+        return serde_json::Value::Null;
+    };
+    let config = controller.config();
+    let state = controller.snapshot();
+    let direction = state.last_direction.map(|direction| match direction {
+        DynamicResolutionDirection::Down => "down",
+        DynamicResolutionDirection::Up => "up",
+    });
+    let lifetime_switches = state.downscale_count.saturating_add(state.upscale_count);
+    serde_json::json!({
+        "config": {
+            "target_gpu_ms": config.target_gpu_time_ms(),
+            "high_threshold_ms": f64::from(config.high_threshold_us()) / 1_000.0,
+            "low_threshold_ms": f64::from(config.low_threshold_us()) / 1_000.0,
+            "min_scale": f64::from(DynamicResolutionConfig::DYNAMIC_MIN_SCALE_MILLI) / 1_000.0,
+            "max_scale": f64::from(DynamicResolutionConfig::DYNAMIC_MAX_SCALE_MILLI) / 1_000.0,
+            "down_streak": DynamicResolutionConfig::DOWN_STREAK,
+            "up_streak": DynamicResolutionConfig::UP_STREAK,
+            "down_step": f64::from(DynamicResolutionConfig::DOWN_STEP_MILLI) / 1_000.0,
+            "up_step": f64::from(DynamicResolutionConfig::UP_STEP_MILLI) / 1_000.0,
+            "cooldown_valid_samples": DynamicResolutionConfig::COOLDOWN_VALID_SAMPLES,
+            "cooldown_seconds": DynamicResolutionConfig::COOLDOWN_TIME.as_secs_f64(),
+            "upscale_warmup": DynamicResolutionConfig::UPSCALE_WARMUP,
+        },
+        "state": {
+            "current_requested_scale": state.current_scale.get(),
+            "cooldown_valid_samples_remaining": state.cooldown_valid_samples_remaining,
+            "upscale_warmup_remaining": state.upscale_warmup_remaining,
+            "over_budget_streak": state.over_budget_streak,
+            "under_budget_streak": state.under_budget_streak,
+            "last_direction": direction,
+            "last_trigger_total_ms": state.last_trigger_total_us.map(|value| f64::from(value) / 1_000.0),
+        },
+        "measurement": {
+            "valid_samples": state.valid_samples_consumed.saturating_sub(baseline.valid_samples),
+            "stale_generation_samples_ignored": state.stale_generation_samples_ignored.saturating_sub(baseline.stale_samples),
+            "downscale_count": state.downscale_count.saturating_sub(baseline.downscale_count),
+            "upscale_count": state.upscale_count.saturating_sub(baseline.upscale_count),
+            "switch_count": lifetime_switches.saturating_sub(baseline.downscale_count.saturating_add(baseline.upscale_count)),
+            "at_min_count": state.at_min_count.saturating_sub(baseline.at_min_count),
+            "at_max_count": state.at_max_count.saturating_sub(baseline.at_max_count),
+        },
+        "lifetime": {
+            "valid_samples": state.valid_samples_consumed,
+            "stale_generation_samples_ignored": state.stale_generation_samples_ignored,
+            "downscale_count": state.downscale_count,
+            "upscale_count": state.upscale_count,
+            "switch_count": lifetime_switches,
+            "at_min_count": state.at_min_count,
+            "at_max_count": state.at_max_count,
+        },
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2154,6 +2181,8 @@ fn debug_severity_label(severity: D3D12_MESSAGE_SEVERITY) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -2305,6 +2334,75 @@ mod tests {
             value["acceleration_structures"]["retained_update_scratch_bytes"],
             65_536
         );
+    }
+
+    #[test]
+    fn dynamic_resolution_json_preserves_state_and_measurement_baselines() {
+        let config = DynamicResolutionConfig::default();
+        let output_extent = Extent2D {
+            width: 1920,
+            height: 1080,
+        };
+        let mut controller = DynamicResolutionController::new(config);
+        let mut decision = None;
+        for sample in 0..DynamicResolutionConfig::DOWN_STREAK {
+            decision = controller.observe_sample(
+                Some(16.0),
+                true,
+                Duration::from_millis(u64::from(sample)),
+                output_extent,
+                output_extent,
+            );
+        }
+        controller.commit_switch(
+            decision.expect("eighth high sample must downscale"),
+            Duration::ZERO,
+        );
+        let active_extent = render_extent(output_extent, controller.current_scale());
+        let _ = controller.observe_sample(
+            Some(16.0),
+            false,
+            Duration::from_millis(10),
+            output_extent,
+            active_extent,
+        );
+        for sample in 0..3 {
+            let _ = controller.observe_sample(
+                Some(16.0),
+                true,
+                Duration::from_millis(20 + sample),
+                output_extent,
+                active_extent,
+            );
+        }
+
+        let value = dynamic_resolution_json_value(
+            Some(&controller),
+            DynamicResolutionBenchmarkBaseline {
+                valid_samples: 2,
+                ..Default::default()
+            },
+        );
+        assert_eq!(value["config"]["target_gpu_ms"], 14.5);
+        assert!(
+            (value["state"]["current_requested_scale"]
+                .as_f64()
+                .expect("scale must be numeric")
+                - 0.95)
+                .abs()
+                < 1.0e-6
+        );
+        assert_eq!(value["state"]["last_direction"], "down");
+        assert_eq!(value["state"]["last_trigger_total_ms"], 16.0);
+        assert_eq!(value["state"]["cooldown_valid_samples_remaining"], 57);
+        assert_eq!(value["measurement"]["valid_samples"], 9);
+        assert_eq!(value["measurement"]["stale_generation_samples_ignored"], 1);
+        assert_eq!(value["measurement"]["downscale_count"], 1);
+        assert_eq!(value["measurement"]["switch_count"], 1);
+        assert_eq!(value["lifetime"]["valid_samples"], 11);
+        assert_eq!(value["lifetime"]["stale_generation_samples_ignored"], 1);
+        assert_eq!(value["lifetime"]["switch_count"], 1);
+        assert!(dynamic_resolution_json_value(None, Default::default()).is_null());
     }
 
     #[test]

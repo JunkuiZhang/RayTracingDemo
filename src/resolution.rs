@@ -110,17 +110,19 @@ impl DynamicResolutionConfig {
         if !milliseconds.is_finite() {
             return Err(DynamicResolutionConfigError::NotFinite);
         }
+        let minimum_ms = f64::from(Self::MIN_TARGET_GPU_TIME_US) / 1_000.0;
+        let maximum_ms = f64::from(Self::MAX_TARGET_GPU_TIME_US) / 1_000.0;
+        if milliseconds < minimum_ms {
+            return Err(DynamicResolutionConfigError::BelowMinimum);
+        }
+        if milliseconds > maximum_ms {
+            return Err(DynamicResolutionConfigError::AboveMaximum);
+        }
         let microseconds = milliseconds * 1_000.0;
         if !microseconds.is_finite() {
             return Err(DynamicResolutionConfigError::NotFinite);
         }
         let rounded = microseconds.round();
-        if rounded < f64::from(Self::MIN_TARGET_GPU_TIME_US) {
-            return Err(DynamicResolutionConfigError::BelowMinimum);
-        }
-        if rounded > f64::from(Self::MAX_TARGET_GPU_TIME_US) {
-            return Err(DynamicResolutionConfigError::AboveMaximum);
-        }
         Ok(Self {
             target_gpu_time_us: rounded as u32,
         })
@@ -646,8 +648,28 @@ mod tests {
             Err(DynamicResolutionConfigError::BelowMinimum)
         );
         assert_eq!(
+            DynamicResolutionConfig::from_milliseconds(3.9996),
+            Err(DynamicResolutionConfigError::BelowMinimum)
+        );
+        assert_eq!(
             DynamicResolutionConfig::from_milliseconds(50.001),
             Err(DynamicResolutionConfigError::AboveMaximum)
+        );
+        assert_eq!(
+            DynamicResolutionConfig::from_milliseconds(50.0004),
+            Err(DynamicResolutionConfigError::AboveMaximum)
+        );
+        assert_eq!(
+            DynamicResolutionConfig::from_milliseconds(4.0)
+                .unwrap()
+                .target_gpu_time_us(),
+            4_000
+        );
+        assert_eq!(
+            DynamicResolutionConfig::from_milliseconds(50.0)
+                .unwrap()
+                .target_gpu_time_us(),
+            50_000
         );
         assert_eq!(
             DynamicResolutionConfig::from_milliseconds(14.5)
