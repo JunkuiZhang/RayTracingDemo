@@ -2535,6 +2535,8 @@ impl Dx12Renderer {
                 &mut nrd.view_z,
                 &mut nrd.diffuse_factor,
                 &mut nrd.specular_factor,
+                &mut nrd.diffuse_output,
+                &mut nrd.specular_output,
             ] {
                 resource.collect_transition(
                     &mut self.transition_batch,
