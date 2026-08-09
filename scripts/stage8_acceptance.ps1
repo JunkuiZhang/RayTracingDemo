@@ -1,14 +1,15 @@
 [CmdletBinding()]
 param(
+    [Alias("Build")]
     [ValidateSet("Debug", "Release")]
-    [string]$Build = "Release",
+    [string]$Configuration = "Release",
     [string]$Exe,
     [string]$OutputRoot = "output/stage8g",
     [ValidateRange(1, 10)]
     [int]$Runs = 3,
     [ValidateRange(1, 3600)]
     [int]$Seconds = 30,
-    [ValidateRange(1, 7200)]
+    [ValidateRange(1, 3600)]
     [int]$LongRunSeconds = 1800,
     [string]$LargeModel,
     [string]$PbrModel,
@@ -101,7 +102,7 @@ function Invoke-RecordedProcess(
     }
 }
 
-function Test-BenchmarkResult($Run) {
+function Test-BenchmarkResult($Run, [hashtable]$Expectations = @{}) {
     $failures = [System.Collections.Generic.List[string]]::new()
     if ($Run.exit_code -ne 0) { $failures.Add("exit_code=$($Run.exit_code)") }
     if ($null -eq $Run.json) { $failures.Add("benchmark JSON invalid: $($Run.json_error)") }
@@ -115,6 +116,13 @@ function Test-BenchmarkResult($Run) {
         $stats = $Run.json.passes.$pass
         if ($null -eq $stats -or -not (Test-Finite $stats.p50_ms) -or -not (Test-Finite $stats.p95_ms)) {
             $failures.Add("pass $pass has non-finite percentile")
+        } else {
+            if ([double]$stats.p95_ms -lt [double]$stats.p50_ms) {
+                $failures.Add("pass $pass has p95 below p50")
+            }
+            if ([int64]$stats.valid_samples -ne [int64]$Run.json.valid_samples) {
+                $failures.Add("pass $pass sample count differs from total")
+            }
         }
     }
     $measurement = $Run.json.memory.measurement
@@ -125,20 +133,90 @@ function Test-BenchmarkResult($Run) {
             if ($null -eq $measurement.$field) { $failures.Add("memory.measurement.$field missing") }
         }
         if ([int]$measurement.checkpoint_count -gt 60) { $failures.Add("memory checkpoint capacity exceeded") }
+        if ([int64]$measurement.valid_query_count -le 0) { $failures.Add("memory measurement has no valid query") }
+        if ($measurement.active) { $failures.Add("memory measurement is still active") }
+        if (-not (Test-Finite $measurement.peak_usage_ratio) -or [double]$measurement.peak_usage_ratio -ge 0.70) {
+            $failures.Add("memory peak usage ratio is unavailable or at least 70%")
+        }
+        $checkpoints = @($measurement.checkpoints)
+        if ($checkpoints.Count -ne [int]$measurement.checkpoint_count) {
+            $failures.Add("memory checkpoint count does not match the array")
+        }
+        for ($end = 4; $end -lt $checkpoints.Count; $end++) {
+            $strictlyIncreasing = $true
+            for ($index = $end - 3; $index -le $end; $index++) {
+                if ([int64]$checkpoints[$index].usage_bytes -le [int64]$checkpoints[$index - 1].usage_bytes) {
+                    $strictlyIncreasing = $false
+                    break
+                }
+            }
+            if ($strictlyIncreasing) {
+                $failures.Add("memory usage increases across five consecutive checkpoints ending at $($checkpoints[$end].elapsed_seconds)s")
+                break
+            }
+        }
     }
-    if ([string]$Run.json.resolution_mode -eq "dynamic" -and $null -ne $Run.json.dynamic_resolution) {
+
+    if ($Expectations.ContainsKey("ExpectedOutput")) {
+        $expectedWidth, $expectedHeight = [string]$Expectations.ExpectedOutput -split 'x'
+        if ([int]$Run.json.output_width -ne [int]$expectedWidth -or [int]$Run.json.output_height -ne [int]$expectedHeight) {
+            $failures.Add("output extent $($Run.json.output_width)x$($Run.json.output_height) differs from $($Expectations.ExpectedOutput)")
+        }
+    }
+    if ($Expectations.ContainsKey("ExpectedRender")) {
+        $expectedWidth, $expectedHeight = [string]$Expectations.ExpectedRender -split 'x'
+        if ([int]$Run.json.render_width -ne [int]$expectedWidth -or [int]$Run.json.render_height -ne [int]$expectedHeight) {
+            $failures.Add("render extent $($Run.json.render_width)x$($Run.json.render_height) differs from $($Expectations.ExpectedRender)")
+        }
+    }
+    if ($Expectations.ContainsKey("ExpectedResolutionMode") -and [string]$Run.json.resolution_mode -ne [string]$Expectations.ExpectedResolutionMode) {
+        $failures.Add("resolution mode $($Run.json.resolution_mode) differs from $($Expectations.ExpectedResolutionMode)")
+    }
+    if ($Expectations.ContainsKey("MaxTotalP95") -and [double]$Run.json.passes.total.p95_ms -gt [double]$Expectations.MaxTotalP95) {
+        $failures.Add("Total p95 $($Run.json.passes.total.p95_ms) exceeds $($Expectations.MaxTotalP95) ms")
+    }
+
+    if ([string]$Run.json.resolution_mode -eq "fixed") {
+        foreach ($field in @("render_generation_create_count", "render_generation_switch_count", "render_generation_retired_count", "render_extent_change_count", "history_reset_count", "gpu_idle_wait_count")) {
+            if ([int64]$Run.json.$field -ne 0) { $failures.Add("fixed measurement has nonzero ${field}=$($Run.json.$field)") }
+        }
+    } elseif ([string]$Run.json.resolution_mode -eq "dynamic" -and $null -ne $Run.json.dynamic_resolution) {
         $dynamic = $Run.json.dynamic_resolution.measurement
         if ($null -ne $dynamic) {
             $expected = [int64]$dynamic.valid_samples + [int64]$dynamic.stale_generation_samples_ignored
             if ([int64]$Run.json.valid_samples -ne $expected) {
                 $failures.Add("dynamic epoch mismatch total=$($Run.json.valid_samples) controller=$expected")
             }
+            $switches = [int64]$dynamic.downscale_count + [int64]$dynamic.upscale_count
+            if ([int64]$dynamic.switch_count -ne $switches) {
+                $failures.Add("dynamic switch count does not equal downscale + upscale")
+            }
+            if ([int64]$Run.json.render_generation_create_count -ne $switches -or [int64]$Run.json.render_generation_switch_count -ne $switches) {
+                $failures.Add("dynamic generation create/switch counts do not equal controller switches")
+            }
+            if ([int64]$Run.json.render_extent_change_count -ne $switches -or [int64]$Run.json.history_reset_count -ne $switches) {
+                $failures.Add("dynamic extent/history reset counts do not equal controller switches")
+            }
+            if ([int64]$Run.json.render_generation_retired_count -ne $switches -or [int64]$Run.json.retired_generation_count -ne 0) {
+                $failures.Add("dynamic generations are not fully retired at benchmark end")
+            }
+            if ([int64]$Run.json.retired_generation_high_watermark -gt 2) {
+                $failures.Add("retired generation high-watermark exceeds 2")
+            }
+            if ([int64]$Run.json.gpu_idle_wait_count -ne 0) {
+                $failures.Add("dynamic measurement has nonzero GPU idle waits")
+            }
+            if ($Expectations.ContainsKey("RequireDynamicSwitch") -and $Expectations.RequireDynamicSwitch -and $switches -le 0) {
+                $failures.Add("workload did not produce a dynamic switch during measurement")
+            }
         }
+    } else {
+        $failures.Add("resolution mode or dynamic telemetry is invalid")
     }
     [pscustomobject]@{ passed = ($failures.Count -eq 0); failures = $failures.ToArray() }
 }
 
-function Get-CaseSummary($Name, [object[]]$RunsInCase) {
+function Get-CaseSummary($Name, [object[]]$RunsInCase, [hashtable]$Expectations = @{}) {
     $validRuns = @($RunsInCase | Where-Object { $_.validation.passed -and $null -ne $_.json })
     $passNames = @("total", "acceleration_structure", "path_trace", "temporal", "atrous", "atrous_0", "atrous_1", "atrous_2", "atrous_3", "tone_map")
     $medians = [ordered]@{}
@@ -148,11 +226,16 @@ function Get-CaseSummary($Name, [object[]]$RunsInCase) {
             p95_ms = Get-Median @($validRuns | ForEach-Object { $_.json.passes.$pass.p95_ms })
         }
     }
+    $caseFailures = [System.Collections.Generic.List[string]]::new()
+    if ($Expectations.ContainsKey("MaxMedianTotalP95") -and $null -ne $medians.total.p95_ms -and [double]$medians.total.p95_ms -gt [double]$Expectations.MaxMedianTotalP95) {
+        $caseFailures.Add("median Total p95 $($medians.total.p95_ms) exceeds $($Expectations.MaxMedianTotalP95) ms")
+    }
     [pscustomobject]@{
         name = $Name
         run_count = $RunsInCase.Count
         valid_run_count = $validRuns.Count
-        passed = ($RunsInCase.Count -gt 0 -and $validRuns.Count -eq $RunsInCase.Count)
+        passed = ($RunsInCase.Count -gt 0 -and $validRuns.Count -eq $RunsInCase.Count -and $caseFailures.Count -eq 0)
+        failures = $caseFailures.ToArray()
         medians = $medians
         runs = $RunsInCase
     }
@@ -163,6 +246,7 @@ function Invoke-BenchmarkCase(
     [string[]]$ExtraArguments,
     [int]$Count,
     [int]$Duration,
+    [hashtable]$Expectations,
     [string]$Root,
     [string]$Executable,
     [System.Collections.Generic.List[object]]$AllRuns
@@ -173,11 +257,11 @@ function Invoke-BenchmarkCase(
     for ($index = 1; $index -le $Count; $index++) {
         $arguments = @("--benchmark-seconds", "$Duration", "--command-recording-mode", "optimized", "--atrous-mode", "baseline", "--acceleration-structure-mode", "baseline") + $ExtraArguments
         $run = Invoke-RecordedProcess $Executable $arguments $caseDirectory ("run-{0:D2}" -f $index)
-        $run | Add-Member -NotePropertyName validation -NotePropertyValue (Test-BenchmarkResult $run)
+        $run | Add-Member -NotePropertyName validation -NotePropertyValue (Test-BenchmarkResult $run $Expectations)
         $caseRuns.Add($run)
         $AllRuns.Add($run)
     }
-    return Get-CaseSummary $Name $caseRuns.ToArray()
+    return Get-CaseSummary $Name $caseRuns.ToArray() $Expectations
 }
 
 function Save-Summary($Path, $Summary) {
@@ -187,29 +271,46 @@ function Save-Summary($Path, $Summary) {
 function Invoke-CaptureCase(
     [string]$Name,
     [string[]]$ExtraArguments,
+    [string]$ExpectedView,
     [string]$Root,
     [string]$Executable
 ) {
     $captureDirectory = Join-Path $Root "captures"
     New-Item -ItemType Directory -Path $captureDirectory -Force | Out-Null
     $pngPath = Join-Path $captureDirectory "$Name.png"
+    $expectedOutput = "1280x720"
+    for ($index = 0; $index -lt $ExtraArguments.Count - 1; $index++) {
+        if ($ExtraArguments[$index] -eq "--output-size") {
+            $expectedOutput = $ExtraArguments[$index + 1]
+        }
+    }
     $arguments = @("--capture-output", $pngPath, "--capture-after-spp", "128", "--output-size", "1280x720") + $ExtraArguments
     $run = Invoke-RecordedProcess $Executable $arguments $captureDirectory $Name
-    $valid = $run.exit_code -eq 0 -and $null -ne $run.json -and (Test-Path -LiteralPath $pngPath)
-    $error = $null
-    if (-not $valid) {
-        $error = if ($null -eq $run.json) { $run.json_error } else { "capture exit=$($run.exit_code) png_exists=$(Test-Path -LiteralPath $pngPath)" }
-    } elseif ([int]$run.json.actual_spp -lt 128) {
-        $error = "capture SPP is below requested 128"
-        $valid = $false
+    $failures = [System.Collections.Generic.List[string]]::new()
+    if ($run.exit_code -ne 0) { $failures.Add("capture exit=$($run.exit_code)") }
+    if ($null -eq $run.json) { $failures.Add("capture JSON invalid: $($run.json_error)") }
+    if ($run.stdout_nonempty_lines -ne 1) { $failures.Add("capture stdout is not exactly one JSON line") }
+    if (-not (Test-Path -LiteralPath $pngPath)) { $failures.Add("capture PNG is missing") }
+    if ($null -ne $run.json) {
+        if ([int]$run.json.actual_spp -lt 128) { $failures.Add("capture SPP is below requested 128") }
+        if ([string]$run.json.debug_view.name -ne $ExpectedView) { $failures.Add("capture debug view differs from $ExpectedView") }
+        $expectedWidth, $expectedHeight = $expectedOutput -split 'x'
+        if ([int]$run.json.output_width -ne [int]$expectedWidth -or [int]$run.json.output_height -ne [int]$expectedHeight) { $failures.Add("capture output extent differs from $expectedOutput") }
+        if ([int64]$run.json.png_bytes -le 0) { $failures.Add("capture PNG byte count is not positive") }
+        if ([IO.Path]::GetFullPath([string]$run.json.png_path) -ne [IO.Path]::GetFullPath($pngPath)) { $failures.Add("capture JSON path differs from requested path") }
+        if ($Name -like "dynamic-forced-*" -and [int]$run.json.render_width -ge [int]$run.json.output_width -and [int]$run.json.render_height -ge [int]$run.json.output_height) {
+            $failures.Add("forced dynamic capture did not reduce the render extent")
+        }
     }
+    $hash = if (Test-Path -LiteralPath $pngPath) { (Get-FileHash -LiteralPath $pngPath -Algorithm SHA256).Hash } else { $null }
     [pscustomobject]@{
         name = $Name
-        passed = $valid
+        passed = ($failures.Count -eq 0)
         png_path = $pngPath
+        sha256 = $hash
         json = $run.json
         run = $run
-        error = $error
+        failures = $failures.ToArray()
     }
 }
 
@@ -218,17 +319,30 @@ function Invoke-DiffCase(
     [string]$Left,
     [string]$Right,
     [string]$Root,
-    [string]$ImageDiffExecutable
+    [string]$ImageDiffExecutable,
+    [ValidateSet("Exact", "AtrousTolerance")]
+    [string]$Threshold
 ) {
     $diffDirectory = Join-Path $Root "diffs"
     New-Item -ItemType Directory -Path $diffDirectory -Force | Out-Null
     $run = Invoke-RecordedProcess $ImageDiffExecutable @($Left, $Right) $diffDirectory $Name
-    $passed = $run.exit_code -eq 0 -and $null -ne $run.json
+    $failures = [System.Collections.Generic.List[string]]::new()
+    if ($run.exit_code -ne 0 -or $null -eq $run.json) {
+        $failures.Add("image_diff failed or returned invalid JSON")
+    } elseif ($Threshold -eq "Exact") {
+        if ([int64]$run.json.changed_rgb_pixels -ne 0 -or [int64]$run.json.alpha_mismatch_count -ne 0 -or [int]$run.json.max_channel_abs_diff -ne 0 -or [double]$run.json.rmse -ne 0.0) {
+            $failures.Add("exact image pair differs")
+        }
+    } elseif ([int64]$run.json.alpha_mismatch_count -ne 0 -or [int]$run.json.max_channel_abs_diff -gt 1 -or [double]$run.json.rmse -gt 0.10) {
+        $failures.Add("À-Trous image pair exceeds max_abs=1 or RMSE=0.10")
+    }
     [pscustomobject]@{
         name = $Name
-        passed = $passed
+        passed = ($failures.Count -eq 0)
+        threshold = $Threshold
         json = $run.json
         run = $run
+        failures = $failures.ToArray()
     }
 }
 
@@ -239,8 +353,10 @@ $runRoot = Join-Path $resolvedOutputRoot $runId
 New-Item -ItemType Directory -Path $runRoot -Force | Out-Null
 
 if ([string]::IsNullOrWhiteSpace($Exe)) {
-    $configuration = $Build.ToLowerInvariant()
+    $configuration = $Configuration.ToLowerInvariant()
     $Exe = Join-Path $repoRoot "target/$configuration/ray_tracing_demo.exe"
+} else {
+    $configuration = $Configuration.ToLowerInvariant()
 }
 $Executable = [IO.Path]::GetFullPath($Exe)
 if (-not (Test-Path -LiteralPath $Executable)) { throw "executable not found: $Executable" }
@@ -251,7 +367,13 @@ $allRuns = [System.Collections.Generic.List[object]]::new()
 $caseSummaries = [System.Collections.Generic.List[object]]::new()
 $startedAt = Get-Date
 
-$smoke = Invoke-BenchmarkCase "smoke-forced-dynamic" @("--output-size", "1280x720", "--dynamic-resolution", "--target-gpu-ms", "4") 1 $Seconds $runRoot $Executable $allRuns
+$smokeExpectations = @{
+    ExpectedOutput = "1920x1080"
+    ExpectedResolutionMode = "dynamic"
+    RequireDynamicSwitch = $true
+    MaxTotalP95 = 16.67
+}
+$smoke = Invoke-BenchmarkCase "smoke-forced-dynamic" @("--output-size", "1920x1080", "--dynamic-resolution", "--target-gpu-ms", "4") 1 $Seconds $smokeExpectations $runRoot $Executable $allRuns
 $caseSummaries.Add($smoke)
 $smokePassed = $smoke.passed
 if ($environment.gpu_name -eq "N/A" -and $smoke.runs.Count -gt 0 -and $null -ne $smoke.runs[0].json) {
@@ -282,29 +404,66 @@ if (-not $smokePassed -or $SmokeOnly) {
     exit 0
 }
 
-$fixedSizes = @(@("1280x720", "1280", "720"), @("1600x900", "1600", "900"), @("1920x1080", "1920", "1080"))
+$fixedSizes = @("1280x720", "1600x900", "1920x1080")
 foreach ($size in $fixedSizes) {
-    $caseSummaries.Add((Invoke-BenchmarkCase "fixed-$($size[0])" @("--output-size", $size[0], "--render-scale", "1.0") $Runs $Seconds $runRoot $Executable $allRuns))
+    $expectations = @{
+        ExpectedOutput = $size
+        ExpectedRender = $size
+        ExpectedResolutionMode = "fixed"
+        MaxTotalP95 = 16.67
+    }
+    if ($size -eq "1920x1080") { $expectations.MaxMedianTotalP95 = 7.6632 }
+    $caseSummaries.Add((Invoke-BenchmarkCase "fixed-$size" @("--output-size", $size, "--render-scale", "1.0") $Runs $Seconds $expectations $runRoot $Executable $allRuns))
 }
-foreach ($scale in @("0.83", "0.75", "0.67")) {
-    $caseSummaries.Add((Invoke-BenchmarkCase "fixed-scale-$scale" @("--output-size", "1280x720", "--render-scale", $scale) 1 $Seconds $runRoot $Executable $allRuns))
+$fixedScaleRenders = [ordered]@{ "0.83" = "1592x896"; "0.75" = "1440x808"; "0.67" = "1280x720" }
+foreach ($scale in $fixedScaleRenders.Keys) {
+    $expectations = @{
+        ExpectedOutput = "1920x1080"
+        ExpectedRender = $fixedScaleRenders[$scale]
+        ExpectedResolutionMode = "fixed"
+        MaxTotalP95 = 16.67
+    }
+    $caseSummaries.Add((Invoke-BenchmarkCase "fixed-scale-$scale" @("--output-size", "1920x1080", "--render-scale", $scale) 1 $Seconds $expectations $runRoot $Executable $allRuns))
 }
-$caseSummaries.Add((Invoke-BenchmarkCase "dynamic-default" @("--output-size", "1280x720", "--dynamic-resolution") $Runs $Seconds $runRoot $Executable $allRuns))
+$dynamicDefaultExpectations = @{
+    ExpectedOutput = "1920x1080"
+    ExpectedResolutionMode = "dynamic"
+    MaxTotalP95 = 16.67
+    MaxMedianTotalP95 = 7.6632
+}
+$caseSummaries.Add((Invoke-BenchmarkCase "dynamic-default" @("--output-size", "1920x1080", "--dynamic-resolution") $Runs $Seconds $dynamicDefaultExpectations $runRoot $Executable $allRuns))
+
+$fixturePath = (Resolve-Path "assets/gltf/Triangle/NonIndexedMultiNode.gltf").Path
+foreach ($accelerationMode in @("baseline", "optimized")) {
+    $fixtureExpectations = @{ ExpectedOutput = "1280x720"; ExpectedResolutionMode = "fixed"; MaxTotalP95 = 16.67 }
+    $caseSummaries.Add((Invoke-BenchmarkCase "fixture-static-$accelerationMode" @("--output-size", "1280x720", "--model", $fixturePath, "--acceleration-structure-mode", $accelerationMode) 1 $Seconds $fixtureExpectations $runRoot $Executable $allRuns))
+    $caseSummaries.Add((Invoke-BenchmarkCase "fixture-animated-$accelerationMode" @("--output-size", "1280x720", "--model", $fixturePath, "--animate-model", "--acceleration-structure-mode", $accelerationMode) 1 $Seconds $fixtureExpectations $runRoot $Executable $allRuns))
+}
 
 if (-not [string]::IsNullOrWhiteSpace($PbrModel)) {
     $modelPath = [IO.Path]::GetFullPath($PbrModel)
     if (-not (Test-Path -LiteralPath $modelPath)) { throw "PbrModel not found: $modelPath" }
-    $caseSummaries.Add((Invoke-BenchmarkCase "pbr-static" @("--output-size", "1280x720", "--model", $modelPath) 1 $Seconds $runRoot $Executable $allRuns))
-    $caseSummaries.Add((Invoke-BenchmarkCase "pbr-animated" @("--output-size", "1280x720", "--model", $modelPath, "--animate-model") 1 $Seconds $runRoot $Executable $allRuns))
+    $pbrExpectations = @{ ExpectedOutput = "1280x720"; ExpectedResolutionMode = "fixed"; MaxTotalP95 = 16.67 }
+    $caseSummaries.Add((Invoke-BenchmarkCase "pbr-static" @("--output-size", "1280x720", "--model", $modelPath) 1 $Seconds $pbrExpectations $runRoot $Executable $allRuns))
+    $caseSummaries.Add((Invoke-BenchmarkCase "pbr-animated" @("--output-size", "1280x720", "--model", $modelPath, "--animate-model") 1 $Seconds $pbrExpectations $runRoot $Executable $allRuns))
 }
 if (-not [string]::IsNullOrWhiteSpace($LargeModel)) {
     $largePath = [IO.Path]::GetFullPath($LargeModel)
     if (-not (Test-Path -LiteralPath $largePath)) { throw "LargeModel not found: $largePath" }
-    $caseSummaries.Add((Invoke-BenchmarkCase "large-static" @("--output-size", "1280x720", "--model", $largePath) 1 $Seconds $runRoot $Executable $allRuns))
+    foreach ($accelerationMode in @("baseline", "optimized")) {
+        $largeExpectations = @{ ExpectedOutput = "1600x900"; ExpectedResolutionMode = "fixed"; MaxTotalP95 = 16.67 }
+        $caseSummaries.Add((Invoke-BenchmarkCase "large-static-$accelerationMode" @("--output-size", "1600x900", "--model", $largePath, "--acceleration-structure-mode", $accelerationMode) $Runs $Seconds $largeExpectations $runRoot $Executable $allRuns))
+    }
 }
 
 if (-not $SkipLongRun) {
-    $longCase = Invoke-BenchmarkCase "forced-dynamic-long" @("--output-size", "1280x720", "--dynamic-resolution", "--target-gpu-ms", "4") 1 $LongRunSeconds $runRoot $Executable $allRuns
+    $longExpectations = @{
+        ExpectedOutput = "1920x1080"
+        ExpectedResolutionMode = "dynamic"
+        RequireDynamicSwitch = $true
+        MaxTotalP95 = 16.67
+    }
+    $longCase = Invoke-BenchmarkCase "forced-dynamic-long" @("--output-size", "1920x1080", "--dynamic-resolution", "--target-gpu-ms", "4") 1 $LongRunSeconds $longExpectations $runRoot $Executable $allRuns
     $summary.long_run = $longCase
     $caseSummaries.Add($longCase)
 }
@@ -315,41 +474,52 @@ if (-not $SkipCaptures) {
     $views = @("final", "raw", "albedo", "normal-roughness", "depth", "motion", "variance", "history-rejection", "history-length", "object-material-id", "specular-hit-distance")
     foreach ($recordingMode in @("baseline", "optimized")) {
         foreach ($view in $views) {
-            $captureRecords.Add((Invoke-CaptureCase "command-$recordingMode-$view" @("--command-recording-mode", $recordingMode) $runRoot $Executable))
+            $captureRecords.Add((Invoke-CaptureCase "command-$recordingMode-$view" @("--command-recording-mode", $recordingMode, "--debug-view", $view) $view $runRoot $Executable))
         }
     }
     foreach ($accelerationMode in @("baseline", "optimized")) {
         foreach ($view in $views) {
-            $captureRecords.Add((Invoke-CaptureCase "as-$accelerationMode-$view" @("--acceleration-structure-mode", $accelerationMode) $runRoot $Executable))
+            $captureRecords.Add((Invoke-CaptureCase "as-$accelerationMode-$view" @("--model", $fixturePath, "--acceleration-structure-mode", $accelerationMode, "--debug-view", $view) $view $runRoot $Executable))
         }
     }
     foreach ($atrousMode in @("baseline", "shared")) {
-        $captureRecords.Add((Invoke-CaptureCase "atrous-$atrousMode-final" @("--atrous-mode", $atrousMode) $runRoot $Executable))
+        $captureRecords.Add((Invoke-CaptureCase "atrous-$atrousMode-final" @("--atrous-mode", $atrousMode) "final" $runRoot $Executable))
     }
-    foreach ($scale in @("0.83", "0.75", "0.67")) {
-        $captureRecords.Add((Invoke-CaptureCase "scale-$scale-final" @("--render-scale", $scale) $runRoot $Executable))
+    foreach ($scale in @("1.0", "0.83", "0.75", "0.67")) {
+        $captureRecords.Add((Invoke-CaptureCase "scale-$scale-final" @("--render-scale", $scale) "final" $runRoot $Executable))
     }
     foreach ($resolutionArguments in @(
-        @("dynamic-default", "--dynamic-resolution"),
-        @("dynamic-forced", "--dynamic-resolution", "--target-gpu-ms", "4")
+        @("dynamic-default", "--output-size", "1920x1080", "--dynamic-resolution"),
+        @("dynamic-forced", "--output-size", "1920x1080", "--dynamic-resolution", "--target-gpu-ms", "4")
     )) {
-        $captureRecords.Add((Invoke-CaptureCase "$($resolutionArguments[0])-final" @($resolutionArguments[1..($resolutionArguments.Count - 1)]) $runRoot $Executable))
-        $captureRecords.Add((Invoke-CaptureCase "$($resolutionArguments[0])-history-length" (@($resolutionArguments[1..($resolutionArguments.Count - 1)]) + @("--debug-view", "history-length")) $runRoot $Executable))
+        $captureRecords.Add((Invoke-CaptureCase "$($resolutionArguments[0])-final" @($resolutionArguments[1..($resolutionArguments.Count - 1)]) "final" $runRoot $Executable))
+        $captureRecords.Add((Invoke-CaptureCase "$($resolutionArguments[0])-history-rejection" (@($resolutionArguments[1..($resolutionArguments.Count - 1)]) + @("--debug-view", "history-rejection")) "history-rejection" $runRoot $Executable))
     }
-    $imageDiffExecutable = Join-Path $repoRoot "target/release/image_diff.exe"
+    $imageDiffExecutable = Join-Path $repoRoot "target/$configuration/image_diff.exe"
     if (Test-Path -LiteralPath $imageDiffExecutable) {
-        $commandBaseline = ($captureRecords | Where-Object { $_.name -eq "command-baseline-final" }).png_path
-        $commandOptimized = ($captureRecords | Where-Object { $_.name -eq "command-optimized-final" }).png_path
+        foreach ($view in $views) {
+            $commandBaseline = ($captureRecords | Where-Object { $_.name -eq "command-baseline-$view" }).png_path
+            $commandOptimized = ($captureRecords | Where-Object { $_.name -eq "command-optimized-$view" }).png_path
+            if ($null -ne $commandBaseline -and $null -ne $commandOptimized) {
+                $diffRecords.Add((Invoke-DiffCase "command-baseline-vs-optimized-$view" $commandBaseline $commandOptimized $runRoot $imageDiffExecutable "Exact"))
+            }
+            $asBaseline = ($captureRecords | Where-Object { $_.name -eq "as-baseline-$view" }).png_path
+            $asOptimized = ($captureRecords | Where-Object { $_.name -eq "as-optimized-$view" }).png_path
+            if ($null -ne $asBaseline -and $null -ne $asOptimized) {
+                $diffRecords.Add((Invoke-DiffCase "as-baseline-vs-optimized-$view" $asBaseline $asOptimized $runRoot $imageDiffExecutable "Exact"))
+            }
+        }
         $atrousBaseline = ($captureRecords | Where-Object { $_.name -eq "atrous-baseline-final" }).png_path
         $atrousShared = ($captureRecords | Where-Object { $_.name -eq "atrous-shared-final" }).png_path
-        if ($null -ne $commandBaseline -and $null -ne $commandOptimized) {
-            $diffRecords.Add((Invoke-DiffCase "command-baseline-vs-optimized" $commandBaseline $commandOptimized $runRoot $imageDiffExecutable))
-        }
         if ($null -ne $atrousBaseline -and $null -ne $atrousShared) {
-            $diff = Invoke-DiffCase "atrous-baseline-vs-shared" $atrousBaseline $atrousShared $runRoot $imageDiffExecutable
-            if ($diff.passed -and ($diff.json.max_channel_abs_diff -gt 1 -or $diff.json.rmse -gt 0.10)) { $diff.passed = $false }
-            $diffRecords.Add($diff)
+            $diffRecords.Add((Invoke-DiffCase "atrous-baseline-vs-shared-final" $atrousBaseline $atrousShared $runRoot $imageDiffExecutable "AtrousTolerance"))
         }
+    } else {
+        $diffRecords.Add([pscustomobject]@{
+            name = "image-diff-tool"
+            passed = $false
+            failures = @("image_diff executable not found: $imageDiffExecutable")
+        })
     }
 }
 

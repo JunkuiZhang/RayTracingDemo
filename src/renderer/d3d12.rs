@@ -509,7 +509,11 @@ impl Dx12Renderer {
 
     pub fn render(&mut self) -> Result<()> {
         self.poll_pending_capture()?;
-        if self.capture_result.is_some() {
+        // The capture fence must be the newest submitted fence when the
+        // application drops the renderer after writing the PNG. Once a
+        // capture is pending, poll it without submitting later frames that
+        // could still reference renderer-owned resources at exit.
+        if self.pending_capture.is_some() || self.capture_result.is_some() {
             return Ok(());
         }
         self.poll_shader_reload();
