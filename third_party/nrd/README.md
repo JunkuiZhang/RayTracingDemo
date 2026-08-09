@@ -3,8 +3,9 @@
 The NRD SDK is an optional local build input and is not redistributed in this
 repository. Run `scripts/fetch_nrd.ps1` explicitly on a machine with network
 access. The script verifies the official tag, complete commits, dependency
-commits, archive hashes, and license hashes before the source is placed under
-the ignored `external/` directory.
+commits (including NRI's fixed D3D12MemoryAllocator), archive hashes, and
+license hashes before the source is placed under the ignored `external/`
+directory.
 
 The application uses NRD only as an optional `REBLUR_DIFFUSE_SPECULAR`
 comparison backend. SVGF remains the default and this repository does not

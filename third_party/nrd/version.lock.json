@@ -19,6 +19,11 @@
     "repository": "https://github.com/NVIDIA-RTX/ShaderMake.git",
     "commit": "18f5a344e7ca8fa65daaf079d07bc8ce38453e05"
   },
+  "d3d12_memory_allocator": {
+    "repository": "https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator.git",
+    "commit": "96e58ad6f45f2e9ade7c631adba8a27db1635cb7",
+    "destination": "d3d12ma-96e58ad6"
+  },
   "fetch_content": {
     "fully_disconnected": true,
     "nrd_nri": true,
@@ -35,6 +40,10 @@
       "_deps/MathLib/LICENSE.txt": "c8bd33d1ed7d6f5e5656e1f5df11373e99dabb77d94dc59a67a66de571dca521",
       "_deps/ShaderMake/LICENSE.txt": "8f0b12e3a6d4d714bb7993c74270a3806f11ae1f6b6d7301629215c21939e37b",
       "_deps/ShaderMake/ThirdPartyLicenses.txt": "5f38c7b411b2c5f79ad0d2a0692c8cd0fb918c836cff0199b24d44bb150ed3b7"
+    },
+    "external_files": {
+      "d3d12ma-96e58ad6/LICENSE.txt": "b9ee49d92c874e73539482a82c141713c16bbbbd119f7a1c25ad4fb70da6bc09",
+      "d3d12ma-96e58ad6/NOTICES.txt": "7b7fc5046e474378f4fe0bde65508e0d2b3146b58568ebc7cc192aea85ff91b8"
     }
   }
 }

@@ -65,6 +65,7 @@ typedef struct NrdBridgeFrameDesc {
 
 typedef struct NrdBridgeResource {
     ID3D12Resource* resource;
+    // D3D12_RESOURCE_STATES bitmask supplied by the renderer.
     uint32_t state;
 } NrdBridgeResource;
 

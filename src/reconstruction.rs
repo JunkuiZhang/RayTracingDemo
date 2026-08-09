@@ -267,6 +267,32 @@ impl Default for NrdBridgeVersion {
     }
 }
 
+#[cfg(feature = "nrd")]
+unsafe extern "C" {
+    fn nrd_bridge_query_version(out_version: *mut NrdBridgeVersion) -> u32;
+}
+
+#[cfg(feature = "nrd")]
+pub fn query_nrd_version() -> Result<NrdBridgeVersion, String> {
+    let mut version = NrdBridgeVersion::default();
+    let status = unsafe { nrd_bridge_query_version(&mut version) };
+    if status != 0 {
+        return Err(format!(
+            "NRD bridge version query failed with status {status}"
+        ));
+    }
+    if version.abi_version != NRD_BRIDGE_ABI_VERSION
+        || version.major != 4
+        || version.minor != 17
+        || version.build != 3
+        || version.normal_encoding != 2
+        || version.roughness_encoding != 1
+    {
+        return Err("NRD bridge reported an incompatible version or encoding".to_string());
+    }
+    Ok(version)
+}
+
 pub const fn nrd_bridge_create_desc_is_valid(desc: NrdBridgeCreateDesc) -> bool {
     desc.abi_version == NRD_BRIDGE_ABI_VERSION
         && desc.resource_width > 0
@@ -349,6 +375,17 @@ mod tests {
             abi_version: 0,
             ..valid
         }));
+    }
+
+    #[cfg(feature = "nrd")]
+    #[test]
+    fn feature_build_queries_the_locked_nrd_library() {
+        let version = query_nrd_version().expect("NRD bridge must report its locked version");
+        assert_eq!((version.major, version.minor, version.build), (4, 17, 3));
+        assert_eq!(version.normal_encoding, 2);
+        assert_eq!(version.roughness_encoding, 1);
+        let commit = std::str::from_utf8(&version.commit[..40]).expect("NRD commit is ASCII");
+        assert!(commit.starts_with(NRD_COMMIT_PREFIX));
     }
 
     #[test]

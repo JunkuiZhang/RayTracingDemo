@@ -38,7 +38,20 @@ fn main() {
     println!("cargo:rerun-if-changed=third_party/winpix/x64/WinPixEventRuntime.dll");
     println!("cargo:rerun-if-changed=third_party/winpix/LICENSE.txt");
     println!("cargo:rerun-if-changed=third_party/winpix/ThirdPartyNotices.txt");
+    println!("cargo:rerun-if-changed=native/nrd_bridge/CMakeLists.txt");
+    println!("cargo:rerun-if-changed=native/nrd_bridge/include/nrd_bridge.h");
+    println!("cargo:rerun-if-changed=native/nrd_bridge/src/nrd_bridge.cpp");
+    println!("cargo:rerun-if-env-changed=NRD_SOURCE_DIR");
+    println!("cargo:rerun-if-env-changed=NRI_SOURCE_DIR");
+    println!("cargo:rerun-if-env-changed=MATHLIB_SOURCE_DIR");
+    println!("cargo:rerun-if-env-changed=SHADERMAKE_SOURCE_DIR");
+    println!("cargo:rerun-if-env-changed=D3D12MA_SOURCE_DIR");
+    println!("cargo:rerun-if-env-changed=VSDEVCMD_BAT");
+    println!("cargo:rerun-if-env-changed=CMAKE");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        if env::var_os("CARGO_FEATURE_NRD").is_some() {
+            panic!("NRD feature 仅支持 Windows D3D12 目标");
+        }
         return;
     }
 
@@ -50,6 +63,179 @@ fn main() {
     deploy_winpix_runtime(&output_directory);
     println!("cargo:rustc-env=RAY_TRACING_DXC={}", dxc.display());
     println!("cargo:rustc-env=WINPIX_RUNTIME_VERSION=1.0.240308001");
+
+    if env::var_os("CARGO_FEATURE_NRD").is_some() {
+        build_nrd_bridge(&output_directory, &dxc);
+    }
+}
+
+fn build_nrd_bridge(output_directory: &Path, dxc: &Path) {
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let nrd_source = dependency_path(
+        "NRD_SOURCE_DIR",
+        &repository_root.join("external/nrd-v4.17.3"),
+    );
+    let nri_source = dependency_path("NRI_SOURCE_DIR", &nrd_source.join("_deps/NRI"));
+    let mathlib_source = dependency_path("MATHLIB_SOURCE_DIR", &nrd_source.join("_deps/MathLib"));
+    let shadermake_source = dependency_path(
+        "SHADERMAKE_SOURCE_DIR",
+        &nrd_source.join("_deps/ShaderMake"),
+    );
+    let d3d12ma_source = dependency_path(
+        "D3D12MA_SOURCE_DIR",
+        &repository_root.join("external/d3d12ma-96e58ad6"),
+    );
+    for (name, path) in [
+        ("NRD_SOURCE_DIR", &nrd_source),
+        ("NRI_SOURCE_DIR", &nri_source),
+        ("MATHLIB_SOURCE_DIR", &mathlib_source),
+        ("SHADERMAKE_SOURCE_DIR", &shadermake_source),
+        ("D3D12MA_SOURCE_DIR", &d3d12ma_source),
+    ] {
+        if !path.is_dir() {
+            panic!(
+                "{name}={} 不存在；请先运行 scripts/fetch_nrd.ps1 并准备固定的 D3D12MemoryAllocator 源码",
+                path.display()
+            );
+        }
+    }
+
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+    let build_type = if profile == "release" {
+        "Release"
+    } else {
+        "Debug"
+    };
+    let build_directory = output_directory.join("nrd-cmake-vs");
+    let source_directory = repository_root.join("native/nrd_bridge");
+    let cmake = env::var_os("CMAKE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("cmake"));
+    let vsdevcmd = find_vsdevcmd();
+
+    let configure_args = [
+        "-S".to_string(),
+        source_directory.display().to_string(),
+        "-B".to_string(),
+        build_directory.display().to_string(),
+        "-G".to_string(),
+        "Visual Studio 17 2022".to_string(),
+        "-A".to_string(),
+        "x64".to_string(),
+        format!("-DCMAKE_BUILD_TYPE={build_type}"),
+        format!("-DNRD_SOURCE_DIR={}", nrd_source.display()),
+        format!("-DNRI_SOURCE_DIR={}", nri_source.display()),
+        format!("-DMATHLIB_SOURCE_DIR={}", mathlib_source.display()),
+        format!("-DSHADERMAKE_SOURCE_DIR={}", shadermake_source.display()),
+        format!("-DD3D12MA_SOURCE_DIR={}", d3d12ma_source.display()),
+        format!("-DDXC_PATH={}", dxc.display()),
+    ];
+    run_cmake(&cmake, &vsdevcmd, &configure_args, "configure NRD bridge");
+
+    let build_args = [
+        "--build".to_string(),
+        build_directory.display().to_string(),
+        "--target".to_string(),
+        "nrd_bridge".to_string(),
+        "--config".to_string(),
+        build_type.to_string(),
+        "-j".to_string(),
+        "4".to_string(),
+    ];
+    run_cmake(&cmake, &vsdevcmd, &build_args, "build NRD bridge");
+
+    let library_directories = [
+        build_directory.join("lib").join(build_type),
+        build_directory.join("nrd").join(build_type),
+        build_directory.join("_deps/nri-build").join(build_type),
+        build_directory
+            .join("_deps/shadermake-build")
+            .join(build_type),
+        build_directory.join("lib"),
+        build_directory.join("nrd"),
+        build_directory.join("_deps/nri-build"),
+        build_directory.join("_deps/shadermake-build"),
+    ];
+    for directory in library_directories {
+        println!("cargo:rustc-link-search=native={}", directory.display());
+    }
+    for library in [
+        "nrd_bridge",
+        "NRD",
+        "NRI",
+        "NRI_D3D12",
+        "NRI_Validation",
+        "NRI_Shared",
+        "ShaderMakeBlob",
+    ] {
+        println!("cargo:rustc-link-lib=static={library}");
+    }
+    for library in ["d3d12", "dxgi", "dxguid", "uuid", "ole32"] {
+        println!("cargo:rustc-link-lib={library}");
+    }
+}
+
+fn dependency_path(name: &str, default: &Path) -> PathBuf {
+    env::var_os(name)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default.to_path_buf())
+}
+
+fn find_vsdevcmd() -> PathBuf {
+    if let Some(path) = env::var_os("VSDEVCMD_BAT").map(PathBuf::from)
+        && path.is_file()
+    {
+        return path;
+    }
+    for path in [
+        r"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat",
+        r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\Tools\VsDevCmd.bat",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat",
+    ] {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return path;
+        }
+    }
+    panic!("未找到 VsDevCmd.bat；请设置 VSDEVCMD_BAT 以便离线构建 NRD bridge");
+}
+
+fn run_cmake(cmake: &Path, vsdevcmd: &Path, arguments: &[String], action: &str) {
+    let script_path = PathBuf::from(env::var_os("OUT_DIR").unwrap())
+        .join(format!("nrd-{}.cmd", action.replace(' ', "-")));
+    let arguments = arguments
+        .iter()
+        .map(|argument| quote_cmd_arg(Path::new(argument)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let script = format!(
+        "@echo off\r\ncall {} -arch=x64\r\nif errorlevel 1 exit /b %errorlevel%\r\n{} {}\r\n",
+        quote_cmd_arg(vsdevcmd),
+        quote_cmd_arg(cmake),
+        arguments
+    );
+    fs::write(&script_path, script)
+        .unwrap_or_else(|error| panic!("写入 {action} 脚本失败: {error}"));
+    let output = std::process::Command::new("cmd.exe")
+        .args(["/d", "/s", "/c", "call"])
+        .arg(&script_path)
+        .output()
+        .unwrap_or_else(|error| panic!("启动 {action} 失败: {error}"));
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    if !output.status.success() {
+        panic!("{action} 失败，退出码 {}", output.status);
+    }
+}
+
+fn quote_cmd_arg(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    if value.contains(' ') || value.contains('&') || value.contains('(') || value.contains(')') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.into_owned()
+    }
 }
 
 fn deploy_winpix_runtime(output_directory: &Path) {

@@ -12,6 +12,7 @@ $lock = Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json
 $root = [System.IO.Path]::GetFullPath($ExternalRoot)
 $nrdRoot = Join-Path $root 'nrd-v4.17.3'
 $dependencyRoot = Join-Path $nrdRoot '_deps'
+$d3d12maRoot = Join-Path $root $lock.d3d12_memory_allocator.destination
 
 function Invoke-Git {
     param([string[]]$Arguments, [string]$WorkingDirectory)
@@ -72,6 +73,7 @@ Ensure-Repository $lock.nrd.repository $lock.nrd.tag $lock.nrd.commit $nrdRoot '
 Ensure-Repository $lock.nri.repository $lock.nri.tag $lock.nri.commit (Join-Path $dependencyRoot 'NRI') 'NRI v179' -IsTag
 Ensure-Repository $lock.mathlib.repository $lock.mathlib.tag $lock.mathlib.commit (Join-Path $dependencyRoot 'MathLib') 'MathLib v11' -IsTag
 Ensure-Repository $lock.shadermake.repository $lock.shadermake.commit $lock.shadermake.commit (Join-Path $dependencyRoot 'ShaderMake') 'ShaderMake'
+Ensure-Repository $lock.d3d12_memory_allocator.repository $lock.d3d12_memory_allocator.commit $lock.d3d12_memory_allocator.commit $d3d12maRoot 'D3D12MemoryAllocator'
 
 $actualNrd = Get-GitHead $nrdRoot
 if (-not $actualNrd.StartsWith($lock.nrd.commit_prefix)) {
@@ -91,9 +93,20 @@ foreach ($entry in $lock.license_hashes.files.psobject.Properties) {
         throw "许可证 hash 不匹配：$($entry.Name)，期望 $($entry.Value)，实际 $actualHash"
     }
 }
+foreach ($entry in $lock.license_hashes.external_files.psobject.Properties) {
+    $licensePath = Join-Path $root ($entry.Name -replace '/', '\\')
+    if (-not (Test-Path -LiteralPath $licensePath)) {
+        throw "许可证文件缺失：$licensePath"
+    }
+    $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $licensePath).Hash.ToLowerInvariant()
+    if ($actualHash -ne $entry.Value.ToLowerInvariant()) {
+        throw "许可证 hash 不匹配：$($entry.Name)，期望 $($entry.Value)，实际 $actualHash"
+    }
+}
 
 Write-Output "NRD sources verified: $actualNrd"
 Write-Output "NRI: $(Get-GitHead (Join-Path $dependencyRoot 'NRI'))"
 Write-Output "MathLib: $(Get-GitHead (Join-Path $dependencyRoot 'MathLib'))"
 Write-Output "ShaderMake: $(Get-GitHead (Join-Path $dependencyRoot 'ShaderMake'))"
+Write-Output "D3D12MemoryAllocator: $(Get-GitHead $d3d12maRoot)"
 Write-Output 'FetchContent must use local source directories and FETCHCONTENT_FULLY_DISCONNECTED=ON.'
