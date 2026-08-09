@@ -74,6 +74,10 @@ fn main() {
                 nrd_shader_directory.display()
             );
         }
+        println!(
+            "cargo:rustc-env=RAY_TRACING_NRD_SHADER_DIR={}",
+            nrd_shader_directory.display()
+        );
         compile_shader(
             &dxc,
             "shaders/stage9_nrd_prep.hlsl",

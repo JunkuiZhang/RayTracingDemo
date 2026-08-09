@@ -11,6 +11,7 @@ struct ShaderSource {
     source: PathBuf,
     output: PathBuf,
     target: &'static str,
+    extra_include: Option<PathBuf>,
     last_modified: SystemTime,
 }
 
@@ -25,6 +26,10 @@ pub struct ReloadedShaders {
     pub atrous: Vec<u8>,
     pub atrous_shared: Vec<u8>,
     pub tonemap: Vec<u8>,
+    #[cfg(feature = "nrd")]
+    pub nrd_prep: Vec<u8>,
+    #[cfg(feature = "nrd")]
+    pub nrd_compose: Vec<u8>,
 }
 
 /// Debug-only shader reloader. A changed source causes the complete compatible
@@ -43,20 +48,51 @@ impl ShaderReloader {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let shader_root = root.join("shaders");
         let cache = root.join("output").join("shader-cache");
-        let descriptions = [
-            ("stage3_triangle.hlsl", "stage3_triangle.dxil", "lib_6_6"),
-            ("stage6_temporal.hlsl", "stage6_temporal.dxil", "cs_6_6"),
-            ("stage6_atrous.hlsl", "stage6_atrous.dxil", "cs_6_6"),
+        let descriptions = vec![
+            (
+                "stage3_triangle.hlsl",
+                "stage3_triangle.dxil",
+                "lib_6_6",
+                None,
+            ),
+            (
+                "stage6_temporal.hlsl",
+                "stage6_temporal.dxil",
+                "cs_6_6",
+                None,
+            ),
+            ("stage6_atrous.hlsl", "stage6_atrous.dxil", "cs_6_6", None),
             (
                 "stage8_atrous_shared.hlsl",
                 "stage8_atrous_shared.dxil",
                 "cs_6_6",
+                None,
             ),
-            ("stage6_tonemap.hlsl", "stage6_tonemap.dxil", "cs_6_6"),
+            ("stage6_tonemap.hlsl", "stage6_tonemap.dxil", "cs_6_6", None),
         ];
+        #[cfg(feature = "nrd")]
+        let descriptions = {
+            let mut descriptions = descriptions;
+            let nrd_shader_root = PathBuf::from(env!("RAY_TRACING_NRD_SHADER_DIR"));
+            descriptions.extend([
+                (
+                    "stage9_nrd_prep.hlsl",
+                    "stage9_nrd_prep.dxil",
+                    "cs_6_6",
+                    Some(nrd_shader_root.clone()),
+                ),
+                (
+                    "stage9_nrd_compose.hlsl",
+                    "stage9_nrd_compose.dxil",
+                    "cs_6_6",
+                    Some(nrd_shader_root),
+                ),
+            ]);
+            descriptions
+        };
         let sources = descriptions
             .into_iter()
-            .map(|(source, output, target)| {
+            .map(|(source, output, target, extra_include)| {
                 let source = shader_root.join(source);
                 let last_modified = source
                     .metadata()
@@ -66,6 +102,7 @@ impl ShaderReloader {
                     source,
                     output: cache.join(output),
                     target,
+                    extra_include,
                     last_modified,
                 }
             })
@@ -99,10 +136,15 @@ impl ShaderReloader {
         }
 
         for source in &self.sources {
-            let result = Command::new(&self.dxc)
+            let mut command = Command::new(&self.dxc);
+            command
                 .arg(&source.source)
                 .args(["-I"])
-                .arg(&self.shader_root)
+                .arg(&self.shader_root);
+            if let Some(extra_include) = source.extra_include.as_ref() {
+                command.args(["-I"]).arg(extra_include);
+            }
+            let result = command
                 .args(["-T", source.target, "-HV", "2021", "-Fo"])
                 .arg(&source.output)
                 .args(["-Od", "-Zi", "-Qembed_debug"])
@@ -146,6 +188,16 @@ impl ShaderReloader {
                 Err(error) => return Some(Err(error)),
             },
             tonemap: match read(4) {
+                Ok(value) => value,
+                Err(error) => return Some(Err(error)),
+            },
+            #[cfg(feature = "nrd")]
+            nrd_prep: match read(5) {
+                Ok(value) => value,
+                Err(error) => return Some(Err(error)),
+            },
+            #[cfg(feature = "nrd")]
+            nrd_compose: match read(6) {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             },
@@ -203,4 +255,46 @@ fn dependencies_changed(previous: &[WatchedFile], current: &[WatchedFile]) -> bo
         || previous.iter().zip(current).any(|(previous, current)| {
             previous.path != current.path || current.last_modified > previous.last_modified
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shader_reloader_tracks_every_runtime_pipeline_source() {
+        let reloader = ShaderReloader::new();
+        let names = reloader
+            .sources
+            .iter()
+            .map(|source| {
+                source
+                    .source
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        let expected = vec![
+            "stage3_triangle.hlsl",
+            "stage6_temporal.hlsl",
+            "stage6_atrous.hlsl",
+            "stage8_atrous_shared.hlsl",
+            "stage6_tonemap.hlsl",
+        ];
+        #[cfg(feature = "nrd")]
+        let expected = {
+            let mut expected = expected;
+            expected.extend(["stage9_nrd_prep.hlsl", "stage9_nrd_compose.hlsl"]);
+            expected
+        };
+        assert_eq!(names, expected);
+
+        #[cfg(feature = "nrd")]
+        {
+            assert!(reloader.sources[5].extra_include.is_some());
+            assert!(reloader.sources[6].extra_include.is_some());
+        }
+    }
 }

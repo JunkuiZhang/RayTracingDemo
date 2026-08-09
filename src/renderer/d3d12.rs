@@ -1761,10 +1761,10 @@ impl Dx12Renderer {
     pub fn cycle_denoiser(&mut self) -> Result<()> {
         #[cfg(not(feature = "nrd"))]
         {
-            return Err(WindowsError::new(
+            Err(WindowsError::new(
                 windows::core::HRESULT(0x80070057_u32 as i32),
                 "F3 切换 NRD 需要使用 cargo run --features nrd 构建",
-            ));
+            ))
         }
 
         #[cfg(feature = "nrd")]
@@ -1799,10 +1799,11 @@ impl Dx12Renderer {
             })?;
             let old_name = self.denoiser.as_str();
             let previous = std::mem::replace(&mut self.active_generation, new_generation);
-            if previous.last_used_fence != 0 {
+            let retire_fence = previous.last_used_fence;
+            if retire_fence != 0 {
                 self.retired_generations
                     .push_back(RetiredRenderResourceGeneration {
-                        retire_fence: previous.last_used_fence,
+                        retire_fence,
                         resources: previous,
                     });
                 self.retired_generation_high_watermark = self
@@ -1838,7 +1839,7 @@ impl Dx12Renderer {
                 "denoiser_switch from={old_name} to={} generation={} history_reset=1 idle_waits=0 retire_fence={}",
                 next.as_str(),
                 self.active_generation.id,
-                self.active_generation.last_used_fence
+                retire_fence
             );
             Ok(())
         }
@@ -2871,11 +2872,34 @@ impl Dx12Renderer {
             3,
             "Tone Map 与调试视图",
         )?;
+        #[cfg(feature = "nrd")]
+        let nrd_prep = ComputePipeline::new(
+            &self.device,
+            &shaders.nrd_prep,
+            11,
+            7,
+            3,
+            "阶段 9 NRD REBLUR 输入准备",
+        )?;
+        #[cfg(feature = "nrd")]
+        let nrd_compose = ComputePipeline::new(
+            &self.device,
+            &shaders.nrd_compose,
+            5,
+            2,
+            1,
+            "阶段 9 NRD REBLUR 输出合成",
+        )?;
         self.raytracing_pipeline = raytracing;
         self.temporal_pipeline = temporal;
         self.atrous_baseline_pipeline = atrous_baseline;
         self.atrous_shared_pipeline = atrous_shared;
         self.tonemap_pipeline = tonemap;
+        #[cfg(feature = "nrd")]
+        {
+            self.nrd_prep_pipeline = nrd_prep;
+            self.nrd_compose_pipeline = nrd_compose;
+        }
         self.request_history_reset();
         self.accumulated_frames = 0;
         if let Some(controller) = self.dynamic_resolution.as_mut() {
