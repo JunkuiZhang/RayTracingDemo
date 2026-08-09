@@ -8,6 +8,7 @@ mod as_policy;
 mod camera;
 mod cpu_reference;
 mod data;
+mod debug_view;
 mod entity;
 mod material;
 mod realtime;
@@ -19,6 +20,7 @@ mod some_math;
 mod systems;
 mod world;
 
+use debug_view::DebugView;
 use resolution::{
     DynamicResolutionConfig, DynamicResolutionConfigError, RenderScale, RenderScaleError,
     ResolutionMode,
@@ -78,6 +80,9 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
             "--model"
                 | "--animate-model"
                 | "--benchmark-seconds"
+                | "--capture-output"
+                | "--capture-after-spp"
+                | "--debug-view"
                 | "--atrous-mode"
                 | "--output-size"
                 | "--render-scale"
@@ -89,7 +94,7 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
     });
     if cpu_reference_requested && realtime_requested {
         return Err(
-            "--cpu-reference 不能与实时渲染选项（--model、--animate-model、--benchmark-seconds、--atrous-mode、--output-size、--render-scale、--dynamic-resolution、--target-gpu-ms、--command-recording-mode、--acceleration-structure-mode）同时使用"
+            "--cpu-reference 不能与实时渲染选项（--model、--animate-model、--benchmark-seconds、--capture-output、--capture-after-spp、--debug-view、--atrous-mode、--output-size、--render-scale、--dynamic-resolution、--target-gpu-ms、--command-recording-mode、--acceleration-structure-mode）同时使用"
                 .to_string(),
         );
     }
@@ -104,11 +109,26 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
         let target_requested = arguments
             .iter()
             .any(|argument| argument == "--target-gpu-ms");
+        let capture_requested = arguments
+            .iter()
+            .any(|argument| argument == "--capture-output");
+        let capture_spp_requested = arguments
+            .iter()
+            .any(|argument| argument == "--capture-after-spp");
+        let benchmark_requested = arguments
+            .iter()
+            .any(|argument| argument == "--benchmark-seconds");
         if dynamic_requested && render_scale_requested {
             return Err("--dynamic-resolution 不能与 --render-scale 同时使用".to_string());
         }
         if target_requested && !dynamic_requested {
             return Err("--target-gpu-ms 只能与 --dynamic-resolution 一起使用".to_string());
+        }
+        if capture_requested && benchmark_requested {
+            return Err("--capture-output 不能与 --benchmark-seconds 同时使用".to_string());
+        }
+        if capture_spp_requested && !capture_requested {
+            return Err("--capture-after-spp 只能与 --capture-output 一起使用".to_string());
         }
         let mut config = realtime::RealtimeConfig::default();
         let mut dynamic_target = DynamicResolutionConfig::default();
@@ -127,6 +147,22 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                 "--benchmark-seconds" => {
                     let value = arguments.next().ok_or("--benchmark-seconds 缺少数值")?;
                     config.benchmark_seconds = Some(parse_benchmark_seconds(&value)?);
+                }
+                "--capture-output" => {
+                    let value = arguments.next().ok_or("--capture-output 缺少 PNG 路径")?;
+                    let path = PathBuf::from(value);
+                    if path.exists() {
+                        return Err(format!("capture 输出已存在，拒绝覆盖：{}", path.display()));
+                    }
+                    config.capture_output = Some(path);
+                }
+                "--capture-after-spp" => {
+                    let value = arguments.next().ok_or("--capture-after-spp 缺少数值")?;
+                    config.capture_after_spp = Some(parse_capture_after_spp(&value)?);
+                }
+                "--debug-view" => {
+                    let value = arguments.next().ok_or("--debug-view 缺少名称")?;
+                    config.debug_view = parse_debug_view(&value)?;
                 }
                 "--atrous-mode" => {
                     let value = arguments.next().ok_or("--atrous-mode 缺少模式")?;
@@ -162,6 +198,9 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                 }
                 _ => return Err(format!("未知参数：{argument}")),
             }
+        }
+        if config.capture_output.is_none() && config.capture_after_spp.is_some() {
+            return Err("--capture-after-spp 只能与 --capture-output 一起使用".to_string());
         }
         return Ok(Command::Realtime(config));
     }
@@ -277,6 +316,26 @@ fn parse_target_gpu_ms(value: &str) -> Result<DynamicResolutionConfig, String> {
     })
 }
 
+fn parse_capture_after_spp(value: &str) -> Result<u32, String> {
+    let spp = value
+        .parse::<u32>()
+        .map_err(|_| format!("无效的 --capture-after-spp：{value}（允许范围为 1..4096）"))?;
+    if !(1..=4096).contains(&spp) {
+        return Err(format!(
+            "无效的 --capture-after-spp：{value}（允许范围为 1..4096）"
+        ));
+    }
+    Ok(spp)
+}
+
+fn parse_debug_view(value: &str) -> Result<DebugView, String> {
+    DebugView::from_name(value).ok_or_else(|| {
+        format!(
+            "无效的 --debug-view：{value}（支持 final、raw、albedo、normal-roughness、depth、motion、variance、history-rejection、history-length、object-material-id、specular-hit-distance）"
+        )
+    })
+}
+
 fn parse_command_recording_mode(value: &str) -> Result<realtime::CommandRecordingMode, String> {
     match value {
         "baseline" => Ok(realtime::CommandRecordingMode::Baseline),
@@ -304,7 +363,7 @@ fn print_help() {
         "RayTracingDemo\n\n\
          用法：\n  \
          cargo run --release                 启动实时 DX12 窗口\n  \
-         cargo run --release -- --model <路径> [--animate-model] [--benchmark-seconds <秒>] [--atrous-mode <模式>] [--output-size <宽x高>] [--render-scale <比例> | --dynamic-resolution [--target-gpu-ms <毫秒>]] [--command-recording-mode <模式>] [--acceleration-structure-mode <模式>]\n  \
+         cargo run --release -- --model <路径> [--animate-model] [--benchmark-seconds <秒> | --capture-output <PNG>] [--capture-after-spp <SPP>] [--debug-view <名称>] [--atrous-mode <模式>] [--output-size <宽x高>] [--render-scale <比例> | --dynamic-resolution [--target-gpu-ms <毫秒>]] [--command-recording-mode <模式>] [--acceleration-structure-mode <模式>]\n  \
          cargo run --release -- --cpu-reference [选项]\n\n\
          选项：\n  \
          --samples <数量>       每像素采样数，默认 1\n  \
@@ -312,6 +371,12 @@ fn print_help() {
          --output-dir <目录>    输出目录，默认 output/cpu-reference\n  \
          --skip-denoise         只保存原始路径追踪结果\n  \
          --benchmark-seconds <秒> 预热后输出固定格式 GPU JSON 报告（1..3600）\n  \
+         --capture-output <PNG>   fence-safe 截图并输出一行 capture JSON\n  \
+         --capture-after-spp <SPP> 截图目标 SPP（1..4096，默认 128）\n  \
+         --atrous-mode <模式>      À-Trous 路径：baseline 或 shared，默认 baseline\n  \
+         --output-size <宽x高>     窗口物理像素尺寸，范围 320x180..7680x4320\n  \
+         --render-scale <比例>    固定内部渲染比例，有限数值 0.5..1.0，默认 1.0\n  \
+         --debug-view <名称>      final/raw/albedo/normal-roughness/depth/motion/variance/history-rejection/history-length/object-material-id/specular-hit-distance\n  \
          --atrous-mode <模式>      À-Trous 路径：baseline 或 shared，默认 baseline\n  \
          --output-size <宽x高>     窗口物理像素尺寸，范围 320x180..7680x4320\n  \
          --render-scale <比例>    固定内部渲染比例，有限数值 0.5..1.0，默认 1.0\n  \

@@ -19,6 +19,7 @@ use winit::{
 
 use crate::{
     as_policy::AccelerationStructureStats,
+    debug_view::DebugView,
     realtime::{AtrousMode, CommandRecordingMode, RealtimeConfig},
     resolution::{
         DynamicResolutionConfig, DynamicResolutionController, DynamicResolutionDirection, Extent2D,
@@ -143,7 +144,7 @@ pub struct Dx12Renderer {
     accumulated_frames: u32,
     history_index: usize,
     reset_history: bool,
-    debug_view: u32,
+    debug_view: DebugView,
     camera_position: [f32; 3],
     camera_yaw: f32,
     camera_pitch: f32,
@@ -434,7 +435,7 @@ impl Dx12Renderer {
                 accumulated_frames: 0,
                 history_index: 0,
                 reset_history: true,
-                debug_view: 0,
+                debug_view: config.debug_view,
                 camera_position: [0.0, 0.0, -2.666_666_7],
                 camera_yaw: 0.0,
                 camera_pitch: 0.0,
@@ -834,7 +835,7 @@ impl Dx12Renderer {
                 self.active_generation
                     .shader_heap
                     .gpu_handle(TONEMAP_TABLE_BASES[current_history]),
-                &[self.debug_view, 1.0_f32.to_bits()],
+                &[self.debug_view.hlsl_value(), 1.0_f32.to_bits()],
             );
             self.command_list
                 .Dispatch(output_groups_x, output_groups_y, 1);
@@ -913,6 +914,14 @@ impl Dx12Renderer {
     pub fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         if width == 0 || height == 0 {
             self.minimized = true;
+            eprintln!(
+                "resize_diagnostic state=minimized output={}x{} render={}x{} generation={} history_reset=0 idle_waits=0",
+                self.width,
+                self.height,
+                self.render_width(),
+                self.render_height(),
+                self.render_generation_id(),
+            );
             return Ok(());
         }
         if !self.minimized && width == self.width && height == self.height {
@@ -920,6 +929,7 @@ impl Dx12Renderer {
         }
 
         unsafe {
+            let idle_waits_before = self.gpu_idle_wait_count;
             self.wait_for_gpu()?;
             self.reclaim_retired_generations();
             self.gpu_profiler.invalidate();
@@ -980,6 +990,15 @@ impl Dx12Renderer {
                 self.render_generation_switch_count.saturating_add(1);
             self.retired_generations.clear();
             self.create_render_targets()?;
+            eprintln!(
+                "resize_diagnostic state=completed output={}x{} render={}x{} generation={} history_reset=1 idle_waits={}",
+                self.width,
+                self.height,
+                self.render_width(),
+                self.render_height(),
+                self.render_generation_id(),
+                self.gpu_idle_wait_count.saturating_sub(idle_waits_before),
+            );
             Ok(())
         }
     }
@@ -1114,7 +1133,7 @@ impl Dx12Renderer {
 
     pub fn cycle_render_scale(&mut self) -> Result<()> {
         if matches!(self.resolution_mode, ResolutionMode::Dynamic(_)) {
-            eprintln!("动态分辨率模式由 GPU 控制，F2 固定档位不可用");
+            eprintln!("render_scale_manual_change blocked=dynamic_gpu_controlled");
             return Ok(());
         }
         let profiles = [
@@ -1129,7 +1148,25 @@ impl Dx12Renderer {
             .map_or(RenderScale::NATIVE, |index| {
                 profiles[(index + 1) % profiles.len()]
             });
-        self.set_render_scale(next)
+        let old_scale = self.requested_render_scale;
+        let old_extent = self.active_generation.render_extent;
+        let old_generation = self.active_generation.id;
+        self.set_render_scale(next)?;
+        eprintln!(
+            "render_scale_manual_change mode=fixed old_scale={:.3} new_scale={:.3} old_extent={}x{} new_extent={}x{} generation={}",
+            old_scale.get(),
+            self.requested_render_scale.get(),
+            old_extent.width,
+            old_extent.height,
+            self.active_generation.render_extent.width,
+            self.active_generation.render_extent.height,
+            self.active_generation.id,
+        );
+        debug_assert!(
+            self.active_generation.id != old_generation
+                || old_extent == self.active_generation.render_extent
+        );
+        Ok(())
     }
 
     fn reclaim_retired_generations(&mut self) {
@@ -1656,23 +1693,16 @@ impl Dx12Renderer {
     }
 
     pub fn cycle_debug_view(&mut self) {
-        self.debug_view = (self.debug_view + 1) % 11;
+        self.debug_view = self.debug_view.next();
+        eprintln!(
+            "debug_view_changed index={} name={}",
+            self.debug_view.index(),
+            self.debug_view.name()
+        );
     }
 
     pub fn debug_view_name(&self) -> &'static str {
-        match self.debug_view {
-            0 => "最终",
-            1 => "原始 1 SPP",
-            2 => "反照率",
-            3 => "法线/粗糙度",
-            4 => "深度",
-            5 => "运动矢量",
-            6 => "方差",
-            7 => "历史拒绝",
-            8 => "历史长度",
-            9 => "物体/材质 ID",
-            _ => "镜面命中距离",
-        }
+        self.debug_view.title()
     }
 
     unsafe fn create_render_targets(&mut self) -> Result<()> {

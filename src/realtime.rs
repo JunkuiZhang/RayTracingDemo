@@ -1,12 +1,15 @@
 use std::{error::Error, path::PathBuf};
 
-use crate::resolution::ResolutionMode;
+use crate::{debug_view::DebugView, resolution::ResolutionMode};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RealtimeConfig {
     pub model_path: Option<PathBuf>,
     pub animate_model: bool,
     pub benchmark_seconds: Option<u32>,
+    pub capture_output: Option<PathBuf>,
+    pub capture_after_spp: Option<u32>,
+    pub debug_view: DebugView,
     pub atrous_mode: AtrousMode,
     pub output_size: Option<(u32, u32)>,
     pub resolution_mode: ResolutionMode,
