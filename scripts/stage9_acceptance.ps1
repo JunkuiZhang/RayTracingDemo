@@ -14,9 +14,13 @@ param(
     [ValidateRange(16, 256)]
     [int]$CaptureSpp = 64,
     [ValidateRange(0, 255)]
-    [double]$MaxCaptureMae = 66.0,
+    [double]$MaxCaptureMae = 12.0,
     [ValidateRange(0, 255)]
-    [double]$MaxCaptureRmse = 106.0,
+    [double]$MaxCaptureRmse = 24.0,
+    [ValidateRange(0, 255)]
+    [double]$MaxNrdTemporalMae = 0.5,
+    [ValidateRange(0, 255)]
+    [double]$MaxNrdTemporalRmse = 5.0,
     [string]$FixedOutputSize = "1280x720",
     [string]$DynamicOutputSize = "1920x1080",
     [string]$OutputRoot = "output/stage9"
@@ -310,19 +314,30 @@ function Add-CaptureComparison(
 ) {
     $caseRoot = Join-Path $Root $Name
     New-Item -ItemType Directory -Path $caseRoot -Force | Out-Null
-    $svgfPath = Join-Path $caseRoot "svgf-final.png"
-    $nrdPath = Join-Path $caseRoot "nrd-final.png"
-    $svgf = Invoke-RecordedProcess $Executable `
-        (@("--output-size", $OutputSize, "--denoiser", "svgf", "--capture-output", $svgfPath, "--capture-after-spp", "$CaptureSpp") + $CommonArguments) `
-        $caseRoot "svgf-capture"
-    $nrd = Invoke-RecordedProcess $Executable `
-        (@("--output-size", $OutputSize, "--denoiser", "nrd-reblur", "--capture-output", $nrdPath, "--capture-after-spp", "$CaptureSpp") + $CommonArguments) `
-        $caseRoot "nrd-capture"
+    $previousSpp = $CaptureSpp - 1
+    $svgfPreviousPath = Join-Path $caseRoot "svgf-previous.png"
+    $svgfFinalPath = Join-Path $caseRoot "svgf-final.png"
+    $nrdPreviousPath = Join-Path $caseRoot "nrd-previous.png"
+    $nrdFinalPath = Join-Path $caseRoot "nrd-final.png"
+    $svgfPrevious = Invoke-RecordedProcess $Executable `
+        (@("--output-size", $OutputSize, "--denoiser", "svgf", "--capture-output", $svgfPreviousPath, "--capture-after-spp", "$previousSpp") + $CommonArguments) `
+        $caseRoot "svgf-previous-capture"
+    $svgfFinal = Invoke-RecordedProcess $Executable `
+        (@("--output-size", $OutputSize, "--denoiser", "svgf", "--capture-output", $svgfFinalPath, "--capture-after-spp", "$CaptureSpp") + $CommonArguments) `
+        $caseRoot "svgf-final-capture"
+    $nrdPrevious = Invoke-RecordedProcess $Executable `
+        (@("--output-size", $OutputSize, "--denoiser", "nrd-reblur", "--capture-output", $nrdPreviousPath, "--capture-after-spp", "$previousSpp") + $CommonArguments) `
+        $caseRoot "nrd-previous-capture"
+    $nrdFinal = Invoke-RecordedProcess $Executable `
+        (@("--output-size", $OutputSize, "--denoiser", "nrd-reblur", "--capture-output", $nrdFinalPath, "--capture-after-spp", "$CaptureSpp") + $CommonArguments) `
+        $caseRoot "nrd-final-capture"
 
     $failures = [System.Collections.Generic.List[string]]::new()
     foreach ($capture in @(
-        [pscustomobject]@{ run = $svgf; backend = "svgf"; path = $svgfPath }
-        [pscustomobject]@{ run = $nrd; backend = "nrd-reblur"; path = $nrdPath }
+        [pscustomobject]@{ run = $svgfPrevious; backend = "svgf"; path = $svgfPreviousPath; spp = $previousSpp }
+        [pscustomobject]@{ run = $svgfFinal; backend = "svgf"; path = $svgfFinalPath; spp = $CaptureSpp }
+        [pscustomobject]@{ run = $nrdPrevious; backend = "nrd-reblur"; path = $nrdPreviousPath; spp = $previousSpp }
+        [pscustomobject]@{ run = $nrdFinal; backend = "nrd-reblur"; path = $nrdFinalPath; spp = $CaptureSpp }
     )) {
         $run = $capture.run
         $backend = [string]$capture.backend
@@ -332,27 +347,50 @@ function Add-CaptureComparison(
             continue
         }
         if ([string]$run.json.modes.denoiser -ne $backend) { $failures.Add("$backend capture denoiser mismatch") }
-        if ([int64]$run.json.actual_spp -ne $CaptureSpp) { $failures.Add("$backend capture SPP mismatch") }
+        if ([int64]$run.json.actual_spp -ne [int64]$capture.spp) {
+            $failures.Add("$backend capture SPP mismatch: expected $($capture.spp)")
+        }
         if ([int64]$run.json.png_bytes -le 0 -or -not (Test-Path -LiteralPath $pngPath)) {
             $failures.Add("$backend capture PNG is missing or empty")
         }
     }
 
-    $diff = $null
+    $crossDiff = $null
+    $svgfTemporalDiff = $null
+    $nrdTemporalDiff = $null
     $diffExecutable = Join-Path (Split-Path -Parent $Executable) "image_diff.exe"
     if ($failures.Count -eq 0 -and (Test-Path -LiteralPath $diffExecutable)) {
-        $diff = Invoke-RecordedProcess $diffExecutable @($svgfPath, $nrdPath) $caseRoot "image-diff"
-        if ($diff.exit_code -ne 0 -or $diff.timed_out -or $diff.stdout_nonempty_lines -ne 1 -or $null -eq $diff.json) {
-            $failures.Add("image_diff failed")
-        } else {
-            if (-not (Test-Finite $diff.json.mae) -or [double]$diff.json.mae -gt $MaxCaptureMae) {
-                $failures.Add("SVGF/NRD capture MAE exceeds $MaxCaptureMae")
+        $diffSpecs = @(
+            [pscustomobject]@{
+                label = "svgf-vs-nrd-final-diff"; left = $svgfFinalPath; right = $nrdFinalPath
+                max_mae = $MaxCaptureMae; max_rmse = $MaxCaptureRmse; description = "SVGF/NRD final"
             }
-            if (-not (Test-Finite $diff.json.rmse) -or [double]$diff.json.rmse -gt $MaxCaptureRmse) {
-                $failures.Add("SVGF/NRD capture RMSE exceeds $MaxCaptureRmse")
+            [pscustomobject]@{
+                label = "svgf-temporal-diff"; left = $svgfPreviousPath; right = $svgfFinalPath
+                max_mae = 255.0; max_rmse = 255.0; description = "SVGF temporal reference"
             }
-            if ([int64]$diff.json.alpha_mismatch_count -ne 0) {
-                $failures.Add("SVGF/NRD capture alpha differs")
+            [pscustomobject]@{
+                label = "nrd-temporal-diff"; left = $nrdPreviousPath; right = $nrdFinalPath
+                max_mae = $MaxNrdTemporalMae; max_rmse = $MaxNrdTemporalRmse; description = "NRD temporal"
+            }
+        )
+        foreach ($spec in $diffSpecs) {
+            $diffRun = Invoke-RecordedProcess $diffExecutable @($spec.left, $spec.right) $caseRoot $spec.label
+            if ($spec.label -eq "svgf-vs-nrd-final-diff") { $crossDiff = $diffRun }
+            elseif ($spec.label -eq "svgf-temporal-diff") { $svgfTemporalDiff = $diffRun }
+            else { $nrdTemporalDiff = $diffRun }
+            if ($diffRun.exit_code -ne 0 -or $diffRun.timed_out -or $diffRun.stdout_nonempty_lines -ne 1 -or $null -eq $diffRun.json) {
+                $failures.Add("$($spec.description) image_diff failed")
+                continue
+            }
+            if (-not (Test-Finite $diffRun.json.mae) -or [double]$diffRun.json.mae -gt [double]$spec.max_mae) {
+                $failures.Add("$($spec.description) MAE exceeds $($spec.max_mae)")
+            }
+            if (-not (Test-Finite $diffRun.json.rmse) -or [double]$diffRun.json.rmse -gt [double]$spec.max_rmse) {
+                $failures.Add("$($spec.description) RMSE exceeds $($spec.max_rmse)")
+            }
+            if ([int64]$diffRun.json.alpha_mismatch_count -ne 0) {
+                $failures.Add("$($spec.description) alpha differs")
             }
         }
     } elseif (-not (Test-Path -LiteralPath $diffExecutable)) {
@@ -363,14 +401,23 @@ function Add-CaptureComparison(
         name = $Name
         backend = "svgf-vs-nrd-reblur"
         mode = "fixed-capture"
-        run_count = 2
-        valid_run_count = if ($failures.Count -eq 0) { 2 } else { 0 }
+        run_count = 4
+        valid_run_count = if ($failures.Count -eq 0) { 4 } else { 0 }
         passed = $failures.Count -eq 0
         failures = $failures.ToArray()
         capture_spp = $CaptureSpp
-        thresholds = [ordered]@{ mae = $MaxCaptureMae; rmse = $MaxCaptureRmse }
-        quality = if ($null -ne $diff) { $diff.json } else { $null }
-        runs = @($svgf, $nrd, $diff)
+        thresholds = [ordered]@{
+            cross_backend_mae = $MaxCaptureMae
+            cross_backend_rmse = $MaxCaptureRmse
+            nrd_temporal_mae = $MaxNrdTemporalMae
+            nrd_temporal_rmse = $MaxNrdTemporalRmse
+        }
+        quality = [ordered]@{
+            svgf_vs_nrd_final = if ($null -ne $crossDiff) { $crossDiff.json } else { $null }
+            svgf_temporal = if ($null -ne $svgfTemporalDiff) { $svgfTemporalDiff.json } else { $null }
+            nrd_temporal = if ($null -ne $nrdTemporalDiff) { $nrdTemporalDiff.json } else { $null }
+        }
+        runs = @($svgfPrevious, $svgfFinal, $nrdPrevious, $nrdFinal, $crossDiff, $svgfTemporalDiff, $nrdTemporalDiff)
     })
 }
 
@@ -439,7 +486,7 @@ if (($environment.gpu_name -eq "N/A" -or [string]::IsNullOrWhiteSpace([string]$e
 }
 $environment | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $environment_json_path -Encoding UTF8
 $summary = [ordered]@{
-    schema_version = 1
+    schema_version = 2
     stage = "9F"
     suite = $Suite
     run_id = $runId

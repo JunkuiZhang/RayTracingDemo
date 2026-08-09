@@ -7,8 +7,10 @@ use crate::resolution::Extent2D;
 
 use super::{
     ATROUS_HISTORY_TABLE_BASES, ATROUS_PING_TO_PONG_BASES, ATROUS_PONG_TO_PING_BASES,
-    SHADER_DESCRIPTOR_COUNT, TEMPORAL_TABLE_BASES, TONEMAP_TABLE_BASES, create_structured_srv,
-    create_texture_uav,
+    DXR_UAV_REGISTER_COUNT, RECONSTRUCTION_DIFFUSE_HIT_DISTANCE_UAV_REGISTER,
+    RECONSTRUCTION_PRIMARY_EMISSIVE_UAV_REGISTER,
+    RECONSTRUCTION_SPECULAR_HIT_DISTANCE_UAV_REGISTER, SHADER_DESCRIPTOR_COUNT,
+    TEMPORAL_TABLE_BASES, TONEMAP_TABLE_BASES, create_structured_srv, create_texture_uav,
     descriptor::DescriptorHeap,
     populate_texture_table,
     raytracing::{AccelerationStructures, SceneGeometry},
@@ -455,28 +457,38 @@ impl RenderResourceGeneration {
         let specular_pong = &self.filter_specular_pong;
 
         let dxr_uavs = [
-            raw_diffuse,
-            raw_specular,
-            albedo,
-            normal,
-            depth,
-            motion,
-            id,
-            world_position,
-            hit_distance,
-            reconstruction_noisy_hdr,
-            reconstruction_diffuse_albedo,
-            reconstruction_specular_albedo,
-            reconstruction_normal_roughness,
-            reconstruction_view_z,
-            reconstruction_motion,
-            reconstruction_diffuse_hit_distance,
-            reconstruction_specular_hit_distance,
-            reconstruction_primary_emissive,
+            (0, raw_diffuse),
+            (1, raw_specular),
+            (2, albedo),
+            (3, normal),
+            (4, depth),
+            (5, motion),
+            (6, id),
+            (7, world_position),
+            (8, hit_distance),
+            (9, reconstruction_noisy_hdr),
+            (10, reconstruction_diffuse_albedo),
+            (11, reconstruction_specular_albedo),
+            (12, reconstruction_normal_roughness),
+            (13, reconstruction_view_z),
+            (14, reconstruction_motion),
+            (
+                RECONSTRUCTION_DIFFUSE_HIT_DISTANCE_UAV_REGISTER,
+                reconstruction_diffuse_hit_distance,
+            ),
+            (
+                RECONSTRUCTION_SPECULAR_HIT_DISTANCE_UAV_REGISTER,
+                reconstruction_specular_hit_distance,
+            ),
+            (
+                RECONSTRUCTION_PRIMARY_EMISSIVE_UAV_REGISTER,
+                reconstruction_primary_emissive,
+            ),
         ];
-        for (offset, resource) in dxr_uavs.into_iter().enumerate() {
+        debug_assert_eq!(dxr_uavs.len(), DXR_UAV_REGISTER_COUNT);
+        for (register, resource) in dxr_uavs {
             unsafe {
-                create_texture_uav(device, &self.shader_heap, DXR_UAV_BASE + offset, resource)
+                create_texture_uav(device, &self.shader_heap, DXR_UAV_BASE + register, resource)
             };
         }
 

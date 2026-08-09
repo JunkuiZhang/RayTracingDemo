@@ -66,9 +66,9 @@ RWTexture2D<float> ReconstructionViewZ : register(u13);
 // XY follows NRD's old = new + MV convention in pixel units. Z is the
 // previous/current linear viewZ delta; W is reserved for future adapters.
 RWTexture2D<float4> ReconstructionMotion : register(u14);
-RWTexture2D<float> ReconstructionSpecularHitDistance : register(u15);
-RWTexture2D<float4> ReconstructionPrimaryEmissive : register(u16);
-RWTexture2D<float> ReconstructionDiffuseHitDistance : register(u17);
+RWTexture2D<float> ReconstructionDiffuseHitDistance : register(u15);
+RWTexture2D<float> ReconstructionSpecularHitDistance : register(u16);
+RWTexture2D<float4> ReconstructionPrimaryEmissive : register(u17);
 
 cbuffer FrameConstants : register(b0)
 {
@@ -716,13 +716,14 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         payload.rawSpecular = emissive
             + directSpecular
             + specularBounceWeight * child.radiance;
-        // The continuation ray belongs to exactly one probabilistically
-        // selected lobe. Keep the other lobe's NEE distance (or zero when it
-        // has no sample) instead of attaching an unrelated child hit to both.
-        if (sampledSpecular && any(specularBounceWeight > 0.0))
-            specularHitDistance = child.hitDistance;
-        else if (any(diffuseBounceWeight > 0.0))
+        // The random branch selects one proposal distribution, but the mixture
+        // PDF evaluates both diffuse and specular BRDF lobes for the same
+        // continuation direction. Both non-zero estimators therefore share
+        // the child's first-bounce hitT; neither lobe was skipped.
+        if (any(diffuseBounceWeight > 0.0))
             diffuseHitDistance = child.hitDistance;
+        if (any(specularBounceWeight > 0.0))
+            specularHitDistance = child.hitDistance;
         ReconstructionNoisyHdr[DispatchRaysIndex().xy] = float4(
             FiniteNonNegative(payload.rawDiffuse + payload.rawSpecular),
             1.0);

@@ -165,6 +165,10 @@ mod texture;
 
 const FRAME_COUNT: usize = 3;
 const SHADER_DESCRIPTOR_COUNT: usize = 321;
+const DXR_UAV_REGISTER_COUNT: usize = 18;
+const RECONSTRUCTION_DIFFUSE_HIT_DISTANCE_UAV_REGISTER: usize = 15;
+const RECONSTRUCTION_SPECULAR_HIT_DISTANCE_UAV_REGISTER: usize = 16;
+const RECONSTRUCTION_PRIMARY_EMISSIVE_UAV_REGISTER: usize = 17;
 const STAGE3_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage3_triangle.dxil"));
 const TEMPORAL_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage6_temporal.dxil"));
 const ATROUS_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage6_atrous.dxil"));
@@ -3246,7 +3250,10 @@ mod tests {
 
     #[test]
     fn descriptor_tables_do_not_overlap_and_fit_the_heap() {
-        let mut ranges = vec![(DXR_TABLE_BASE, texture::DXR_UAV_BASE + 18)];
+        let mut ranges = vec![(
+            DXR_TABLE_BASE,
+            texture::DXR_UAV_BASE + DXR_UAV_REGISTER_COUNT,
+        )];
         for base in TEMPORAL_TABLE_BASES {
             ranges.push((base, base + 28));
         }
@@ -3273,6 +3280,30 @@ mod tests {
             assert!(pair[0].1 <= pair[1].0, "descriptor tables overlap");
         }
         assert!(ranges.last().unwrap().1 <= SHADER_DESCRIPTOR_COUNT);
+    }
+
+    #[test]
+    fn stage3_reconstruction_uav_registers_match_the_descriptor_contract() {
+        let shader = include_str!("../../shaders/stage3_triangle.hlsl");
+        for (declaration, register) in [
+            (
+                "RWTexture2D<float> ReconstructionDiffuseHitDistance",
+                RECONSTRUCTION_DIFFUSE_HIT_DISTANCE_UAV_REGISTER,
+            ),
+            (
+                "RWTexture2D<float> ReconstructionSpecularHitDistance",
+                RECONSTRUCTION_SPECULAR_HIT_DISTANCE_UAV_REGISTER,
+            ),
+            (
+                "RWTexture2D<float4> ReconstructionPrimaryEmissive",
+                RECONSTRUCTION_PRIMARY_EMISSIVE_UAV_REGISTER,
+            ),
+        ] {
+            assert!(
+                shader.contains(&format!("{declaration} : register(u{register});")),
+                "stage3 UAV declaration differs from the Rust descriptor contract: {declaration}"
+            );
+        }
     }
 
     #[test]

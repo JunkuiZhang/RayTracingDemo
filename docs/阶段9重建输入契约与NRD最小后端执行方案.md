@@ -109,9 +109,9 @@ NRD 使用 NVIDIA RTX SDK License。实现和分发至少要满足：
 
 遇到必须扩大到以上内容才能继续的情况，应停止对应工作包，提交最小可构建状态并在 review 中说明原因。
 
-## 4. 当前实现审计与必须修正的差异
+## 4. 阶段 9 实施前审计与必须修正的差异
 
-| 项目 | 当前实现 | NRD / RR 要求 | 阶段 9 决策 |
+| 项目 | 阶段 9 前实现 | NRD / RR 要求 | 阶段 9 决策 |
 | --- | --- | --- | --- |
 | 漫反射信号 | `RawDiffuse` 为材质调制后的贡献，SVGF 用 `raw / albedo` 解调 | NRD 要求用官方 material factors 解调；RR 要 noisy full color 与 diffuse albedo | 保留 SVGF 语义，新增显式 reconstruction/material contract；NRD prep 使用官方 helper |
 | 镜面信号 | `RawSpecular` 含镜面贡献和主表面 emissive | NRD 需要可正确解调的 specular radiance；RR 需要 noisy color 和 specular albedo | 不再把“含 emissive”当作 NRD 纯镜面；必要时单独输出 primary emissive，合成时加回 |
@@ -378,7 +378,10 @@ NRD hitT 必须遵守：
 - 只有真正跳过的 lobe 才以 0 表示无样本；
 - delta transmission 不得伪装为普通 rough specular hit。
 
-当前路径在混合 proposal 下会同时评估 diffuse/specular BRDF 贡献，但只在 `sampledSpecular` 时写一个 hit distance。最小阶段 9 不应顺手改成另一套采样器。建议新增“第一 bounce hit distance”并在两个信号确实共享同一 continuation ray 时显式复用；同时保留现有 SVGF hit-distance 语义，避免无意改变默认输出。
+当前路径的随机分支只选择 proposal 分布；对得到的同一 continuation 方向，mixture PDF
+会同时评估 diffuse/specular BRDF，因而这不是 probabilistic lobe skip。两路非零 estimator
+必须显式共享 child 的第一 bounce hit distance；没有对应贡献时保持 NEE hitT 或 0。同时
+保留现有 SVGF hit-distance 资源语义，避免无意改变默认输出。
 
 如果实现者把信号改成真正的 probabilistic lobe skip：
 
@@ -735,7 +738,10 @@ cargo build --release --features nrd --locked
 自动 capture 使用短、可复现配置，不以单张截图证明时域正确：
 
 - 固定 Cornell：Raw、Final、normal/roughness、viewZ/depth、motion、spec hit distance、NRD validation。
-- 静态相机连续两张 NRD Final，计算 changed pixels、RMSE 和亮度统计；不要求完全相同，但不得出现全屏随机重置。
+- 静态相机采集 63/64 SPP 的 SVGF 与 NRD Final，分别计算连续帧 MAE/RMSE，并计算
+  64 SPP 跨后端差异；不要求完全相同，但 NRD 连续帧必须满足固定 fixture 门槛且不得
+  出现全屏随机重置。当前 RTX 4060 Laptop 门槛为 NRD MAE ≤ 0.5、RMSE ≤ 5，跨后端
+  MAE ≤ 12、RMSE ≤ 24；阈值变化必须附同场景 raw 证据，不能为迁就坏图放宽。
 - 相机平移/旋转：motion 方向 debug 与解析测试一致。
 - animated `NonIndexedMultiNode.gltf`：物体边缘没有明显旧轮廓。
 - 灯附近和镜面方块：观察高方差是否被稳定处理，不能只检查均值。
