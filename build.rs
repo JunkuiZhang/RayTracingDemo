@@ -27,6 +27,11 @@ fn main() {
             "stage6_tonemap.dxil",
             "cs_6_6",
         ),
+        (
+            "shaders/stage10_dlss_input.hlsl",
+            "stage10_dlss_input.dxil",
+            "cs_6_6",
+        ),
     ];
     for (source, _, _) in shaders {
         println!("cargo:rerun-if-changed={source}");

@@ -42,6 +42,7 @@ use crate::{
         render_extent,
     },
     scene::{MAX_SCENE_SAMPLERS, SceneAsset, gltf_loader},
+    upscaler::UpscalerMode,
 };
 
 use self::{
@@ -312,6 +313,7 @@ pub struct Dx12Renderer {
     active_generation: RenderResourceGeneration,
     retired_generations: VecDeque<RetiredRenderResourceGeneration>,
     resolution_mode: ResolutionMode,
+    upscaler: UpscalerMode,
     dynamic_resolution: Option<DynamicResolutionController>,
     resolution_clock: Instant,
     requested_render_scale: RenderScale,
@@ -396,6 +398,12 @@ pub struct Dx12Renderer {
 impl Dx12Renderer {
     pub fn new(window: &Window, width: u32, height: u32, config: &RealtimeConfig) -> Result<Self> {
         if let Some(error) = config.denoiser.requested_startup_error() {
+            return Err(WindowsError::new(
+                windows::core::HRESULT(0x80070057_u32 as i32),
+                error,
+            ));
+        }
+        if let Some(error) = config.upscaler.requested_startup_error() {
             return Err(WindowsError::new(
                 windows::core::HRESULT(0x80070057_u32 as i32),
                 error,
@@ -636,6 +644,7 @@ impl Dx12Renderer {
                     render_extent,
                     id: 1,
                     with_nrd: config.denoiser == DenoiserBackend::NrdReblur,
+                    with_dlss: !config.upscaler.is_native(),
                 },
             )
             .map_err(|error| dx_error("创建初始渲染资源代际", error))?;
@@ -650,6 +659,7 @@ impl Dx12Renderer {
                 active_generation,
                 retired_generations: VecDeque::new(),
                 resolution_mode: config.resolution_mode,
+                upscaler: config.upscaler,
                 dynamic_resolution: match config.resolution_mode {
                     ResolutionMode::Fixed(_) => None,
                     ResolutionMode::Dynamic(dynamic_config) => {
@@ -1555,6 +1565,7 @@ impl Dx12Renderer {
                     render_extent: new_render_extent,
                     id: generation_id,
                     with_nrd: self.denoiser == DenoiserBackend::NrdReblur,
+                    with_dlss: !self.upscaler.is_native(),
                 },
             )?;
             self.next_generation_id = self.next_generation_id.saturating_add(1);
@@ -1675,6 +1686,7 @@ impl Dx12Renderer {
                 render_extent: new_render_extent,
                 id: generation_id,
                 with_nrd: self.denoiser == DenoiserBackend::NrdReblur,
+                with_dlss: !self.upscaler.is_native(),
             },
         )
         .map_err(|error| {
@@ -1784,6 +1796,7 @@ impl Dx12Renderer {
                     render_extent: self.active_generation.render_extent,
                     id: generation_id,
                     with_nrd: next == DenoiserBackend::NrdReblur,
+                    with_dlss: !self.upscaler.is_native(),
                 },
             )
             .map_err(|error| {

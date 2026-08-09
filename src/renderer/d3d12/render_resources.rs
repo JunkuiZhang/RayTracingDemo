@@ -65,6 +65,19 @@ pub(super) struct NrdGenerationResources {
     pub(super) backend: super::NrdBackend,
 }
 
+#[cfg(feature = "streamline")]
+#[allow(dead_code)] // 10D consumes the generation-owned resources in the DLSS pass.
+pub(super) struct DlssGenerationResources {
+    /// HDR signal composed from the active SVGF/NRD diffuse and specular
+    /// outputs at the input extent.
+    pub(super) input_hdr: TrackedResource,
+    /// Streamline's output-resolution DLSS result before ToneMap.
+    pub(super) output_hdr: TrackedResource,
+    pub(super) depth: TrackedResource,
+    pub(super) motion: TrackedResource,
+    pub(super) exposure: TrackedResource,
+}
+
 /// All resources whose descriptors or dimensions depend on the current render
 /// extent. Every generation owns its complete shader-visible heap so an extent
 /// switch never overwrites descriptors that an in-flight frame may still use.
@@ -92,6 +105,9 @@ pub(super) struct RenderResourceGeneration {
     pub(super) reconstruction_diffuse_hit_distance: TrackedResource,
     pub(super) reconstruction_specular_hit_distance: TrackedResource,
     pub(super) reconstruction_primary_emissive: TrackedResource,
+    #[cfg(feature = "streamline")]
+    #[allow(dead_code)] // 10D consumes the DLSS generation from its pass.
+    pub(super) dlss: Option<DlssGenerationResources>,
     #[cfg(feature = "nrd")]
     pub(super) nrd: Option<NrdGenerationResources>,
     pub(super) nrd_validation: TrackedResource,
@@ -110,6 +126,7 @@ pub(super) struct RenderGenerationDesc {
     pub(super) render_extent: Extent2D,
     pub(super) id: u64,
     pub(super) with_nrd: bool,
+    pub(super) with_dlss: bool,
 }
 
 impl RenderResourceGeneration {
@@ -125,6 +142,7 @@ impl RenderResourceGeneration {
             render_extent,
             id,
             with_nrd,
+            with_dlss,
         } = description;
         let shader_heap = DescriptorHeap::new(
             device,
@@ -285,6 +303,48 @@ impl RenderResourceGeneration {
             DXGI_FORMAT_R16G16B16A16_FLOAT,
             format!("代际 {id} Reconstruction primary emissive"),
         )?;
+        #[cfg(feature = "streamline")]
+        let dlss = if with_dlss {
+            Some(DlssGenerationResources {
+                input_hdr: create_uav_texture(
+                    device,
+                    render_extent,
+                    DXGI_FORMAT_R16G16B16A16_FLOAT,
+                    format!("代际 {id} DLSS HDR 输入"),
+                )?,
+                output_hdr: create_uav_texture(
+                    device,
+                    output_extent,
+                    DXGI_FORMAT_R16G16B16A16_FLOAT,
+                    format!("代际 {id} DLSS HDR 输出"),
+                )?,
+                depth: create_uav_texture(
+                    device,
+                    render_extent,
+                    DXGI_FORMAT_R32_FLOAT,
+                    format!("代际 {id} DLSS depth"),
+                )?,
+                motion: create_uav_texture(
+                    device,
+                    render_extent,
+                    DXGI_FORMAT_R16G16_FLOAT,
+                    format!("代际 {id} DLSS motion vectors"),
+                )?,
+                exposure: create_uav_texture(
+                    device,
+                    Extent2D {
+                        width: 1,
+                        height: 1,
+                    },
+                    DXGI_FORMAT_R16G16B16A16_FLOAT,
+                    format!("代际 {id} DLSS exposure"),
+                )?,
+            })
+        } else {
+            None
+        };
+        #[cfg(not(feature = "streamline"))]
+        let _ = with_dlss;
         #[cfg(feature = "nrd")]
         let nrd = if with_nrd {
             Some(NrdGenerationResources {
@@ -414,6 +474,8 @@ impl RenderResourceGeneration {
             reconstruction_diffuse_hit_distance,
             reconstruction_specular_hit_distance,
             reconstruction_primary_emissive,
+            #[cfg(feature = "streamline")]
+            dlss,
             #[cfg(feature = "nrd")]
             nrd,
             nrd_validation,

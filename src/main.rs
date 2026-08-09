@@ -25,6 +25,8 @@ mod some_math;
 #[allow(dead_code)] // 10C/10D consume the ABI types from the renderer.
 mod streamline;
 mod systems;
+#[allow(dead_code)] // 10D consumes the contract from the renderer path.
+mod upscaler;
 mod world;
 
 use debug_view::DebugView;
@@ -100,11 +102,12 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                 | "--command-recording-mode"
                 | "--acceleration-structure-mode"
                 | "--denoiser"
+                | "--upscaler"
         )
     });
     if cpu_reference_requested && realtime_requested {
         return Err(
-            "--cpu-reference 不能与实时渲染选项（--model、--animate-model、--benchmark-seconds、--capture-output、--capture-after-spp、--debug-view、--atrous-mode、--output-size、--render-scale、--dynamic-resolution、--target-gpu-ms、--command-recording-mode、--acceleration-structure-mode、--denoiser）同时使用"
+            "--cpu-reference 不能与实时渲染选项（--model、--animate-model、--benchmark-seconds、--capture-output、--capture-after-spp、--debug-view、--atrous-mode、--output-size、--render-scale、--dynamic-resolution、--target-gpu-ms、--command-recording-mode、--acceleration-structure-mode、--denoiser、--upscaler）同时使用"
                 .to_string(),
         );
     }
@@ -116,6 +119,7 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
         let render_scale_requested = arguments
             .iter()
             .any(|argument| argument == "--render-scale");
+        let upscaler_requested = arguments.iter().any(|argument| argument == "--upscaler");
         let target_requested = arguments
             .iter()
             .any(|argument| argument == "--target-gpu-ms");
@@ -210,7 +214,19 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                     let value = arguments.next().ok_or("--denoiser 缺少后端")?;
                     config.denoiser = parse_denoiser_backend(&value)?;
                 }
+                "--upscaler" => {
+                    let value = arguments.next().ok_or("--upscaler 缺少模式")?;
+                    config.upscaler = parse_upscaler_mode(&value)?;
+                }
                 _ => return Err(format!("未知参数：{argument}")),
+            }
+        }
+        if upscaler_requested && config.upscaler != upscaler::UpscalerMode::Native {
+            if dynamic_requested {
+                return Err("非 Native upscaler 不能与 --dynamic-resolution 同时使用".to_string());
+            }
+            if render_scale_requested {
+                return Err("非 Native upscaler 的内部尺寸由 Streamline optimal settings 决定，不能与 --render-scale 同时使用".to_string());
             }
         }
         if config.capture_output.is_none() && config.capture_after_spp.is_some() {
@@ -382,12 +398,25 @@ fn parse_denoiser_backend(value: &str) -> Result<reconstruction::DenoiserBackend
     }
 }
 
+fn parse_upscaler_mode(value: &str) -> Result<upscaler::UpscalerMode, String> {
+    match value {
+        "native" => Ok(upscaler::UpscalerMode::Native),
+        "dlaa" => Ok(upscaler::UpscalerMode::Dlaa),
+        "dlss-quality" => Ok(upscaler::UpscalerMode::DlssQuality),
+        "dlss-balanced" => Ok(upscaler::UpscalerMode::DlssBalanced),
+        "dlss-performance" => Ok(upscaler::UpscalerMode::DlssPerformance),
+        _ => Err(format!(
+            "无效的 upscaler：{value}（仅支持 native、dlaa、dlss-quality、dlss-balanced 或 dlss-performance）"
+        )),
+    }
+}
+
 fn print_help() {
     println!(
         "RayTracingDemo\n\n\
          用法：\n  \
          cargo run --release                 启动实时 DX12 窗口\n  \
-         cargo run --release -- --model <路径> [--animate-model] [--benchmark-seconds <秒> | --capture-output <PNG>] [--capture-after-spp <SPP>] [--debug-view <名称>] [--atrous-mode <模式>] [--output-size <宽x高>] [--render-scale <比例> | --dynamic-resolution [--target-gpu-ms <毫秒>]] [--command-recording-mode <模式>] [--acceleration-structure-mode <模式>] [--denoiser <后端>]\n  \
+         cargo run --release -- --model <路径> [--animate-model] [--benchmark-seconds <秒> | --capture-output <PNG>] [--capture-after-spp <SPP>] [--debug-view <名称>] [--atrous-mode <模式>] [--output-size <宽x高>] [--render-scale <比例> | --dynamic-resolution [--target-gpu-ms <毫秒>]] [--command-recording-mode <模式>] [--acceleration-structure-mode <模式>] [--denoiser <后端>] [--upscaler <模式>]\n  \
          cargo run --release -- --cpu-reference [选项]\n\n\
          选项：\n  \
          --samples <数量>       每像素采样数，默认 1\n  \
@@ -406,6 +435,7 @@ fn print_help() {
          --command-recording-mode <模式> 命令记录：baseline 或 optimized，默认 optimized\n  \
          --acceleration-structure-mode <模式> AS 策略：baseline 或 optimized，默认 baseline\n  \
          --denoiser <后端>       重建后端：svgf 或 nrd-reblur，默认 svgf\n  \
+         --upscaler <模式>       上采样：native、dlaa、dlss-quality、dlss-balanced、dlss-performance，默认 native\n  \
          --help, -h             显示帮助"
     );
 }
@@ -682,6 +712,74 @@ mod tests {
             "--cpu-reference".to_string(),
             "--denoiser".to_string(),
             "svgf".to_string(),
+        ]);
+        assert!(matches!(result, Err(message) if message.contains("不能与")));
+    }
+
+    #[test]
+    fn upscaler_defaults_to_native_and_parses_all_modes() {
+        assert!(matches!(
+            parse_arguments(Vec::<String>::new()),
+            Ok(Command::Realtime(RealtimeConfig {
+                upscaler: crate::upscaler::UpscalerMode::Native,
+                ..
+            }))
+        ));
+        for (value, expected) in [
+            ("native", crate::upscaler::UpscalerMode::Native),
+            ("dlaa", crate::upscaler::UpscalerMode::Dlaa),
+            ("dlss-quality", crate::upscaler::UpscalerMode::DlssQuality),
+            ("dlss-balanced", crate::upscaler::UpscalerMode::DlssBalanced),
+            (
+                "dlss-performance",
+                crate::upscaler::UpscalerMode::DlssPerformance,
+            ),
+        ] {
+            let command = parse_arguments(["--upscaler".to_string(), value.to_string()]).unwrap();
+            assert!(matches!(
+                command,
+                Command::Realtime(RealtimeConfig { upscaler, .. }) if upscaler == expected
+            ));
+        }
+        assert!(parse_upscaler_mode("invalid").is_err());
+        assert!(parse_arguments(["--upscaler".to_string()]).is_err());
+    }
+
+    #[test]
+    fn upscaler_owns_the_dlss_internal_extent() {
+        assert!(
+            parse_arguments([
+                "--upscaler".to_string(),
+                "dlss-quality".to_string(),
+                "--render-scale".to_string(),
+                "0.67".to_string(),
+            ])
+            .is_err()
+        );
+        assert!(
+            parse_arguments([
+                "--upscaler".to_string(),
+                "dlss-quality".to_string(),
+                "--dynamic-resolution".to_string(),
+            ])
+            .is_err()
+        );
+        assert!(
+            parse_arguments([
+                "--upscaler".to_string(),
+                "native".to_string(),
+                "--dynamic-resolution".to_string(),
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn upscaler_is_covered_by_cpu_reference_conflict_guard() {
+        let result = parse_arguments([
+            "--cpu-reference".to_string(),
+            "--upscaler".to_string(),
+            "native".to_string(),
         ]);
         assert!(matches!(result, Err(message) if message.contains("不能与")));
     }
