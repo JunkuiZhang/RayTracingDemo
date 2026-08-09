@@ -3,7 +3,10 @@ param(
     [string]$Exe = "target/debug/ray_tracing_demo.exe",
     [string]$OutputRoot = "output/stage8g",
     [ValidateRange(1, 5)]
-    [int]$Seconds = 1
+    [int]$Seconds = 1,
+    [ValidateRange(120, 300)]
+    [int]$ProcessTimeoutSeconds = 180,
+    [switch]$SelfTest
 )
 
 Set-StrictMode -Version Latest
@@ -120,13 +123,20 @@ function Invoke-RecordedProcess(
     Save-Json $argsPath ([ordered]@{ executable = $FilePath; args = $Arguments; command = $commandLine })
     $started = Get-Date
     $exitCode = -1
+    $timedOut = $false
     $launchError = $null
     try {
         $process = Start-Process -FilePath $FilePath -ArgumentList $argumentString `
             -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath `
             -PassThru -WindowStyle Hidden
-        $process.WaitForExit()
-        $exitCode = $process.ExitCode
+        if (-not $process.WaitForExit($ProcessTimeoutSeconds * 1000)) {
+            $timedOut = $true
+            try { $process.Kill($true) } catch { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+            $process.WaitForExit(10000) | Out-Null
+        } else {
+            $process.WaitForExit()
+            $exitCode = $process.ExitCode
+        }
     } catch {
         $launchError = $_.Exception.Message
         Set-Content -LiteralPath $stderrPath -Value $launchError -Encoding UTF8
@@ -136,7 +146,7 @@ function Invoke-RecordedProcess(
     $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { "" }
     $lines = @($stdout -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     $json = $null
-    $jsonError = $launchError
+    $jsonError = if ($timedOut) { "process timed out after $ProcessTimeoutSeconds seconds" } else { $launchError }
     if ($lines.Count -gt 0) {
         try { $json = $lines[-1] | ConvertFrom-Json -Depth 50; $jsonError = $null } catch { $jsonError = $_.Exception.Message }
     } elseif ($null -eq $jsonError) {
@@ -150,6 +160,8 @@ function Invoke-RecordedProcess(
         stderr_path = $stderrPath
         args_path = $argsPath
         exit_code = $exitCode
+        timed_out = $timedOut
+        timeout_seconds = $ProcessTimeoutSeconds
         elapsed_seconds = ($finished - $started).TotalSeconds
         stdout_nonempty_lines = $lines.Count
         json = $json
@@ -160,7 +172,7 @@ function Invoke-RecordedProcess(
 
 function Test-DebugStderr($Run) {
     $failures = [System.Collections.Generic.List[string]]::new()
-    $stderr = if (Test-Path -LiteralPath $Run.stderr_path) { Get-Content -LiteralPath $Run.stderr_path -Raw } else { "" }
+    $stderr = if (-not [string]::IsNullOrWhiteSpace([string]$Run.stderr_path) -and (Test-Path -LiteralPath $Run.stderr_path)) { Get-Content -LiteralPath $Run.stderr_path -Raw } else { "" }
     if ($stderr -notmatch 'D3D12 Debug InfoQueue：0 条消息') {
         $failures.Add("stderr does not contain a zero-message InfoQueue conclusion")
     }
@@ -172,6 +184,7 @@ function Test-DebugStderr($Run) {
 
 function Test-Benchmark($Run) {
     $failures = [System.Collections.Generic.List[string]]::new()
+    if ($Run.timed_out) { $failures.Add("process timed out") }
     if ($Run.exit_code -ne 0) { $failures.Add("exit_code=$($Run.exit_code)") }
     if ($Run.stdout_nonempty_lines -ne 1) { $failures.Add("stdout is not exactly one non-empty JSON line") }
     if ($null -eq $Run.json) { $failures.Add("JSON parse failed: $($Run.json_error)") }
@@ -196,6 +209,7 @@ function Get-PngExtent([string]$Path) {
 
 function Test-Capture($Run, [string]$PngPath) {
     $failures = [System.Collections.Generic.List[string]]::new()
+    if ($Run.timed_out) { $failures.Add("capture process timed out") }
     if ($Run.exit_code -ne 0) { $failures.Add("capture exit_code=$($Run.exit_code)") }
     if ($Run.stdout_nonempty_lines -ne 1) { $failures.Add("capture stdout is not exactly one JSON line") }
     if ($null -eq $Run.json) { $failures.Add("capture JSON parse failed: $($Run.json_error)") }
@@ -220,6 +234,23 @@ function Test-Capture($Run, [string]$PngPath) {
         png_path = $PngPath
         sha256 = if (Test-Path -LiteralPath $PngPath) { (Get-FileHash -LiteralPath $PngPath -Algorithm SHA256).Hash } else { $null }
     }
+}
+
+if ($SelfTest) {
+    $fakeRun = [pscustomobject]@{
+        timed_out = $true
+        exit_code = -1
+        stdout_nonempty_lines = 0
+        json = $null
+        json_error = "timeout"
+        stderr_path = ""
+    }
+    $validation = Test-Benchmark $fakeRun
+    if ($validation.passed -or $validation.failures -notcontains "process timed out") {
+        throw "Debug timeout self-test failed"
+    }
+    [ordered]@{ self_test = "passed"; cases = 1 } | ConvertTo-Json -Compress
+    exit 0
 }
 
 $repoRoot = (Get-Location).Path

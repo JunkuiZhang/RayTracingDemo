@@ -197,20 +197,43 @@ function Invoke-RecordedProcess(
     $stderrPath = Join-Path $CaseDirectory "$Label.stderr.txt"
     $argumentString = ($Arguments | ForEach-Object { Quote-Argument $_ }) -join ' '
     $commandLine = "$(Quote-Argument $FilePath) $argumentString"
+    $timeoutSeconds = 300
+    $benchmarkSecondsIndex = [Array]::IndexOf($Arguments, "--benchmark-seconds")
+    if ($benchmarkSecondsIndex -ge 0 -and $benchmarkSecondsIndex + 1 -lt $Arguments.Count) {
+        $benchmarkDuration = [int]$Arguments[$benchmarkSecondsIndex + 1]
+        $timeoutSeconds = $benchmarkDuration + $(if ($Configuration -eq "Debug") { 180 } else { 90 })
+    } elseif ([IO.Path]::GetFileNameWithoutExtension($FilePath) -eq "image_diff") {
+        $timeoutSeconds = 60
+    }
     $started = Get-Date
-    $process = Start-Process -FilePath $FilePath -ArgumentList $argumentString `
-        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath `
-        -PassThru -WindowStyle Hidden
-    $process.WaitForExit()
+    $exitCode = -1
+    $timedOut = $false
+    $launchError = $null
+    try {
+        $process = Start-Process -FilePath $FilePath -ArgumentList $argumentString `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath `
+            -PassThru -WindowStyle Hidden
+        if (-not $process.WaitForExit($timeoutSeconds * 1000)) {
+            $timedOut = $true
+            try { $process.Kill($true) } catch { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+            $process.WaitForExit(10000) | Out-Null
+        } else {
+            $process.WaitForExit()
+            $exitCode = $process.ExitCode
+        }
+    } catch {
+        $launchError = $_.Exception.Message
+        Set-Content -LiteralPath $stderrPath -Value $launchError -Encoding UTF8
+    }
     $finished = Get-Date
     $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { "" }
     $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { "" }
     $lines = @($stdout -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     $json = $null
-    $jsonError = $null
+    $jsonError = if ($timedOut) { "process timed out after $timeoutSeconds seconds" } else { $launchError }
     if ($lines.Count -gt 0) {
-        try { $json = $lines[-1] | ConvertFrom-Json -Depth 40 } catch { $jsonError = $_.Exception.Message }
-    } else {
+        try { $json = $lines[-1] | ConvertFrom-Json -Depth 40 } catch { if ($null -eq $jsonError) { $jsonError = $_.Exception.Message } }
+    } elseif ($null -eq $jsonError) {
         $jsonError = "stdout has no non-empty JSON line"
     }
     [pscustomobject]@{
@@ -219,7 +242,9 @@ function Invoke-RecordedProcess(
         args = $Arguments
         stdout_path = $stdoutPath
         stderr_path = $stderrPath
-        exit_code = $process.ExitCode
+        exit_code = $exitCode
+        timed_out = $timedOut
+        timeout_seconds = $timeoutSeconds
         elapsed_seconds = ($finished - $started).TotalSeconds
         stdout_nonempty_lines = $lines.Count
         json = $json
