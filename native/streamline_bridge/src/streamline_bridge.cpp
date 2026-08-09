@@ -487,8 +487,14 @@ StreamlineBridgeStatus streamline_bridge_upgrade_interface(
         return STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT;
     try {
         const sl::Result result = slUpgradeInterface(interface_ptr);
-        return result == sl::Result::eOk ? STREAMLINE_BRIDGE_STATUS_OK
-                                         : set_error(bridge, "slUpgradeInterface failed", result);
+        if (result == sl::Result::eOk)
+            return STREAMLINE_BRIDGE_STATUS_OK;
+        // With the linked interposer, CreateSwapChainForHwnd can already
+        // return a proxy even while manual hooking is requested. Streamline
+        // reports that harmless second upgrade as eErrorInvalidIntegration.
+        if (result == sl::Result::eErrorInvalidIntegration)
+            return STREAMLINE_BRIDGE_STATUS_ALREADY_UPGRADED;
+        return set_error(bridge, "slUpgradeInterface failed", result);
     } catch (...) {
         return STREAMLINE_BRIDGE_STATUS_EXCEPTION;
     }

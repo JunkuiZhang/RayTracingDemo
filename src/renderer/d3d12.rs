@@ -260,6 +260,36 @@ impl StreamlineRuntime {
         })
     }
 
+    /// Upgrade a COM interface immediately after creation for the manual
+    /// hooking path. The bridge proxy AddRefs the original interface; the
+    /// temporary Rust clone owns and releases the input reference, while the
+    /// returned interface owns the proxy reference.
+    unsafe fn upgrade_interface<T: Interface>(&self, interface: T) -> Result<T> {
+        let original = interface.into_raw();
+        let mut upgraded = original;
+        let status = unsafe {
+            crate::streamline::streamline_bridge_upgrade_interface(
+                self.bridge.as_raw(),
+                &mut upgraded,
+            )
+        };
+        if status == crate::streamline::STATUS_ALREADY_UPGRADED {
+            return Ok(unsafe { T::from_raw(original) });
+        }
+        if status != crate::streamline::STATUS_OK {
+            unsafe { drop(T::from_raw(original)) };
+            return Err(streamline_error_with_detail(
+                "升级 Streamline manual-hooking interface",
+                status,
+                self.bridge.last_error(),
+            ));
+        }
+        if !std::ptr::eq(upgraded, original) {
+            unsafe { drop(T::from_raw(original)) };
+        }
+        Ok(unsafe { T::from_raw(upgraded.cast()) })
+    }
+
     fn reflex_supported(&self) -> bool {
         self._support.reflex_supported != 0
     }
@@ -829,6 +859,8 @@ pub struct Dx12Renderer {
     gpu_name: String,
     command_queue: ID3D12CommandQueue,
     swap_chain: IDXGISwapChain3,
+    #[cfg(feature = "streamline")]
+    streamline_swap_chain: Option<IDXGISwapChain3>,
     rtv_heap: DescriptorHeap,
     render_targets: [Option<TrackedResource>; FRAME_COUNT],
     active_generation: RenderResourceGeneration,
@@ -854,6 +886,8 @@ pub struct Dx12Renderer {
     benchmark_reflex_sleep_baseline: u64,
     #[cfg(feature = "streamline")]
     benchmark_reflex_marker_baseline: [u64; 6],
+    #[cfg(feature = "streamline")]
+    benchmark_reflex_present_common_baseline: u64,
     dynamic_resolution: Option<DynamicResolutionController>,
     resolution_clock: Instant,
     requested_render_scale: RenderScale,
@@ -1026,6 +1060,12 @@ impl Dx12Renderer {
                 .map_err(|error| dx_error("创建交换链", error))?
                 .cast()
                 .map_err(|error| dx_error("获取 IDXGISwapChain3", error))?;
+            #[cfg(feature = "streamline")]
+            let streamline_swap_chain = if let Some(runtime) = streamline.as_ref() {
+                Some(runtime.upgrade_interface(swap_chain.clone())?)
+            } else {
+                None
+            };
             factory
                 .MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER)
                 .map_err(|error| dx_error("设置窗口关联", error))?;
@@ -1249,6 +1289,8 @@ impl Dx12Renderer {
                 gpu_name,
                 command_queue,
                 swap_chain,
+                #[cfg(feature = "streamline")]
+                streamline_swap_chain,
                 rtv_heap,
                 render_targets: [None, None, None],
                 active_generation,
@@ -1274,6 +1316,8 @@ impl Dx12Renderer {
                 benchmark_reflex_sleep_baseline: 0,
                 #[cfg(feature = "streamline")]
                 benchmark_reflex_marker_baseline: [0; 6],
+                #[cfg(feature = "streamline")]
+                benchmark_reflex_present_common_baseline: 0,
                 dynamic_resolution: match config.resolution_mode {
                     ResolutionMode::Fixed(_) => None,
                     ResolutionMode::Dynamic(dynamic_config) => {
@@ -1401,7 +1445,7 @@ impl Dx12Renderer {
         self.memory_telemetry.poll(false);
 
         unsafe {
-            let frame_index = self.swap_chain.GetCurrentBackBufferIndex() as usize;
+            let frame_index = self.active_swap_chain().GetCurrentBackBufferIndex() as usize;
             let previous_fence_value = self.frames[frame_index].fence_value;
             let previous_timing_valid = self.frames[frame_index].timing_valid;
             let previous_timing_generation_id = self.frames[frame_index].timing_generation_id;
@@ -2100,8 +2144,15 @@ impl Dx12Renderer {
                 self.submit_pcl_marker(token, PCL_RENDER_SUBMIT_END)?;
                 self.submit_pcl_marker(token, PCL_PRESENT_START)?;
             }
-            if let Err(error) = self.swap_chain.Present(1, DXGI_PRESENT(0)).ok() {
+            if let Err(error) = self.active_swap_chain().Present(1, DXGI_PRESENT(0)).ok() {
                 return Err(device_removed_error(&self.device, error));
+            }
+            #[cfg(feature = "streamline")]
+            if self.streamline_swap_chain.is_some() {
+                // The upgraded swap-chain proxy invokes Streamline common's
+                // presentCommon exactly once for this successful Present.
+                self.reflex_present_common_count =
+                    self.reflex_present_common_count.saturating_add(1);
             }
             #[cfg(feature = "streamline")]
             if let Some(token) = frame_token.as_ref() {
@@ -2394,7 +2445,7 @@ impl Dx12Renderer {
             self.gpu_profiler.invalidate();
             // 命令列表会持有上一帧 Back Buffer 的引用；重置后再释放资源，
             // 否则 ResizeBuffers 会因仍有外部引用而返回 DXGI_ERROR_INVALID_CALL。
-            let frame_index = self.swap_chain.GetCurrentBackBufferIndex() as usize;
+            let frame_index = self.active_swap_chain().GetCurrentBackBufferIndex() as usize;
             self.frames[frame_index].allocator.Reset()?;
             self.command_list.Reset(
                 &self.frames[frame_index].allocator,
@@ -2402,7 +2453,7 @@ impl Dx12Renderer {
             )?;
             self.command_list.Close()?;
             self.render_targets = [None, None, None];
-            self.swap_chain.ResizeBuffers(
+            self.active_swap_chain().ResizeBuffers(
                 FRAME_COUNT as u32,
                 width,
                 height,
@@ -3049,6 +3100,7 @@ impl Dx12Renderer {
             self.benchmark_reflex_token_baseline = self.reflex_token_count;
             self.benchmark_reflex_sleep_baseline = self.reflex_sleep_count;
             self.benchmark_reflex_marker_baseline = self.reflex_marker_counts;
+            self.benchmark_reflex_present_common_baseline = self.reflex_present_common_count;
         }
         self.benchmark_measurement_active = true;
     }
@@ -3127,6 +3179,14 @@ impl Dx12Renderer {
 
     pub fn retired_generation_count(&self) -> usize {
         self.retired_generations.len()
+    }
+
+    fn active_swap_chain(&self) -> &IDXGISwapChain3 {
+        #[cfg(feature = "streamline")]
+        if let Some(swap_chain) = self.streamline_swap_chain.as_ref() {
+            return swap_chain;
+        }
+        &self.swap_chain
     }
 
     pub fn benchmark_json(&self, duration_seconds: u64, warmup_valid_frames: u32) -> String {
@@ -3257,7 +3317,9 @@ impl Dx12Renderer {
                     "present_start": self.reflex_marker_counts[4].saturating_sub(self.benchmark_reflex_marker_baseline[4]),
                     "present_end": self.reflex_marker_counts[5].saturating_sub(self.benchmark_reflex_marker_baseline[5]),
                 },
-                "present_common_count": self.reflex_present_common_count,
+                "present_common_count": self
+                    .reflex_present_common_count
+                    .saturating_sub(self.benchmark_reflex_present_common_baseline),
                 "order_errors": self.reflex_marker_order_errors,
                 "report_available": false,
             })
@@ -3668,7 +3730,8 @@ impl Dx12Renderer {
 
     unsafe fn create_render_targets(&mut self) -> Result<()> {
         for index in 0..FRAME_COUNT {
-            let resource: ID3D12Resource = unsafe { self.swap_chain.GetBuffer(index as u32)? };
+            let resource: ID3D12Resource =
+                unsafe { self.active_swap_chain().GetBuffer(index as u32)? };
             let handle = self.rtv_heap.cpu_handle(index);
             unsafe { self.device.CreateRenderTargetView(&resource, None, handle) };
             self.render_targets[index] = Some(TrackedResource::new(
@@ -4290,6 +4353,8 @@ impl Drop for Dx12Renderer {
             ) {
                 runtime.free_resources(viewport);
             }
+            #[cfg(feature = "streamline")]
+            drop(self.streamline_swap_chain.take());
             #[cfg(feature = "streamline")]
             if let Some(streamline) = self.streamline.take() {
                 streamline.shutdown_after_gpu();

@@ -10,6 +10,7 @@ pub const STATUS_SDK_ERROR: u32 = 2;
 pub const STATUS_EXCEPTION: u32 = 3;
 pub const STATUS_NOT_INITIALIZED: u32 = 4;
 pub const STATUS_UNSUPPORTED: u32 = 5;
+pub const STATUS_ALREADY_UPGRADED: u32 = 6;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
