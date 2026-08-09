@@ -1,4 +1,10 @@
-use std::{collections::VecDeque, ffi::c_void, mem::size_of, time::Instant};
+use std::{
+    collections::VecDeque,
+    ffi::c_void,
+    mem::{ManuallyDrop, size_of},
+    path::PathBuf,
+    time::Instant,
+};
 
 use windows::{
     Win32::{
@@ -30,8 +36,11 @@ use crate::{
 };
 
 use self::{
+    capture::{CaptureMetadata, capture_json_line, unpack_rgba8_rows, write_png_atomic},
     descriptor::DescriptorHeap,
-    memory::{VideoMemorySnapshot, VideoMemoryStatus, VideoMemoryTelemetry},
+    memory::{
+        VideoMemoryMeasurement, VideoMemorySnapshot, VideoMemoryStatus, VideoMemoryTelemetry,
+    },
     pipeline::ComputePipeline,
     profiler::{CommandRecordingFrameStats, GpuPass, GpuProfiler},
     render_resources::RenderResourceGeneration,
@@ -46,6 +55,7 @@ struct RetiredRenderResourceGeneration {
     resources: RenderResourceGeneration,
 }
 
+mod capture;
 mod descriptor;
 mod memory;
 mod pipeline;
@@ -78,6 +88,21 @@ struct FrameContext {
     fence_value: u64,
     timing_valid: bool,
     timing_generation_id: u64,
+}
+
+struct CaptureRequest {
+    path: PathBuf,
+    after_spp: u32,
+}
+
+struct PendingCapture {
+    readback: ID3D12Resource,
+    footprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
+    total_bytes: usize,
+    width: u32,
+    height: u32,
+    metadata: CaptureMetadata,
+    fence_value: u64,
 }
 
 #[repr(C)]
@@ -145,6 +170,9 @@ pub struct Dx12Renderer {
     history_index: usize,
     reset_history: bool,
     debug_view: DebugView,
+    capture_request: Option<CaptureRequest>,
+    pending_capture: Option<PendingCapture>,
+    capture_result: Option<String>,
     camera_position: [f32; 3],
     camera_yaw: f32,
     camera_pitch: f32,
@@ -436,6 +464,12 @@ impl Dx12Renderer {
                 history_index: 0,
                 reset_history: true,
                 debug_view: config.debug_view,
+                capture_request: config.capture_output.as_ref().map(|path| CaptureRequest {
+                    path: path.clone(),
+                    after_spp: config.capture_after_spp.unwrap_or(128),
+                }),
+                pending_capture: None,
+                capture_result: None,
                 camera_position: [0.0, 0.0, -2.666_666_7],
                 camera_yaw: 0.0,
                 camera_pitch: 0.0,
@@ -474,6 +508,10 @@ impl Dx12Renderer {
     }
 
     pub fn render(&mut self) -> Result<()> {
+        self.poll_pending_capture()?;
+        if self.capture_result.is_some() {
+            return Ok(());
+        }
         self.poll_shader_reload();
         if self.minimized || self.width == 0 || self.height == 0 {
             return Ok(());
@@ -850,6 +888,14 @@ impl Dx12Renderer {
                 .end(&self.command_list, frame_index, GpuPass::Total);
             self.gpu_profiler.end_event(&self.command_list);
 
+            // Readback is recorded after Total and before the swap-chain copy. It
+            // therefore cannot contaminate either the pass timings or Present.
+            let pending_capture = if self.capture_due() {
+                Some(self.record_capture_copy(output_extent, render_extent)?)
+            } else {
+                None
+            };
+
             self.render_targets[frame_index]
                 .as_mut()
                 .unwrap()
@@ -885,6 +931,11 @@ impl Dx12Renderer {
             let fence_value = self.next_fence_value;
             self.next_fence_value += 1;
             self.command_queue.Signal(&self.fence, fence_value)?;
+            if let Some(mut pending_capture) = pending_capture {
+                pending_capture.fence_value = fence_value;
+                self.capture_request = None;
+                self.pending_capture = Some(pending_capture);
+            }
             self.frames[frame_index].fence_value = fence_value;
             self.frames[frame_index].timing_valid = !self.reset_history;
             self.frames[frame_index].timing_generation_id = self.active_generation.id;
@@ -911,6 +962,214 @@ impl Dx12Renderer {
         }
     }
 
+    fn capture_due(&self) -> bool {
+        self.capture_request.as_ref().is_some_and(|request| {
+            self.pending_capture.is_none()
+                && self.accumulated_frames.saturating_add(1) >= request.after_spp
+        })
+    }
+
+    unsafe fn record_capture_copy(
+        &mut self,
+        output_extent: Extent2D,
+        render_extent: Extent2D,
+    ) -> Result<PendingCapture> {
+        let request = self.capture_request.as_ref().ok_or_else(|| {
+            WindowsError::new(
+                windows::core::HRESULT(0x80004005_u32 as i32),
+                "capture request missing",
+            )
+        })?;
+        let source = self.active_generation.display_output.resource();
+        let description = unsafe { source.GetDesc() };
+        let mut footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default();
+        let mut row_count = 0;
+        let mut row_size = 0;
+        let mut total_bytes = 0;
+        unsafe {
+            self.device.GetCopyableFootprints(
+                &description,
+                0,
+                1,
+                0,
+                Some(&mut footprint),
+                Some(&mut row_count),
+                Some(&mut row_size),
+                Some(&mut total_bytes),
+            );
+        }
+        let total_bytes = usize::try_from(total_bytes).map_err(|_| {
+            WindowsError::new(
+                windows::core::HRESULT(0x80004005_u32 as i32),
+                "capture readback size does not fit usize",
+            )
+        })?;
+        if total_bytes == 0
+            || row_count != output_extent.height
+            || row_size < output_extent.width as u64 * 4
+        {
+            return Err(WindowsError::new(
+                windows::core::HRESULT(0x80004005_u32 as i32),
+                "unexpected display_output copy footprint",
+            ));
+        }
+        let heap = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_READBACK,
+            CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+            MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+            CreationNodeMask: 0,
+            VisibleNodeMask: 0,
+        };
+        let readback_description = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+            Alignment: 0,
+            Width: total_bytes as u64,
+            Height: 1,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: DXGI_FORMAT_UNKNOWN,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            Flags: D3D12_RESOURCE_FLAG_NONE,
+        };
+        let mut readback: Option<ID3D12Resource> = None;
+        unsafe {
+            self.device.CreateCommittedResource(
+                &heap,
+                D3D12_HEAP_FLAG_NONE,
+                &readback_description,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                None,
+                &mut readback,
+            )?;
+        }
+        let readback = readback.ok_or_else(|| {
+            WindowsError::new(
+                windows::core::HRESULT(0x80004005_u32 as i32),
+                "D3D12 returned no capture readback resource",
+            )
+        })?;
+        let mut destination = D3D12_TEXTURE_COPY_LOCATION {
+            pResource: ManuallyDrop::new(Some(readback.clone())),
+            Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                PlacedFootprint: footprint,
+            },
+        };
+        let mut source_location = D3D12_TEXTURE_COPY_LOCATION {
+            pResource: ManuallyDrop::new(Some(source.clone())),
+            Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                SubresourceIndex: 0,
+            },
+        };
+        unsafe {
+            self.command_list
+                .CopyTextureRegion(&destination, 0, 0, 0, &source_location, None);
+            ManuallyDrop::drop(&mut destination.pResource);
+            ManuallyDrop::drop(&mut source_location.pResource);
+        }
+
+        Ok(PendingCapture {
+            readback,
+            footprint,
+            total_bytes,
+            width: output_extent.width,
+            height: output_extent.height,
+            metadata: CaptureMetadata {
+                png_path: request.path.to_string_lossy().into_owned(),
+                gpu_name: self.gpu_name.clone(),
+                output_width: output_extent.width,
+                output_height: output_extent.height,
+                render_width: render_extent.width,
+                render_height: render_extent.height,
+                requested_scale: self.render_scale(),
+                resolution_mode: self.resolution_mode_name().to_string(),
+                debug_view: self.debug_view,
+                actual_spp: self.accumulated_frames.saturating_add(1),
+                frame_index: self.frame_number,
+                generation_id: self.active_generation.id,
+                atrous_mode: self.atrous_mode.as_str().to_string(),
+                command_recording_mode: self.command_recording_mode.as_str().to_string(),
+                acceleration_structure_mode: self
+                    ._acceleration_structures
+                    .stats()
+                    .mode
+                    .as_str()
+                    .to_string(),
+            },
+            fence_value: 0,
+        })
+    }
+
+    fn poll_pending_capture(&mut self) -> Result<()> {
+        let ready = self.pending_capture.as_ref().is_some_and(|pending| unsafe {
+            self.fence.GetCompletedValue() >= pending.fence_value
+        });
+        if !ready {
+            return Ok(());
+        }
+        let pending = self
+            .pending_capture
+            .take()
+            .expect("capture readiness was checked");
+        let read_range = D3D12_RANGE {
+            Begin: 0,
+            End: pending.total_bytes,
+        };
+        let mut mapped = std::ptr::null_mut::<c_void>();
+        unsafe {
+            pending
+                .readback
+                .Map(0, Some(&read_range), Some(&mut mapped))?;
+            let mapped = std::slice::from_raw_parts(mapped.cast::<u8>(), pending.total_bytes);
+            let rgba = unpack_rgba8_rows(
+                mapped,
+                pending.footprint.Offset as usize,
+                pending.footprint.Footprint.RowPitch as usize,
+                pending.width,
+                pending.height,
+            );
+            pending
+                .readback
+                .Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }));
+            let rgba = rgba.map_err(|error| {
+                WindowsError::new(
+                    windows::core::HRESULT(0x80004005_u32 as i32),
+                    error.to_string(),
+                )
+            })?;
+            let png_bytes = write_png_atomic(
+                PathBuf::from(&pending.metadata.png_path).as_path(),
+                &rgba,
+                pending.width,
+                pending.height,
+            )
+            .map_err(|error| {
+                WindowsError::new(
+                    windows::core::HRESULT(0x80004005_u32 as i32),
+                    error.to_string(),
+                )
+            })?;
+            self.capture_result = Some(capture_json_line(&pending.metadata, png_bytes));
+        }
+        Ok(())
+    }
+
+    pub fn take_capture_result(&mut self) -> Option<String> {
+        self.capture_result.take()
+    }
+
+    pub fn shutdown(&mut self) -> Result<()> {
+        unsafe {
+            self.wait_for_gpu()?;
+        }
+        self.poll_pending_capture()
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         if width == 0 || height == 0 {
             self.minimized = true;
@@ -931,6 +1190,7 @@ impl Dx12Renderer {
         unsafe {
             let idle_waits_before = self.gpu_idle_wait_count;
             self.wait_for_gpu()?;
+            self.poll_pending_capture()?;
             self.reclaim_retired_generations();
             self.gpu_profiler.invalidate();
             // 命令列表会持有上一帧 Back Buffer 的引用；重置后再释放资源，
@@ -1227,6 +1487,7 @@ impl Dx12Renderer {
             frame.timing_valid = false;
         }
         self.gpu_profiler.begin_benchmark_measurement();
+        self.memory_telemetry.begin_benchmark_measurement();
         self.benchmark_history_reset_baseline = self.history_reset_count;
         self.benchmark_extent_change_baseline = self.render_extent_change_count;
         self.benchmark_generation_create_baseline = self.render_generation_create_count;
@@ -1258,6 +1519,10 @@ impl Dx12Renderer {
 
     pub fn refresh_memory_telemetry(&mut self) {
         self.memory_telemetry.poll(true);
+    }
+
+    pub fn finish_memory_measurement(&mut self) {
+        self.memory_telemetry.finish_benchmark_measurement();
     }
 
     pub fn video_memory_snapshot(&self) -> VideoMemorySnapshot {
@@ -1374,6 +1639,7 @@ impl Dx12Renderer {
             self.gpu_profiler.benchmark_statistics(),
             self.gpu_profiler.command_recording_statistics(),
             self.video_memory_snapshot(),
+            self.memory_telemetry.measurement(),
             self._acceleration_structures.stats(),
         )
     }
@@ -1517,6 +1783,7 @@ fn benchmark_json_line(
     report: profiler::GpuTimingReport,
     command_recording: profiler::CommandRecordingStats,
     memory: VideoMemorySnapshot,
+    memory_measurement: VideoMemoryMeasurement,
     acceleration_structures: &AccelerationStructureStats,
 ) -> String {
     let BenchmarkJsonContext {
@@ -1650,6 +1917,26 @@ fn benchmark_json_line(
             "budget_bytes": memory.budget_bytes,
             "usage_ratio": memory.usage_ratio.filter(|ratio| ratio.is_finite()),
             "status": status,
+            "measurement": {
+                "active": memory_measurement.active,
+                "start_usage_bytes": memory_measurement.start_usage_bytes,
+                "end_usage_bytes": memory_measurement.end_usage_bytes,
+                "peak_usage_bytes": memory_measurement.peak_usage_bytes,
+                "minimum_budget_bytes": memory_measurement.minimum_budget_bytes,
+                "peak_usage_ratio": memory_measurement.peak_usage_ratio.filter(|ratio| ratio.is_finite()),
+                "valid_query_count": memory_measurement.valid_query_count,
+                "failed_query_count": memory_measurement.failed_query_count,
+                "checkpoint_count": memory_measurement.checkpoint_count,
+                "checkpoints": memory_measurement.checkpoints[..memory_measurement.checkpoint_count]
+                    .iter()
+                    .flatten()
+                    .map(|checkpoint| serde_json::json!({
+                        "elapsed_seconds": checkpoint.elapsed_seconds,
+                        "usage_bytes": checkpoint.usage_bytes,
+                        "budget_bytes": checkpoint.budget_bytes,
+                    }))
+                    .collect::<Vec<_>>(),
+            },
         },
     })
     .to_string()
@@ -2308,6 +2595,7 @@ mod tests {
                 atrous_argument_updates_mean: Some(4.0),
             },
             memory,
+            VideoMemoryMeasurement::default(),
             &AccelerationStructureStats::from_records(
                 crate::realtime::AccelerationStructureMode::Baseline,
                 true,

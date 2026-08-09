@@ -42,6 +42,9 @@ pub fn run(config: RealtimeConfig) -> Result<(), Box<dyn Error>> {
     if let Some(report) = application.benchmark_result {
         println!("{report}");
     }
+    if let Some(report) = application.capture_result {
+        println!("{report}");
+    }
     if let Some(message) = application.failure {
         return Err(io::Error::other(message).into());
     }
@@ -58,6 +61,7 @@ struct RealtimeApplication {
     frames_since_stats: u32,
     benchmark: Option<BenchmarkState>,
     benchmark_result: Option<String>,
+    capture_result: Option<String>,
 }
 
 struct BenchmarkState {
@@ -138,6 +142,11 @@ impl ApplicationHandler for RealtimeApplication {
 
         match event {
             WindowEvent::CloseRequested => {
+                if let Some(renderer) = self.renderer.as_mut()
+                    && let Err(error) = renderer.shutdown()
+                {
+                    self.failure = Some(format!("关闭前完成 GPU capture：{error}"));
+                }
                 self.renderer = None;
                 event_loop.exit();
             }
@@ -150,6 +159,7 @@ impl ApplicationHandler for RealtimeApplication {
             }
             WindowEvent::RedrawRequested => {
                 let mut benchmark_report = None;
+                let mut capture_report = None;
                 if let Some(renderer) = self.renderer.as_mut() {
                     if let Err(error) = renderer.render() {
                         return self.fail(event_loop, format!("提交 DX12 帧：{error}"));
@@ -171,12 +181,14 @@ impl ApplicationHandler for RealtimeApplication {
                             .is_some_and(|started| started.elapsed() >= benchmark.duration)
                         {
                             renderer.refresh_memory_telemetry();
+                            renderer.finish_memory_measurement();
                             benchmark_report = Some(renderer.benchmark_json(
                                 benchmark.duration.as_secs(),
                                 benchmark.warmup_valid_samples,
                             ));
                         }
                     }
+                    capture_report = renderer.take_capture_result();
                     self.frames_since_stats += 1;
                     let now = Instant::now();
                     let started = self.stats_started.get_or_insert(now);
@@ -213,6 +225,12 @@ impl ApplicationHandler for RealtimeApplication {
                 }
                 if let Some(report) = benchmark_report {
                     self.benchmark_result = Some(report);
+                    self.renderer = None;
+                    event_loop.exit();
+                    return;
+                }
+                if let Some(report) = capture_report {
+                    self.capture_result = Some(report);
                     self.renderer = None;
                     event_loop.exit();
                     return;
