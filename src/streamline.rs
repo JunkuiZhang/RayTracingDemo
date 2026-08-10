@@ -3,7 +3,7 @@
 use std::{ffi::c_void, ptr::NonNull};
 
 pub const SDK_VERSION: &str = "2.12.0";
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_INVALID_ARGUMENT: u32 = 1;
 pub const STATUS_SDK_ERROR: u32 = 2;
@@ -23,6 +23,8 @@ pub struct InitDesc {
     pub reserved: u32,
     pub plugin_path: *const u16,
     pub log_path: *const u16,
+    pub project_id: *const i8,
+    pub engine_version: *const i8,
 }
 
 #[repr(C)]
@@ -285,7 +287,7 @@ mod tests {
 
     #[test]
     fn abi_struct_layout_is_fixed_width() {
-        assert_eq!(size_of::<InitDesc>(), 40);
+        assert_eq!(size_of::<InitDesc>(), 56);
         assert_eq!(size_of::<Support>(), 72);
         assert_eq!(size_of::<OptimalSettings>(), 36);
         assert_eq!(size_of::<FrameToken>(), 24);
@@ -298,7 +300,7 @@ mod tests {
 
     #[test]
     fn invalid_bridge_statuses_are_stable() {
-        assert_eq!(ABI_VERSION, 2);
+        assert_eq!(ABI_VERSION, 3);
         assert_eq!(STATUS_OK, 0);
         assert_eq!(STATUS_INVALID_ARGUMENT, 1);
         assert_eq!(size_of::<RawBridge>(), 0);

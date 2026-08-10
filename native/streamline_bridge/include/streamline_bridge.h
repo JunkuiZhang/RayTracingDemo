@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define STREAMLINE_BRIDGE_ABI_VERSION UINT32_C(2)
+#define STREAMLINE_BRIDGE_ABI_VERSION UINT32_C(3)
 
 typedef struct StreamlineBridge StreamlineBridge;
 
@@ -44,6 +44,8 @@ typedef struct StreamlineBridgeInitDesc {
     uint32_t reserved;
     const wchar_t* plugin_path;
     const wchar_t* log_path;
+    const char* project_id;
+    const char* engine_version;
 } StreamlineBridgeInitDesc;
 
 typedef struct StreamlineBridgeSupport {

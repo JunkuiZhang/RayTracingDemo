@@ -188,9 +188,10 @@ bridge 至少封装以下能力，不要求导出和 SDK 同名的薄壳：
 - SDK/version/plugin/DLL flavor 诊断。
 
 初始化使用 `PreferenceFlag::eUseManualHooking` 和 frame-based resource tagging；
-`featuresToLoad` 只允许 DLSS、Reflex、PCL，不加载 RR/FG。DLSS 只在提供 NVIDIA 分配的
-非零 application ID 时列入；缺少 ID 时 Native 可仅加载 Reflex/PCL，显式 DLSS/DLAA
-必须快速失败，严禁使用 temporary/fake ID。建议在创建 DXGI/D3D12 之前
+`featuresToLoad` 只允许 DLSS、Reflex、PCL，不加载 RR/FG。自研引擎使用仓库固定的
+GUID-like Project ID、`EngineType::eCustom` 和与 Cargo package 一致的 Engine Version；
+只有 NVIDIA Developer Technologies 联系人明确分配数值 Application ID 时才允许覆盖。
+严禁使用 temporary/fake Application ID。建议在创建 DXGI/D3D12 之前
 `slInit`，device 成功后 `slSetD3DDevice`，swapchain 创建后通过 `slUpgradeInterface`
 取得升级接口。若 locked guide 对具体顺序有更严格要求，以 v2.12.0 官方文档为准并在
 代码注释写明章节。

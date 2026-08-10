@@ -5,6 +5,11 @@ use crate::{
     upscaler::UpscalerMode,
 };
 
+/// Stable NGX identity for this custom engine. NVIDIA's DLSS guide requires a
+/// GUID-like project ID when no NVIDIA-assigned numeric application ID exists.
+pub const STREAMLINE_PROJECT_ID: &str = "59083655-5525-475b-95a2-a904bcf8f4c0";
+pub const STREAMLINE_ENGINE_VERSION: &str = concat!("RayTracingDemo-", env!("CARGO_PKG_VERSION"));
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RealtimeConfig {
     pub model_path: Option<PathBuf>,
@@ -21,8 +26,8 @@ pub struct RealtimeConfig {
     pub denoiser: DenoiserBackend,
     pub upscaler: UpscalerMode,
     pub reflex_mode: ReflexMode,
-    /// NVIDIA-assigned NGX application identity. `None` keeps DLSS unloaded
-    /// while allowing the optional Streamline build to provide Reflex/PCL.
+    /// Optional NVIDIA-assigned NGX identity. `None` uses this custom engine's
+    /// stable Project ID and package-derived engine version instead.
     pub streamline_application_id: Option<u32>,
 }
 

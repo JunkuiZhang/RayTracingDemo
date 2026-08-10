@@ -5,6 +5,8 @@ param(
     [string]$Exe,
     [ValidateSet("Smoke", "Matrix", "DebugValidation")]
     [string]$Suite = "Smoke",
+    [ValidateSet("", "native_svgf", "dlaa_svgf", "quality_svgf", "balanced_svgf", "performance_svgf", "quality_nrd")]
+    [string]$CaseName = "",
     [string]$NrdExe,
     [ValidateRange(1, 3)]
     [int]$Runs = 1,
@@ -103,7 +105,7 @@ namespace Stage10Acceptance.Native {
     }
 }
 
-function Invoke-RecordedProcess(
+function New-RecordedProcessContext(
     [string]$Executable,
     [string[]]$Arguments,
     [string]$CaseRoot,
@@ -115,31 +117,32 @@ function Invoke-RecordedProcess(
     $exitPath = Join-Path $CaseRoot "$Label.exit.json"
     $command = "$(Quote-Argument $Executable) " + (($Arguments | ForEach-Object { Quote-Argument $_ }) -join ' ')
     Set-Content -LiteralPath $argsPath -Value $command -Encoding UTF8
-    $started = Get-Date
-    $exitCode = -1
-    $timedOut = $false
-    $launchError = $null
-    try {
-        $process = Start-Process -FilePath $Executable -ArgumentList ($Arguments -join ' ') `
-            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru -WindowStyle Hidden
-        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-            $timedOut = $true
-            try { $process.Kill($true) } catch { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
-            $process.WaitForExit(10000) | Out-Null
-        } else {
-            $process.Refresh()
-            if ($process.HasExited) { $exitCode = [int]$process.ExitCode }
-        }
-    } catch {
-        $launchError = $_.Exception.Message
-        Set-Content -LiteralPath $stderrPath -Value $launchError -Encoding UTF8
+    [pscustomobject]@{
+        label = $Label
+        executable = $Executable
+        arguments = $Arguments
+        command = $command
+        args_path = $argsPath
+        stdout_path = $stdoutPath
+        stderr_path = $stderrPath
+        exit_path = $exitPath
     }
-    $elapsed = ((Get-Date) - $started).TotalSeconds
-    $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { "" }
+}
+
+function Complete-RecordedProcess(
+    [object]$Context,
+    [int]$ExitCode,
+    [bool]$TimedOut,
+    [double]$ElapsedSeconds,
+    [AllowNull()][string]$LaunchError
+) {
+    $stdout = if (Test-Path -LiteralPath $Context.stdout_path) {
+        Get-Content -LiteralPath $Context.stdout_path -Raw
+    } else { "" }
     $lines = @($stdout -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     $json = $null
-    $jsonError = $launchError
-    if ($timedOut) { $jsonError = "timeout after $TimeoutSeconds seconds" }
+    $jsonError = $LaunchError
+    if ($TimedOut) { $jsonError = "timeout after $TimeoutSeconds seconds" }
     $jsonCandidates = @()
     foreach ($line in $lines) {
         try { $jsonCandidates += ,($line | ConvertFrom-Json) } catch { }
@@ -154,30 +157,30 @@ function Invoke-RecordedProcess(
         }
     }
     [ordered]@{
-        label = $Label
-        command = $command
-        args_path = $argsPath
-        stdout_path = $stdoutPath
-        stderr_path = $stderrPath
-        exit_path = $exitPath
-        exit_code = $exitCode
-        timed_out = $timedOut
-        elapsed_seconds = $elapsed
+        label = $Context.label
+        command = $Context.command
+        args_path = $Context.args_path
+        stdout_path = $Context.stdout_path
+        stderr_path = $Context.stderr_path
+        exit_path = $Context.exit_path
+        exit_code = $ExitCode
+        timed_out = $TimedOut
+        elapsed_seconds = $ElapsedSeconds
         stdout_nonempty_lines = $lines.Count
         parseable_json_lines = $jsonCandidates.Count
         json = $json
         json_error = $jsonError
-    } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $exitPath -Encoding UTF8
+    } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $Context.exit_path -Encoding UTF8
     [pscustomobject]@{
-        label = $Label
-        command = $command
-        args_path = $argsPath
-        stdout_path = $stdoutPath
-        stderr_path = $stderrPath
-        exit_path = $exitPath
-        exit_code = $exitCode
-        timed_out = $timedOut
-        elapsed_seconds = $elapsed
+        label = $Context.label
+        command = $Context.command
+        args_path = $Context.args_path
+        stdout_path = $Context.stdout_path
+        stderr_path = $Context.stderr_path
+        exit_path = $Context.exit_path
+        exit_code = $ExitCode
+        timed_out = $TimedOut
+        elapsed_seconds = $ElapsedSeconds
         stdout_nonempty_lines = $lines.Count
         parseable_json_lines = $jsonCandidates.Count
         json = $json
@@ -314,9 +317,6 @@ $executable = if ([string]::IsNullOrWhiteSpace($Exe)) {
     (Resolve-Path -LiteralPath $Exe).Path
 }
 if (-not (Test-Path -LiteralPath $executable)) { throw "executable not found: $executable" }
-if ($Suite -ne "Smoke" -and $StreamlineApplicationId -eq 0) {
-    throw "$Suite requires -StreamlineApplicationId with an NVIDIA-assigned nonzero NGX application ID"
-}
 $nrdExecutable = $null
 if (-not [string]::IsNullOrWhiteSpace($NrdExe)) {
     $nrdExecutable = (Resolve-Path -LiteralPath $NrdExe).Path
@@ -326,12 +326,18 @@ if (-not [string]::IsNullOrWhiteSpace($NrdExe)) {
 $runId = "$(Get-Date -Format yyyyMMdd-HHmmss)-$([guid]::NewGuid().ToString('N').Substring(0,8))"
 $runRoot = Join-Path $OutputRoot $runId
 New-Item -ItemType Directory -Path $runRoot -Force | Out-Null
-$environment = Get-EnvironmentSnapshot
-$environment | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $runRoot "environment.json") -Encoding UTF8
 
-$cases = Get-Cases $Suite
-if ($Suite -eq "Matrix" -and $null -ne $nrdExecutable) {
+$caseSuite = if ([string]::IsNullOrWhiteSpace($CaseName)) { $Suite } else { "Matrix" }
+$cases = Get-Cases $caseSuite
+if (($caseSuite -eq "Matrix") -and $null -ne $nrdExecutable) {
     $cases += @{ label = "quality_nrd"; upscaler = "dlss-quality"; denoiser = "nrd-reblur"; executable = $nrdExecutable }
+}
+if (-not [string]::IsNullOrWhiteSpace($CaseName)) {
+    $selectedCases = @($cases | Where-Object { $_.label -eq $CaseName })
+    if ($selectedCases.Count -ne 1) {
+        throw "case '$CaseName' is unavailable; quality_nrd requires -NrdExe"
+    }
+    $cases = $selectedCases[0]
 }
 $caseResults = [System.Collections.Generic.List[object]]::new()
 foreach ($case in $cases) {
@@ -346,10 +352,46 @@ foreach ($case in $cases) {
             "--denoiser", $case.denoiser,
             "--upscaler", $case.upscaler
         )
+        # Keep the DLSS quality/performance matrix isolated from latency pacing.
+        # Reflex-on is covered separately by Smoke and DebugValidation.
+        if ($Suite -eq "Matrix") {
+            $arguments += @("--reflex-mode", "off")
+        }
         if ($StreamlineApplicationId -ne 0) {
             $arguments += @("--streamline-application-id", [string]$StreamlineApplicationId)
         }
-        $result = Invoke-RecordedProcess $caseExecutable $arguments $caseRoot $label
+        $context = New-RecordedProcessContext $caseExecutable $arguments $caseRoot $label
+        $started = Get-Date
+        $exitCode = -1
+        $timedOut = $false
+        $launchError = $null
+        try {
+            # Keep GUI/D3D process creation at script scope. Launching it from a
+            # helper function or nested pwsh causes Windows to background-throttle
+            # the hidden render window on some laptop configurations.
+            $process = Start-Process -FilePath $context.executable `
+                -ArgumentList ($context.arguments -join ' ') `
+                -RedirectStandardOutput $context.stdout_path `
+                -RedirectStandardError $context.stderr_path `
+                -PassThru -WindowStyle Hidden
+            if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+                $timedOut = $true
+                try { $process.Kill($true) } catch {
+                    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                }
+                $process.WaitForExit(10000) | Out-Null
+            } else {
+                $process.Refresh()
+                if ($process.HasExited) { $exitCode = [int]$process.ExitCode }
+            }
+            $process.Dispose()
+        } catch {
+            $launchError = $_.Exception.Message
+            Set-Content -LiteralPath $context.stderr_path -Value $launchError -Encoding UTF8
+        }
+        $elapsedSeconds = ((Get-Date) - $started).TotalSeconds
+        $result = Complete-RecordedProcess `
+            $context $exitCode $timedOut $elapsedSeconds $launchError
         $gateFailures = Get-Stage10GateFailures $result $case $Configuration
         $result | Add-Member -NotePropertyName gate_failures -NotePropertyValue @($gateFailures)
         $caseResults.Add($result)
@@ -373,15 +415,19 @@ foreach ($failure in $failures) {
         $failureMessages.Add("$($failure.label): $gateFailure")
     }
 }
+$environment = Get-EnvironmentSnapshot
+$environment | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $runRoot "environment.json") -Encoding UTF8
 $summary = [ordered]@{
     schema_version = 1
     stage = "10H"
     run_id = $runId
     configuration = $Configuration
     suite = $Suite
+    case_name = if ([string]::IsNullOrWhiteSpace($CaseName)) { $null } else { $CaseName }
     seconds = $Seconds
     runs = $Runs
     timeout_seconds = $TimeoutSeconds
+    streamline_identity = if ($StreamlineApplicationId -eq 0) { "built-in-project-id" } else { "nvidia-application-id" }
     streamline_application_id = if ($StreamlineApplicationId -eq 0) { $null } else { $StreamlineApplicationId }
     executable = $executable
     executable_sha256 = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash

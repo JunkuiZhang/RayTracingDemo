@@ -15,7 +15,7 @@
 #include <sl_pcl.h>
 #include <sl_reflex.h>
 
-static_assert(sizeof(StreamlineBridgeInitDesc) == 40, "Streamline init ABI changed");
+static_assert(sizeof(StreamlineBridgeInitDesc) == 56, "Streamline init ABI changed");
 static_assert(sizeof(StreamlineBridgeSupport) == 72, "Streamline support ABI changed");
 static_assert(sizeof(StreamlineBridgeOptimalSettings) == 36, "Streamline optimal ABI changed");
 static_assert(sizeof(StreamlineBridgeFrameToken) == 24, "Streamline token ABI changed");
@@ -133,7 +133,11 @@ StreamlineBridgeStatus streamline_bridge_create(
         if (!bridge)
             return STREAMLINE_BRIDGE_STATUS_EXCEPTION;
 
-        if (desc->enable_dlss != 0 && desc->application_id == 0)
+        const bool has_application_id = desc->application_id != 0;
+        const bool has_project_identity =
+            desc->project_id != nullptr && desc->project_id[0] != '\0' &&
+            desc->engine_version != nullptr && desc->engine_version[0] != '\0';
+        if (desc->enable_dlss != 0 && !has_application_id && !has_project_identity)
             return STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT;
 
         constexpr sl::Feature features[] = {
@@ -152,6 +156,11 @@ StreamlineBridgeStatus streamline_bridge_create(
             ? static_cast<uint32_t>(std::size(features))
             : static_cast<uint32_t>(std::size(features) - 1);
         preferences.applicationId = desc->application_id;
+        if (!has_application_id && has_project_identity) {
+            preferences.engine = sl::EngineType::eCustom;
+            preferences.engineVersion = desc->engine_version;
+            preferences.projectId = desc->project_id;
+        }
         const wchar_t* plugin_paths[] = {desc->plugin_path};
         preferences.pathsToPlugins = desc->plugin_path == nullptr ? nullptr : plugin_paths;
         preferences.numPathsToPlugins = desc->plugin_path == nullptr ? 0 : 1;

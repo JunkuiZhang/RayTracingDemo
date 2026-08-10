@@ -250,12 +250,6 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
         if config.capture_output.is_none() && config.capture_after_spp.is_some() {
             return Err("--capture-after-spp 只能与 --capture-output 一起使用".to_string());
         }
-        if config.upscaler.uses_streamline() && config.streamline_application_id.is_none() {
-            return Err(format!(
-                "--upscaler {} 需要 NVIDIA 分配的 --streamline-application-id；不得使用临时或伪造 ID",
-                config.upscaler.as_str()
-            ));
-        }
         return Ok(Command::Realtime(config));
     }
 
@@ -472,7 +466,7 @@ fn print_help() {
          --denoiser <后端>       重建后端：svgf 或 nrd-reblur，默认 svgf\n  \
          --upscaler <模式>       上采样：native、dlaa、dlss-quality、dlss-balanced、dlss-performance，默认 native\n  \
          --reflex-mode <模式>    Reflex：off、on 或 on-boost，默认 on；feature-off 时 unavailable\n  \
-         --streamline-application-id <ID> NVIDIA 分配的非零 NGX application ID；DLSS/DLAA 必需\n  \\
+         --streamline-application-id <ID> 可选的 NVIDIA 分配 NGX application ID；默认使用内置 Project ID\n  \\
          --help, -h             显示帮助"
     );
 }
@@ -772,14 +766,7 @@ mod tests {
                 crate::upscaler::UpscalerMode::DlssPerformance,
             ),
         ] {
-            let mut arguments = vec!["--upscaler".to_string(), value.to_string()];
-            if expected.uses_streamline() {
-                arguments.extend([
-                    "--streamline-application-id".to_string(),
-                    "12345".to_string(),
-                ]);
-            }
-            let command = parse_arguments(arguments).unwrap();
+            let command = parse_arguments(["--upscaler".to_string(), value.to_string()]).unwrap();
             assert!(matches!(
                 command,
                 Command::Realtime(RealtimeConfig { upscaler, .. }) if upscaler == expected
@@ -822,8 +809,6 @@ mod tests {
                 "dlss-quality".to_string(),
                 "--render-scale".to_string(),
                 "0.67".to_string(),
-                "--streamline-application-id".to_string(),
-                "12345".to_string(),
             ])
             .is_err()
         );
@@ -832,8 +817,6 @@ mod tests {
                 "--upscaler".to_string(),
                 "dlss-quality".to_string(),
                 "--dynamic-resolution".to_string(),
-                "--streamline-application-id".to_string(),
-                "12345".to_string(),
             ])
             .is_err()
         );
@@ -848,9 +831,18 @@ mod tests {
     }
 
     #[test]
-    fn dlss_requires_a_nonzero_registered_application_id() {
-        let missing = parse_arguments(["--upscaler".to_string(), "dlss-quality".to_string()]);
-        assert!(matches!(missing, Err(message) if message.contains("--streamline-application-id")));
+    fn dlss_defaults_to_a_stable_project_identity_and_accepts_an_application_id_override() {
+        assert!(parse_arguments(["--upscaler".to_string(), "dlss-quality".to_string()]).is_ok());
+        let project_id = crate::realtime::STREAMLINE_PROJECT_ID;
+        assert_eq!(project_id.len(), 36);
+        assert!(project_id.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        }));
+        assert!(!crate::realtime::STREAMLINE_ENGINE_VERSION.is_empty());
         assert!(
             parse_arguments([
                 "--upscaler".to_string(),

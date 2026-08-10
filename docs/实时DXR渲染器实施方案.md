@@ -879,7 +879,7 @@ H1–I3 最新状态（2026-08-09）：median/环境来源修复和五条 Debug 
 
 执行细则：[`阶段10DLSS超分与Reflex执行方案.md`](阶段10DLSS超分与Reflex执行方案.md)。阶段 10 只接入 DLSS Super Resolution、DLAA、Reflex Low Latency 与 PCL 标记；DLSS Ray Reconstruction 和 Frame Generation 明确保留到阶段 11。
 
-当前状态（2026-08-10）：10A–10G 已按独立提交实现，默认 feature-off 路径保持不依赖 Streamline；10H 已加入有界 runner。Codex Review 进一步修正了 NGX application identity、manual proxy 识别、DLSS frame-based tags 与 lazy allocation 顺序、Native guide 资源/写入、Bridge 失败清理、PCL SimulationEnd 边界、SDK SHA-256/Authenticode 和验收硬门槛。旧 Release result 32 和 Debug result 25 现确认为修复前接入缺陷，不是 RTX 4060 Laptop 硬件不支持。修复后 Streamline Native Release 1 秒 Smoke run `20260810-185010-2827cc06` 通过新硬门槛，Total p50/p95 `6.70/7.51 ms`、VRAM/budget `10.33%`、idle wait 0、Reflex/PCL 全部计数 149 且顺序错误 0。目前本地缺少 NVIDIA 分配的非零 application ID，因此 DLSS/DLAA 矩阵状态是 `BLOCKED: REGISTERED APPLICATION ID REQUIRED`，不伪造 DLSS p50/p95 或画质结果；详细证据见 [`阶段10验收记录.md`](阶段10验收记录.md)。阶段 10 尚未标记完成。
+当前状态（2026-08-10）：10A–10G 已按独立提交实现，默认 feature-off 路径保持不依赖 Streamline；10H 已加入有界 runner。Codex Review 进一步修正了 NGX application identity、manual proxy 识别、DLSS frame-based tags 与 lazy allocation 顺序、Native guide 资源/写入、Bridge 失败清理、PCL SimulationEnd 边界、SDK SHA-256/Authenticode 和验收硬门槛。旧 Release result 32 和 Debug result 25 现确认为修复前接入缺陷，不是 RTX 4060 Laptop 硬件不支持。ABI v3 按 NVIDIA DLSS Programming Guide 为自研引擎使用固定 GUID Project ID、`eCustom` 和 `RayTracingDemo-0.1.0` Engine Version，数值 Application ID 仅作为 NVIDIA 分配后的可选覆盖。目标 RTX 4060 Laptop 上 Native、DLAA、DLSS Quality/Balanced/Performance 和 Quality+NRD 的 1920×1080、1 秒独立 Release 短测均已通过；最终 Quality+SVGF run `20260810-200348-2c8257b3` 的 Total p50/p95 `3.93/4.31 ms`、DLSS evaluate `1.25/1.44 ms`、idle wait 0。阶段 10 已解除 application identity 阻塞，剩余 Debug/人工画质和外部 Reflex 工具证据；详细证据见 [`阶段10验收记录.md`](阶段10验收记录.md)，阶段 10 尚未标记完成。
 
 工作内容：
 

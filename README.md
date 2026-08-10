@@ -148,7 +148,33 @@ cargo run --release --features nrd -- --benchmark-seconds 3 --denoiser nrd-reblu
 
 ## 阶段 10：DLSS Super Resolution 与 Reflex（验收未完成）
 
-阶段 10 已加入可选 Streamline v2.12.0、DLSS/DLAA 模式、独立 DLSS 输入资源、按 optimal settings 创建的 viewport、fence 退休和 Reflex/PCL 对账。默认构建完全不加载 Streamline，`nrd` 与 `streamline` feature 正交；未实现 DLSS RR、Frame Generation 或 Reflex 2 Frame Warp。Review 已修正 application identity、manual proxy、allocation 顺序、Native guide 开销和验收门禁；旧 result 32/25 是接入缺陷，不是 RTX 4060 Laptop 不支持 DLSS。显式 DLSS/DLAA 现需传入 NVIDIA 分配的 `--streamline-application-id <ID>`，本地未配置该 ID，所以真实 DLSS 矩阵是“等待注册身份”而不是硬件 BLOCKED，阶段 10 仍不能写成完成。命令、哈希、短矩阵结果和未完成人工项目见 [`docs/阶段10验收记录.md`](docs/阶段10验收记录.md)。
+阶段 10 已加入可选 Streamline v2.12.0、DLSS/DLAA 模式、独立 DLSS 输入资源、按 optimal settings 创建的 viewport、fence 退休和 Reflex/PCL 对账。默认构建完全不加载 Streamline，`nrd` 与 `streamline` feature 正交；未实现 DLSS RR、Frame Generation 或 Reflex 2 Frame Warp。Review 已修正 application identity、manual proxy、allocation 顺序、Native guide 开销和验收门禁；旧 result 32/25 是接入缺陷，不是 RTX 4060 Laptop 不支持 DLSS。自研引擎默认使用固定 GUID Project ID、`eCustom` 和 Cargo package version 初始化 NGX；只有 NVIDIA 明确分配数值 Application ID 时才需要 `--streamline-application-id <ID>` 覆盖。目标 RTX 4060 Laptop 上的 DLAA、DLSS Quality/Balanced/Performance 和 DLSS Quality+NRD 1 秒独立短测均已运行成功；完整证据和未完成人工项目见 [`docs/阶段10验收记录.md`](docs/阶段10验收记录.md)。
+
+编译并启动 DLSS Quality（内置 SVGF 降噪）：
+
+```powershell
+.\scripts\fetch_streamline.ps1
+cargo run --release --features streamline --locked -- --output-size 1920x1080 --denoiser svgf --upscaler dlss-quality
+```
+
+编译并启动 NRD REBLUR + DLSS Quality：
+
+```powershell
+.\scripts\fetch_nrd.ps1
+cargo run --release --all-features --locked -- --output-size 1920x1080 --denoiser nrd-reblur --upscaler dlss-quality
+```
+
+这里的 DLSS 是 DLSS Super Resolution（时域抗锯齿与超分），不是路径追踪降噪器。
+当前可选降噪器是内置 `SVGF` 和 NVIDIA `NRD REBLUR`；真正取代传统降噪器的 NVIDIA
+方案叫 DLSS Ray Reconstruction（DLSS RR），本阶段尚未接入。
+
+短验收建议每个 case 独立执行，把 `quality_svgf` 依次替换为 `native_svgf`、`dlaa_svgf`、`balanced_svgf`、`performance_svgf`；`quality_nrd` 还需提供 `-NrdExe`：
+
+```powershell
+cargo build --release --all-features --locked
+.\scripts\stage10_acceptance.ps1 -Configuration Release -Suite Smoke -CaseName quality_svgf -Runs 1 -Seconds 1 -TimeoutSeconds 15 -Exe .\target\release\ray_tracing_demo.exe
+.\scripts\stage10_acceptance.ps1 -Configuration Release -Suite Smoke -CaseName quality_nrd -Runs 1 -Seconds 1 -TimeoutSeconds 15 -Exe .\target\release\ray_tracing_demo.exe -NrdExe .\target\release\ray_tracing_demo.exe
+```
 
 ## 阶段 8：性能优化（8A–8E-2、8G）
 

@@ -1,6 +1,8 @@
 #[cfg(feature = "streamline")]
 use glam::Mat4;
 #[cfg(feature = "streamline")]
+use std::ffi::CString;
+#[cfg(feature = "streamline")]
 use std::os::windows::ffi::OsStrExt;
 #[cfg(feature = "nrd")]
 use std::ptr::null_mut;
@@ -187,15 +189,21 @@ impl StreamlineRuntime {
             .encode_wide()
             .chain(std::iter::once(0))
             .collect::<Vec<_>>();
+        let project_id = CString::new(crate::realtime::STREAMLINE_PROJECT_ID)
+            .expect("built-in Streamline Project ID cannot contain NUL");
+        let engine_version = CString::new(crate::realtime::STREAMLINE_ENGINE_VERSION)
+            .expect("built-in Streamline engine version cannot contain NUL");
         let description = crate::streamline::InitDesc {
             struct_size: size_of::<crate::streamline::InitDesc>() as u32,
             abi_version: crate::streamline::ABI_VERSION,
             development: u32::from(cfg!(debug_assertions)),
-            enable_dlss: u32::from(application_id.is_some()),
+            enable_dlss: 1,
             application_id: application_id.unwrap_or(0),
             reserved: 0,
             plugin_path: plugin_path.as_ptr(),
             log_path: std::ptr::null(),
+            project_id: project_id.as_ptr(),
+            engine_version: engine_version.as_ptr(),
         };
         crate::streamline::Bridge::create(&description)
             .map_err(|status| streamline_error("初始化 Streamline（必须早于 DXGI）", status))
@@ -1014,7 +1022,7 @@ impl Dx12Renderer {
                     &device,
                     &adapter,
                     config.reflex_mode,
-                    config.streamline_application_id.is_some(),
+                    true,
                 )?)
             } else {
                 None
