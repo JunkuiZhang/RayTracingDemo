@@ -163,6 +163,7 @@ impl Drop for NrdBackend {
 struct StreamlineRuntime {
     bridge: crate::streamline::Bridge,
     _support: crate::streamline::Support,
+    dlss_configured: bool,
 }
 
 #[cfg(feature = "streamline")]
@@ -175,7 +176,7 @@ struct StreamlineViewport {
 
 #[cfg(feature = "streamline")]
 impl StreamlineRuntime {
-    fn create_before_dxgi() -> Result<crate::streamline::Bridge> {
+    fn create_before_dxgi(application_id: Option<u32>) -> Result<crate::streamline::Bridge> {
         let plugin_directory = std::env::current_exe()
             .ok()
             .and_then(|path| path.parent().map(PathBuf::from))
@@ -190,6 +191,8 @@ impl StreamlineRuntime {
             struct_size: size_of::<crate::streamline::InitDesc>() as u32,
             abi_version: crate::streamline::ABI_VERSION,
             development: u32::from(cfg!(debug_assertions)),
+            enable_dlss: u32::from(application_id.is_some()),
+            application_id: application_id.unwrap_or(0),
             reserved: 0,
             plugin_path: plugin_path.as_ptr(),
             log_path: std::ptr::null(),
@@ -203,6 +206,7 @@ impl StreamlineRuntime {
         device: &ID3D12Device,
         adapter: &IDXGIAdapter1,
         reflex_mode: crate::realtime::ReflexMode,
+        dlss_configured: bool,
     ) -> Result<Self> {
         let adapter_description = unsafe { adapter.GetDesc1()? };
         let adapter_luid = u64::from(adapter_description.AdapterLuid.LowPart)
@@ -257,6 +261,7 @@ impl StreamlineRuntime {
         Ok(Self {
             bridge,
             _support: support,
+            dlss_configured,
         })
     }
 
@@ -355,6 +360,13 @@ impl StreamlineRuntime {
         output_extent: Extent2D,
         id: u32,
     ) -> Result<StreamlineViewport> {
+        if !self.dlss_configured {
+            return Err(streamline_error_with_detail(
+                "DLSS application identity",
+                crate::streamline::STATUS_NOT_INITIALIZED,
+                "DLSS 未加载；请提供 NVIDIA 分配的 --streamline-application-id",
+            ));
+        }
         if self._support.dlss_supported == 0 {
             return Err(streamline_error_with_detail(
                 "DLSS support",
@@ -483,7 +495,7 @@ impl StreamlineRuntime {
 
     unsafe fn set_tags_and_evaluate(
         &self,
-        viewport: &StreamlineViewport,
+        viewport: &mut StreamlineViewport,
         token: &crate::streamline::FrameToken,
         tags: &[crate::streamline::ResourceTag],
         command_list: &ID3D12GraphicsCommandList,
@@ -505,6 +517,10 @@ impl StreamlineRuntime {
                 self.bridge.last_error(),
             ));
         }
+        // Do not call slAllocateResources here. Its v2.12.0 API has no frame
+        // token and therefore looks up frame 0, which is incompatible with our
+        // frame-based tags. The first evaluate is the documented lazy-allocation
+        // path and consumes the correct token/constants/tags atomically.
         let status = unsafe {
             crate::streamline::streamline_bridge_evaluate_dlss(
                 self.bridge.as_raw(),
@@ -516,31 +532,6 @@ impl StreamlineRuntime {
         if status != crate::streamline::STATUS_OK {
             return Err(streamline_error_with_detail(
                 "执行 DLSS evaluate",
-                status,
-                self.bridge.last_error(),
-            ));
-        }
-        Ok(())
-    }
-
-    unsafe fn allocate_resources(
-        &self,
-        viewport: &mut StreamlineViewport,
-        command_list: &ID3D12GraphicsCommandList,
-    ) -> Result<()> {
-        if viewport.resources_allocated {
-            return Ok(());
-        }
-        let status = unsafe {
-            crate::streamline::streamline_bridge_allocate_resources(
-                self.bridge.as_raw(),
-                &viewport.viewport,
-                command_list.as_raw(),
-            )
-        };
-        if status != crate::streamline::STATUS_OK {
-            return Err(streamline_error_with_detail(
-                "分配 DLSS viewport 资源",
                 status,
                 self.bridge.last_error(),
             ));
@@ -848,7 +839,8 @@ struct CameraConstants {
     previous_position: [f32; 3],
     previous_yaw: f32,
     previous_pitch: f32,
-    previous_padding: [f32; 2],
+    dlss_enabled: u32,
+    reserved: u32,
     reset_history: u32,
 }
 
@@ -995,7 +987,9 @@ impl Dx12Renderer {
             enable_debug_interfaces();
 
             #[cfg(feature = "streamline")]
-            let streamline_bridge = Some(StreamlineRuntime::create_before_dxgi()?);
+            let streamline_bridge = Some(StreamlineRuntime::create_before_dxgi(
+                config.streamline_application_id,
+            )?);
 
             let factory_flags = if cfg!(debug_assertions) {
                 DXGI_CREATE_FACTORY_DEBUG
@@ -1020,6 +1014,7 @@ impl Dx12Renderer {
                     &device,
                     &adapter,
                     config.reflex_mode,
+                    config.streamline_application_id.is_some(),
                 )?)
             } else {
                 None
@@ -1505,10 +1500,6 @@ impl Dx12Renderer {
                     reset: self.reset_history,
                     delta_time_ms,
                 });
-            #[cfg(feature = "streamline")]
-            if let Some(token) = frame_token.as_ref() {
-                self.submit_pcl_marker(token, PCL_SIMULATION_END)?;
-            }
             let dlss_active =
                 self.upscaler.uses_streamline() && self.debug_view == DebugView::Final;
             #[cfg(feature = "streamline")]
@@ -1533,6 +1524,13 @@ impl Dx12Renderer {
             } else {
                 None
             };
+            let acceleration_dirty = self
+                ._scene_geometry
+                .prepare_animation(self.animation_start.elapsed(), self.animate_model);
+            #[cfg(feature = "streamline")]
+            if let Some(token) = frame_token.as_ref() {
+                self.submit_pcl_marker(token, PCL_SIMULATION_END)?;
+            }
             let command_recording_started = Instant::now();
             let mut command_recording_stats = CommandRecordingFrameStats::default();
             let frame = &self.frames[frame_index];
@@ -1545,13 +1543,6 @@ impl Dx12Renderer {
                 self.submit_pcl_marker(token, PCL_RENDER_SUBMIT_START)?;
             }
 
-            #[cfg(feature = "streamline")]
-            if let (Some(streamline), Some(viewport)) = (
-                self.streamline.as_ref(),
-                self.active_streamline_viewport.as_mut(),
-            ) {
-                streamline.allocate_resources(viewport, &self.command_list)?;
-            }
             #[cfg(feature = "streamline")]
             let dlss_token = if let (Some(streamline), Some(viewport), Some(input)) = (
                 self.streamline.as_ref(),
@@ -1589,9 +1580,6 @@ impl Dx12Renderer {
             );
             self.gpu_profiler
                 .begin_event(&self.command_list, GpuPass::AccelerationStructure);
-            let acceleration_dirty = self
-                ._scene_geometry
-                .prepare_animation(self.animation_start.elapsed(), self.animate_model);
             if acceleration_dirty {
                 self._acceleration_structures.update(
                     &self.command_list,
@@ -1636,12 +1624,6 @@ impl Dx12Renderer {
                 .map_or([0.0; 2], |input| input.jitter_px);
             #[cfg(not(feature = "streamline"))]
             let camera_jitter_px = [0.0; 2];
-            #[cfg(feature = "streamline")]
-            let previous_camera_jitter_px = dlss_frame_input
-                .as_ref()
-                .map_or([0.0; 2], |input| input.jitter_prev_px);
-            #[cfg(not(feature = "streamline"))]
-            let previous_camera_jitter_px = [0.0; 2];
             let camera = CameraConstants {
                 frame_index: self.frame_number,
                 position: self.camera_position,
@@ -1651,7 +1633,8 @@ impl Dx12Renderer {
                 previous_position: self.previous_camera_position,
                 previous_yaw: self.previous_camera_yaw,
                 previous_pitch: self.previous_camera_pitch,
-                previous_padding: previous_camera_jitter_px,
+                dlss_enabled: u32::from(dlss_active),
+                reserved: 0,
                 reset_history: u32::from(self.reset_history),
             };
             debug_assert_eq!(size_of::<CameraConstants>(), 16 * size_of::<u32>());
@@ -1956,11 +1939,11 @@ impl Dx12Renderer {
                         &mut self.transition_batch,
                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     );
-                    generation.dlss_depth.collect_transition(
+                    dlss.depth.collect_transition(
                         &mut self.transition_batch,
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     );
-                    generation.dlss_motion.collect_transition(
+                    dlss.motion.collect_transition(
                         &mut self.transition_batch,
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     );
@@ -2002,8 +1985,8 @@ impl Dx12Renderer {
                     [
                         streamline_resource_tag(&dlss.input_hdr, 3, 0, render_extent),
                         streamline_resource_tag(&dlss.output_hdr, 4, 0, output_extent),
-                        streamline_resource_tag(&generation.dlss_depth, 0, 1, render_extent),
-                        streamline_resource_tag(&generation.dlss_motion, 1, 0, render_extent),
+                        streamline_resource_tag(&dlss.depth, 0, 1, render_extent),
+                        streamline_resource_tag(&dlss.motion, 1, 0, render_extent),
                         streamline_resource_tag(
                             &dlss.exposure,
                             13,
@@ -2027,7 +2010,7 @@ impl Dx12Renderer {
                         streamline_error("DLSS runtime", crate::streamline::STATUS_NOT_INITIALIZED)
                     })?
                     .set_tags_and_evaluate(
-                        self.active_streamline_viewport.as_ref().ok_or_else(|| {
+                        self.active_streamline_viewport.as_mut().ok_or_else(|| {
                             streamline_error(
                                 "DLSS viewport",
                                 crate::streamline::STATUS_NOT_INITIALIZED,
@@ -3766,12 +3749,13 @@ impl Dx12Renderer {
         generation
             .gbuffer_motion
             .collect_transition(&mut self.transition_batch, state);
-        generation
-            .dlss_depth
-            .collect_transition(&mut self.transition_batch, state);
-        generation
-            .dlss_motion
-            .collect_transition(&mut self.transition_batch, state);
+        #[cfg(feature = "streamline")]
+        if let Some(dlss) = generation.dlss.as_mut() {
+            dlss.depth
+                .collect_transition(&mut self.transition_batch, state);
+            dlss.motion
+                .collect_transition(&mut self.transition_batch, state);
+        }
         generation
             .gbuffer_id
             .collect_transition(&mut self.transition_batch, state);
@@ -4656,6 +4640,11 @@ mod tests {
                 "stage3 UAV declaration differs from the Rust descriptor contract: {declaration}"
             );
         }
+        assert_eq!(
+            shader.matches("if (DlssEnabled != 0u)").count(),
+            3,
+            "DLSS guide clear and both first-hit paths must remain uniformly guarded"
+        );
     }
 
     #[test]

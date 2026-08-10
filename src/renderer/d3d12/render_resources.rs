@@ -76,6 +76,8 @@ pub(super) struct DlssGenerationResources {
     /// Streamline's output-resolution DLSS result before ToneMap.
     pub(super) output_hdr: TrackedResource,
     pub(super) exposure: TrackedResource,
+    pub(super) depth: TrackedResource,
+    pub(super) motion: TrackedResource,
 }
 
 /// All resources whose descriptors or dimensions depend on the current render
@@ -93,8 +95,6 @@ pub(super) struct RenderResourceGeneration {
     pub(super) gbuffer_normal_roughness: TrackedResource,
     pub(super) gbuffer_depth: TrackedResource,
     pub(super) gbuffer_motion: TrackedResource,
-    pub(super) dlss_depth: TrackedResource,
-    pub(super) dlss_motion: TrackedResource,
     pub(super) gbuffer_id: TrackedResource,
     pub(super) gbuffer_world_position: TrackedResource,
     pub(super) gbuffer_hit_distance: TrackedResource,
@@ -233,18 +233,6 @@ impl RenderResourceGeneration {
             DXGI_FORMAT_R16G16_FLOAT,
             format!("代际 {id} 当前到上一帧像素运动矢量"),
         )?;
-        let dlss_depth = create_uav_texture(
-            device,
-            render_extent,
-            DXGI_FORMAT_R32_FLOAT,
-            format!("代际 {id} DLSS device depth"),
-        )?;
-        let dlss_motion = create_uav_texture(
-            device,
-            render_extent,
-            DXGI_FORMAT_R16G16_FLOAT,
-            format!("代际 {id} DLSS pixel motion"),
-        )?;
         let gbuffer_id = create_uav_texture(
             device,
             render_extent,
@@ -340,6 +328,18 @@ impl RenderResourceGeneration {
                     },
                     DXGI_FORMAT_R16G16B16A16_FLOAT,
                     format!("代际 {id} DLSS exposure"),
+                )?,
+                depth: create_uav_texture(
+                    device,
+                    render_extent,
+                    DXGI_FORMAT_R32_FLOAT,
+                    format!("代际 {id} DLSS device depth"),
+                )?,
+                motion: create_uav_texture(
+                    device,
+                    render_extent,
+                    DXGI_FORMAT_R16G16_FLOAT,
+                    format!("代际 {id} DLSS pixel motion"),
                 )?,
             })
         } else {
@@ -464,8 +464,6 @@ impl RenderResourceGeneration {
             gbuffer_normal_roughness,
             gbuffer_depth,
             gbuffer_motion,
-            dlss_depth,
-            dlss_motion,
             gbuffer_id,
             gbuffer_world_position,
             gbuffer_hit_distance,
@@ -503,8 +501,6 @@ impl RenderResourceGeneration {
         let normal = &self.gbuffer_normal_roughness;
         let depth = &self.gbuffer_depth;
         let motion = &self.gbuffer_motion;
-        let dlss_depth = &self.dlss_depth;
-        let dlss_motion = &self.dlss_motion;
         let id = &self.gbuffer_id;
         let world_position = &self.gbuffer_world_position;
         let hit_distance = &self.gbuffer_hit_distance;
@@ -552,15 +548,38 @@ impl RenderResourceGeneration {
                 RECONSTRUCTION_PRIMARY_EMISSIVE_UAV_REGISTER,
                 reconstruction_primary_emissive,
             ),
-            (super::DLSS_DEPTH_UAV_REGISTER, dlss_depth),
-            (super::DLSS_MOTION_UAV_REGISTER, dlss_motion),
         ];
-        debug_assert_eq!(dxr_uavs.len(), DXR_UAV_REGISTER_COUNT);
+        debug_assert_eq!(dxr_uavs.len(), super::DLSS_DEPTH_UAV_REGISTER);
         for (register, resource) in dxr_uavs {
             unsafe {
                 create_texture_uav(device, &self.shader_heap, DXR_UAV_BASE + register, resource)
             };
         }
+        // The DXR table remains ABI-compatible at u0..u19. Native generations
+        // bind existing guides as inert fallback descriptors and the shader's
+        // uniform DlssEnabled guard guarantees there are no extra UAV writes.
+        #[cfg(feature = "streamline")]
+        let (dlss_depth, dlss_motion) = self
+            .dlss
+            .as_ref()
+            .map_or((depth, motion), |dlss| (&dlss.depth, &dlss.motion));
+        #[cfg(not(feature = "streamline"))]
+        let (dlss_depth, dlss_motion) = (depth, motion);
+        unsafe {
+            create_texture_uav(
+                device,
+                &self.shader_heap,
+                DXR_UAV_BASE + super::DLSS_DEPTH_UAV_REGISTER,
+                dlss_depth,
+            );
+            create_texture_uav(
+                device,
+                &self.shader_heap,
+                DXR_UAV_BASE + super::DLSS_MOTION_UAV_REGISTER,
+                dlss_motion,
+            );
+        }
+        debug_assert_eq!(super::DLSS_MOTION_UAV_REGISTER + 1, DXR_UAV_REGISTER_COUNT);
 
         #[cfg(feature = "nrd")]
         if let Some(nrd) = self.nrd.as_ref() {

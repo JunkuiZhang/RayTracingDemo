@@ -3,7 +3,7 @@
 use std::{ffi::c_void, ptr::NonNull};
 
 pub const SDK_VERSION: &str = "2.12.0";
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_INVALID_ARGUMENT: u32 = 1;
 pub const STATUS_SDK_ERROR: u32 = 2;
@@ -18,6 +18,8 @@ pub struct InitDesc {
     pub struct_size: u32,
     pub abi_version: u32,
     pub development: u32,
+    pub enable_dlss: u32,
+    pub application_id: u32,
     pub reserved: u32,
     pub plugin_path: *const u16,
     pub log_path: *const u16,
@@ -264,10 +266,10 @@ impl Bridge {
 
 impl Drop for Bridge {
     fn drop(&mut self) {
-        // The renderer owns shutdown ordering and calls the native function
-        // after all frame fences have completed. Do not call SDK shutdown from
-        // an implicit Rust destructor.
-        let _ = self.raw;
+        // This is the constructor-failure guard. The completed renderer consumes
+        // Bridge through `shutdown`, which forgets it after the fence-ordered
+        // native shutdown; any earlier `?` now still balances a successful init.
+        let _ = unsafe { streamline_bridge_shutdown(self.raw.as_ptr()) };
     }
 }
 
@@ -283,7 +285,7 @@ mod tests {
 
     #[test]
     fn abi_struct_layout_is_fixed_width() {
-        assert_eq!(size_of::<InitDesc>(), 32);
+        assert_eq!(size_of::<InitDesc>(), 40);
         assert_eq!(size_of::<Support>(), 72);
         assert_eq!(size_of::<OptimalSettings>(), 36);
         assert_eq!(size_of::<FrameToken>(), 24);
@@ -296,7 +298,7 @@ mod tests {
 
     #[test]
     fn invalid_bridge_statuses_are_stable() {
-        assert_eq!(ABI_VERSION, 1);
+        assert_eq!(ABI_VERSION, 2);
         assert_eq!(STATUS_OK, 0);
         assert_eq!(STATUS_INVALID_ARGUMENT, 1);
         assert_eq!(size_of::<RawBridge>(), 0);

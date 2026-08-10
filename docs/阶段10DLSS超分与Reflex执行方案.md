@@ -142,6 +142,7 @@ docs/阶段10验收记录.md
    - 不删除或覆盖不匹配目录，给出明确修复提示。
 3. `build.rs` 仅在 `CARGO_FEATURE_STREAMLINE` 时验证本地 SDK、构建 bridge、链接并部署；
    feature-off 不读取 SDK 路径，也不复制 Streamline DLL。
+   验证必须重算 lock 中全部文件 SHA-256，不得只检查文件存在。
 4. 支持 `STREAMLINE_SOURCE_DIR` 覆盖默认目录，并加入 `rerun-if-env-changed`。
 5. Debug/Release 选择匹配的 lib 和 DLL；DLL 复制到 Cargo profile 可执行目录，策略与
    WinPix/NRD notice 部署一致。
@@ -187,7 +188,9 @@ bridge 至少封装以下能力，不要求导出和 SDK 同名的薄壳：
 - SDK/version/plugin/DLL flavor 诊断。
 
 初始化使用 `PreferenceFlag::eUseManualHooking` 和 frame-based resource tagging；
-`featuresToLoad` 只列 DLSS、Reflex、PCL，不加载 RR/FG。建议在创建 DXGI/D3D12 之前
+`featuresToLoad` 只允许 DLSS、Reflex、PCL，不加载 RR/FG。DLSS 只在提供 NVIDIA 分配的
+非零 application ID 时列入；缺少 ID 时 Native 可仅加载 Reflex/PCL，显式 DLSS/DLAA
+必须快速失败，严禁使用 temporary/fake ID。建议在创建 DXGI/D3D12 之前
 `slInit`，device 成功后 `slSetD3DDevice`，swapchain 创建后通过 `slUpgradeInterface`
 取得升级接口。若 locked guide 对具体顺序有更严格要求，以 v2.12.0 官方文档为准并在
 代码注释写明章节。

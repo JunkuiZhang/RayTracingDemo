@@ -1,8 +1,11 @@
 use std::{
     env, fs,
+    io::Read,
     path::{Path, PathBuf},
     process::Command,
 };
+
+use sha2::{Digest, Sha256};
 
 fn main() {
     let shaders = [
@@ -118,6 +121,7 @@ fn validate_streamline_sdk(output_directory: &Path) {
         "STREAMLINE_SOURCE_DIR",
         &repository_root.join("external/streamline-v2.12.0"),
     );
+    validate_streamline_lock(repository_root, &sdk);
     let required = [
         "include/sl.h",
         "include/sl_consts.h",
@@ -198,6 +202,71 @@ fn validate_streamline_sdk(output_directory: &Path) {
         "cargo:rustc-env=RAY_TRACING_STREAMLINE_SOURCE_DIR={}",
         sdk.display()
     );
+}
+
+fn validate_streamline_lock(repository_root: &Path, sdk: &Path) {
+    let lock_path = repository_root.join("third_party/streamline/version.lock.json");
+    println!("cargo:rerun-if-changed={}", lock_path.display());
+    let lock: serde_json::Value = serde_json::from_slice(
+        &fs::read(&lock_path)
+            .unwrap_or_else(|error| panic!("读取 {} 失败：{error}", lock_path.display())),
+    )
+    .unwrap_or_else(|error| panic!("解析 {} 失败：{error}", lock_path.display()));
+    if lock.get("version").and_then(serde_json::Value::as_str) != Some("2.12.0") {
+        panic!("Streamline lock version 必须固定为 2.12.0");
+    }
+    for group in ["files", "licenses"] {
+        let entries = lock
+            .get(group)
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| panic!("Streamline lock 缺少 {group} 数组"));
+        for entry in entries {
+            let relative = entry
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("Streamline lock {group} 条目缺少 path"));
+            let relative_path = Path::new(relative);
+            if relative_path.is_absolute()
+                || relative_path
+                    .components()
+                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            {
+                panic!("Streamline lock 包含不安全路径：{relative}");
+            }
+            let expected = entry
+                .get("sha256")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("Streamline lock {relative} 缺少 sha256"));
+            let path = sdk.join(relative_path);
+            println!("cargo:rerun-if-changed={}", path.display());
+            let actual = file_sha256(&path);
+            if !actual.eq_ignore_ascii_case(expected) {
+                panic!(
+                    "Streamline SDK hash 不匹配：{}；expected={} actual={}；请重新运行 scripts/fetch_streamline.ps1",
+                    path.display(),
+                    expected,
+                    actual
+                );
+            }
+        }
+    }
+}
+
+fn file_sha256(path: &Path) -> String {
+    let mut file = fs::File::open(path)
+        .unwrap_or_else(|error| panic!("读取 Streamline 文件 {} 失败：{error}", path.display()));
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).unwrap_or_else(|error| {
+            panic!("哈希 Streamline 文件 {} 失败：{error}", path.display())
+        });
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 fn build_streamline_bridge(output_directory: &Path) {

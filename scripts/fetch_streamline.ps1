@@ -28,6 +28,15 @@ function Test-VerifiedTree([string]$directory) {
         $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
         if ($actual -ne $entry.sha256.ToLowerInvariant()) { return $false }
     }
+    foreach ($entry in @($lock.files | Where-Object { $_.path -match '^bin/x64/[^/]+\.dll$' })) {
+        $path = Join-Path $directory ($entry.path -replace '/','\')
+        $signature = Get-AuthenticodeSignature -LiteralPath $path
+        if ($signature.Status -ne 'Valid' -or
+            $null -eq $signature.SignerCertificate -or
+            $signature.SignerCertificate.Subject -notmatch 'O=NVIDIA Corporation') {
+            return $false
+        }
+    }
     return $true
 }
 
@@ -84,6 +93,7 @@ try {
     if (-not (Test-VerifiedTree $candidate)) {
         throw '解包后的 Streamline SDK 缺少必需文件或 hash 不匹配'
     }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
     Move-Item -LiteralPath $candidate -Destination $target
     Write-Output "Streamline SDK fetched and verified: $target"
 } finally {

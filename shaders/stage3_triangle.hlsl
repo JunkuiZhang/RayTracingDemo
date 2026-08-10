@@ -84,7 +84,8 @@ cbuffer FrameConstants : register(b0)
     float3 PreviousCameraPosition;
     float PreviousCameraYaw;
     float PreviousCameraPitch;
-    float2 PreviousCameraJitterPx;
+    uint DlssEnabled;
+    uint FrameConstantsReserved;
     uint ResetHistory;
 };
 
@@ -364,8 +365,11 @@ void RayGen()
     GBufferId[pixel] = 0xFFFFFFFFu;
     GBufferWorldPosition[pixel] = 0;
     GBufferHitDistance[pixel] = 0;
-    DlssDepth[pixel] = 1.0;
-    DlssMotion[pixel] = 0;
+    if (DlssEnabled != 0u)
+    {
+        DlssDepth[pixel] = 1.0;
+        DlssMotion[pixel] = 0;
+    }
     ReconstructionNoisyHdr[pixel] = 0;
     ReconstructionDiffuseAlbedo[pixel] = 0;
     ReconstructionSpecularAlbedo[pixel] = 0;
@@ -492,10 +496,13 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         GBufferMotion[pixel] = ResetHistory != 0u
             ? 0
             : (currentUv - previousUv) * float2(size);
-        DlssDepth[pixel] = DlssDeviceDepth(hitPosition);
-        DlssMotion[pixel] = ResetHistory != 0u
-            ? 0
-            : (previousUv - currentUv) * float2(size);
+        if (DlssEnabled != 0u)
+        {
+            DlssDepth[pixel] = DlssDeviceDepth(hitPosition);
+            DlssMotion[pixel] = ResetHistory != 0u
+                ? 0
+                : (previousUv - currentUv) * float2(size);
+        }
 
         float3 cameraForward;
         float3 cameraRight;
@@ -823,10 +830,13 @@ void LegacyClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttri
         GBufferMotion[pixel] = ResetHistory != 0u
             ? 0
             : (currentUv - previousUv) * float2(size);
-        DlssDepth[pixel] = DlssDeviceDepth(hitPosition);
-        DlssMotion[pixel] = ResetHistory != 0u
-            ? 0
-            : (previousUv - currentUv) * float2(size);
+        if (DlssEnabled != 0u)
+        {
+            DlssDepth[pixel] = DlssDeviceDepth(hitPosition);
+            DlssMotion[pixel] = ResetHistory != 0u
+                ? 0
+                : (previousUv - currentUv) * float2(size);
+        }
     }
 
     if (kind == 3u)

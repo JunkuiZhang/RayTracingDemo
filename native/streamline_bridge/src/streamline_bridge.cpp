@@ -8,12 +8,14 @@
 #include <string>
 #include <vector>
 
+#include <unknwn.h>
+
 #include <sl.h>
 #include <sl_dlss.h>
 #include <sl_pcl.h>
 #include <sl_reflex.h>
 
-static_assert(sizeof(StreamlineBridgeInitDesc) == 32, "Streamline init ABI changed");
+static_assert(sizeof(StreamlineBridgeInitDesc) == 40, "Streamline init ABI changed");
 static_assert(sizeof(StreamlineBridgeSupport) == 72, "Streamline support ABI changed");
 static_assert(sizeof(StreamlineBridgeOptimalSettings) == 36, "Streamline optimal ABI changed");
 static_assert(sizeof(StreamlineBridgeFrameToken) == 24, "Streamline token ABI changed");
@@ -131,10 +133,13 @@ StreamlineBridgeStatus streamline_bridge_create(
         if (!bridge)
             return STREAMLINE_BRIDGE_STATUS_EXCEPTION;
 
+        if (desc->enable_dlss != 0 && desc->application_id == 0)
+            return STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT;
+
         constexpr sl::Feature features[] = {
-            sl::kFeatureDLSS,
             sl::kFeatureReflex,
             sl::kFeaturePCL,
+            sl::kFeatureDLSS,
         };
         sl::Preferences preferences{};
         preferences.showConsole = desc->development != 0;
@@ -143,7 +148,10 @@ StreamlineBridgeStatus streamline_bridge_create(
                             sl::PreferenceFlags::eUseManualHooking |
                             sl::PreferenceFlags::eUseFrameBasedResourceTagging;
         preferences.featuresToLoad = features;
-        preferences.numFeaturesToLoad = static_cast<uint32_t>(std::size(features));
+        preferences.numFeaturesToLoad = desc->enable_dlss != 0
+            ? static_cast<uint32_t>(std::size(features))
+            : static_cast<uint32_t>(std::size(features) - 1);
+        preferences.applicationId = desc->application_id;
         const wchar_t* plugin_paths[] = {desc->plugin_path};
         preferences.pathsToPlugins = desc->plugin_path == nullptr ? nullptr : plugin_paths;
         preferences.numPathsToPlugins = desc->plugin_path == nullptr ? 0 : 1;
@@ -486,14 +494,20 @@ StreamlineBridgeStatus streamline_bridge_upgrade_interface(
     if (check_bridge(bridge) != STREAMLINE_BRIDGE_STATUS_OK || interface_ptr == nullptr || *interface_ptr == nullptr)
         return STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT;
     try {
+        void* native_interface = nullptr;
+        const sl::Result native_result = slGetNativeInterface(*interface_ptr, &native_interface);
+        if (native_result != sl::Result::eOk)
+            return set_error(bridge, "slGetNativeInterface failed", native_result);
+        if (native_interface == nullptr)
+            return set_error(bridge, "slGetNativeInterface returned null");
+        const bool already_upgraded = native_interface != *interface_ptr;
+        static_cast<IUnknown*>(native_interface)->Release();
+        if (already_upgraded)
+            return STREAMLINE_BRIDGE_STATUS_ALREADY_UPGRADED;
+
         const sl::Result result = slUpgradeInterface(interface_ptr);
         if (result == sl::Result::eOk)
             return STREAMLINE_BRIDGE_STATUS_OK;
-        // With the linked interposer, CreateSwapChainForHwnd can already
-        // return a proxy even while manual hooking is requested. Streamline
-        // reports that harmless second upgrade as eErrorInvalidIntegration.
-        if (result == sl::Result::eErrorInvalidIntegration)
-            return STREAMLINE_BRIDGE_STATUS_ALREADY_UPGRADED;
         return set_error(bridge, "slUpgradeInterface failed", result);
     } catch (...) {
         return STREAMLINE_BRIDGE_STATUS_EXCEPTION;

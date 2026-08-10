@@ -21,6 +21,9 @@ pub struct RealtimeConfig {
     pub denoiser: DenoiserBackend,
     pub upscaler: UpscalerMode,
     pub reflex_mode: ReflexMode,
+    /// NVIDIA-assigned NGX application identity. `None` keeps DLSS unloaded
+    /// while allowing the optional Streamline build to provide Reflex/PCL.
+    pub streamline_application_id: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

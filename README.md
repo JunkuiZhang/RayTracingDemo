@@ -148,7 +148,7 @@ cargo run --release --features nrd -- --benchmark-seconds 3 --denoiser nrd-reblu
 
 ## 阶段 10：DLSS Super Resolution 与 Reflex（验收未完成）
 
-阶段 10 已加入可选 Streamline v2.12.0、DLSS/DLAA 模式、独立 DLSS 输入资源、按 optimal settings 创建的 viewport、fence 退休和 Reflex/PCL 对账。默认构建完全不加载 Streamline，`nrd` 与 `streamline` feature 正交；未实现 DLSS RR、Frame Generation 或 Reflex 2 Frame Warp。目标 RTX 4060 Laptop 的 native Smoke 和 Debug GPU-Based Validation 通过，但该机的 Streamline DLSS support 返回不支持，DLSS 模式真实 acceptance 标为 BLOCKED，不能将阶段 10 写成完成。命令、哈希、短矩阵结果和未完成人工项目见 [`docs/阶段10验收记录.md`](docs/阶段10验收记录.md)。
+阶段 10 已加入可选 Streamline v2.12.0、DLSS/DLAA 模式、独立 DLSS 输入资源、按 optimal settings 创建的 viewport、fence 退休和 Reflex/PCL 对账。默认构建完全不加载 Streamline，`nrd` 与 `streamline` feature 正交；未实现 DLSS RR、Frame Generation 或 Reflex 2 Frame Warp。Review 已修正 application identity、manual proxy、allocation 顺序、Native guide 开销和验收门禁；旧 result 32/25 是接入缺陷，不是 RTX 4060 Laptop 不支持 DLSS。显式 DLSS/DLAA 现需传入 NVIDIA 分配的 `--streamline-application-id <ID>`，本地未配置该 ID，所以真实 DLSS 矩阵是“等待注册身份”而不是硬件 BLOCKED，阶段 10 仍不能写成完成。命令、哈希、短矩阵结果和未完成人工项目见 [`docs/阶段10验收记录.md`](docs/阶段10验收记录.md)。
 
 ## 阶段 8：性能优化（8A–8E-2、8G）
 

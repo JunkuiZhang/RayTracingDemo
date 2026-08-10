@@ -12,6 +12,7 @@ param(
     [int]$Seconds = 1,
     [ValidateRange(10, 180)]
     [int]$TimeoutSeconds = 60,
+    [uint32]$StreamlineApplicationId = 0,
     [string]$OutputRoot = "output/stage10"
 )
 
@@ -197,6 +198,115 @@ function Get-Cases([string]$SelectedSuite) {
     return $cases
 }
 
+function Get-Stage10GateFailures(
+    [object]$Result,
+    [hashtable]$Case,
+    [string]$BuildConfiguration
+) {
+    $gateFailures = [System.Collections.Generic.List[string]]::new()
+    if ($Result.exit_code -ne 0 -or $Result.timed_out -or
+        $Result.parseable_json_lines -ne 1 -or $null -eq $Result.json) {
+        return @($gateFailures)
+    }
+
+    try {
+        $json = $Result.json
+        $expectedUpscaler = [string]$Case.upscaler
+        if ([string]$json.upscaler.mode -ne $expectedUpscaler) {
+            $gateFailures.Add("upscaler mode mismatch: expected=$expectedUpscaler actual=$($json.upscaler.mode)")
+        }
+        if ([string]$json.gpu_name -notmatch 'RTX 4060 Laptop') {
+            $gateFailures.Add("stage 10 target GPU mismatch: actual=$($json.gpu_name)")
+        }
+        if ([uint32]$json.output_width -ne 1920 -or [uint32]$json.output_height -ne 1080) {
+            $gateFailures.Add("output extent must be 1920x1080")
+        }
+        if ([uint64]$json.gpu_idle_wait_count -ne 0) {
+            $gateFailures.Add("gpu_idle_wait_count must be zero, actual=$($json.gpu_idle_wait_count)")
+        }
+        if ([uint64]$json.valid_samples -eq 0 -or $null -eq $json.passes.total.p95_ms) {
+            $gateFailures.Add("GPU Total must contain valid timing samples")
+        }
+
+        $usageRatio = if ($null -ne $json.memory.measurement.peak_usage_ratio) {
+            $json.memory.measurement.peak_usage_ratio
+        } else { $json.memory.usage_ratio }
+        if ($null -eq $usageRatio) {
+            $gateFailures.Add("local VRAM usage_ratio is unavailable")
+        } elseif ([double]$usageRatio -ge 0.70) {
+            $gateFailures.Add("local VRAM usage_ratio must be below 0.70, actual=$usageRatio")
+        }
+
+        $usesDlss = $expectedUpscaler -ne "native"
+        if ($usesDlss) {
+            if ($null -eq $json.upscaler.dlss_optimal) {
+                $gateFailures.Add("active DLSS mode must report optimal settings")
+            } else {
+                if ([uint32]$json.render_width -ne [uint32]$json.upscaler.dlss_optimal.optimal_render_width -or
+                    [uint32]$json.render_height -ne [uint32]$json.upscaler.dlss_optimal.optimal_render_height) {
+                    $gateFailures.Add("render extent does not match Streamline optimal settings")
+                }
+            }
+            foreach ($passName in @("dlss_compose", "dlss_evaluate")) {
+                $pass = $json.passes.$passName
+                if ($null -eq $pass.p95_ms -or [uint64]$pass.valid_samples -eq 0) {
+                    $gateFailures.Add("$passName must contain non-null GPU timing samples")
+                }
+            }
+            if ($BuildConfiguration -eq "Release" -and [double]$json.passes.total.p95_ms -gt 16.67) {
+                $gateFailures.Add("DLSS GPU Total p95 exceeds 16.67 ms: $($json.passes.total.p95_ms)")
+            }
+        } else {
+            foreach ($passName in @("dlss_compose", "dlss_evaluate")) {
+                $pass = $json.passes.$passName
+                if ($null -ne $pass.p95_ms -or [uint64]$pass.valid_samples -ne 0) {
+                    $gateFailures.Add("Native mode must keep $passName inactive")
+                }
+            }
+        }
+
+        if ([bool]$json.reflex.compiled) {
+            $tokenCount = [uint64]$json.reflex.token_count
+            if ($tokenCount -eq 0) {
+                $gateFailures.Add("Streamline frame token count must be nonzero")
+            }
+            if ([uint64]$json.reflex.present_common_count -ne $tokenCount) {
+                $gateFailures.Add("presentCommon count must equal frame token count")
+            }
+            if ([uint64]$json.reflex.order_errors -ne 0) {
+                $gateFailures.Add("Reflex/PCL marker order_errors must be zero")
+            }
+            if ([bool]$json.reflex.support.reflex -and [string]$json.reflex.active_mode -ne "off" -and
+                [uint64]$json.reflex.sleep_count -ne $tokenCount) {
+                $gateFailures.Add("Reflex sleep count must equal frame token count when enabled")
+            }
+            if ([bool]$json.reflex.support.pcl) {
+                foreach ($markerName in @(
+                    "simulation_start", "simulation_end", "render_submit_start",
+                    "render_submit_end", "present_start", "present_end")) {
+                    if ([uint64]$json.reflex.marker_counts.$markerName -ne $tokenCount) {
+                        $gateFailures.Add("PCL marker $markerName must equal frame token count")
+                    }
+                }
+            }
+        }
+
+        if ($BuildConfiguration -eq "Debug") {
+            $stderr = if (Test-Path -LiteralPath $Result.stderr_path) {
+                Get-Content -LiteralPath $Result.stderr_path -Raw
+            } else { "" }
+            $emptyInfoQueue = $stderr -match 'D3D12 Debug InfoQueue[^\r\n]*0\s*条消息'
+            $zeroSeverities = $stderr -match 'CORRUPTION\s+0.*ERROR\s+0'
+            if (-not ($emptyInfoQueue -or $zeroSeverities)) {
+                $gateFailures.Add("Debug InfoQueue must report CORRUPTION 0 and ERROR 0")
+            }
+        }
+    } catch {
+        $gateFailures.Add("benchmark JSON schema/gate evaluation failed: $($_.Exception.Message)")
+    }
+    return @($gateFailures)
+}
+
 $repoRoot = (Get-Location).Path
 $executable = if ([string]::IsNullOrWhiteSpace($Exe)) {
     Join-Path $repoRoot "target\$($Configuration.ToLower())\ray_tracing_demo.exe"
@@ -204,6 +314,9 @@ $executable = if ([string]::IsNullOrWhiteSpace($Exe)) {
     (Resolve-Path -LiteralPath $Exe).Path
 }
 if (-not (Test-Path -LiteralPath $executable)) { throw "executable not found: $executable" }
+if ($Suite -ne "Smoke" -and $StreamlineApplicationId -eq 0) {
+    throw "$Suite requires -StreamlineApplicationId with an NVIDIA-assigned nonzero NGX application ID"
+}
 $nrdExecutable = $null
 if (-not [string]::IsNullOrWhiteSpace($NrdExe)) {
     $nrdExecutable = (Resolve-Path -LiteralPath $NrdExe).Path
@@ -233,14 +346,33 @@ foreach ($case in $cases) {
             "--denoiser", $case.denoiser,
             "--upscaler", $case.upscaler
         )
+        if ($StreamlineApplicationId -ne 0) {
+            $arguments += @("--streamline-application-id", [string]$StreamlineApplicationId)
+        }
         $result = Invoke-RecordedProcess $caseExecutable $arguments $caseRoot $label
+        $gateFailures = Get-Stage10GateFailures $result $case $Configuration
+        $result | Add-Member -NotePropertyName gate_failures -NotePropertyValue @($gateFailures)
         $caseResults.Add($result)
     }
 }
 
 $failures = @($caseResults | Where-Object {
-    $_.exit_code -ne 0 -or $_.timed_out -or $_.parseable_json_lines -ne 1 -or $null -eq $_.json
+    $_.exit_code -ne 0 -or $_.timed_out -or $_.parseable_json_lines -ne 1 -or
+    $null -eq $_.json -or $_.gate_failures.Count -ne 0
 })
+$failureMessages = [System.Collections.Generic.List[string]]::new()
+foreach ($failure in $failures) {
+    if ($failure.exit_code -ne 0 -or $failure.timed_out -or
+        $failure.parseable_json_lines -ne 1 -or $null -eq $failure.json) {
+        $detail = if ([string]::IsNullOrWhiteSpace([string]$failure.json_error)) {
+            "process/JSON validation failed"
+        } else { [string]$failure.json_error }
+        $failureMessages.Add("$($failure.label): $detail")
+    }
+    foreach ($gateFailure in @($failure.gate_failures)) {
+        $failureMessages.Add("$($failure.label): $gateFailure")
+    }
+}
 $summary = [ordered]@{
     schema_version = 1
     stage = "10H"
@@ -250,6 +382,7 @@ $summary = [ordered]@{
     seconds = $Seconds
     runs = $Runs
     timeout_seconds = $TimeoutSeconds
+    streamline_application_id = if ($StreamlineApplicationId -eq 0) { $null } else { $StreamlineApplicationId }
     executable = $executable
     executable_sha256 = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash
     nrd_executable = $nrdExecutable
@@ -260,7 +393,7 @@ $summary = [ordered]@{
     environment = $environment
     cases = $caseResults
     pass = ($failures.Count -eq 0)
-    failures = @($failures | ForEach-Object { "$($_.label): $($_.json_error)" })
+    failures = @($failureMessages)
     note = "No long-duration workload is implemented; this runner is bounded to 1..30 seconds."
 }
 $summaryPath = Join-Path $runRoot "summary.json"

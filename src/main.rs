@@ -104,11 +104,12 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                 | "--denoiser"
                 | "--upscaler"
                 | "--reflex-mode"
+                | "--streamline-application-id"
         )
     });
     if cpu_reference_requested && realtime_requested {
         return Err(
-            "--cpu-reference 不能与实时渲染选项（--model、--animate-model、--benchmark-seconds、--capture-output、--capture-after-spp、--debug-view、--atrous-mode、--output-size、--render-scale、--dynamic-resolution、--target-gpu-ms、--command-recording-mode、--acceleration-structure-mode、--denoiser、--upscaler、--reflex-mode）同时使用"
+            "--cpu-reference 不能与实时渲染选项（--model、--animate-model、--benchmark-seconds、--capture-output、--capture-after-spp、--debug-view、--atrous-mode、--output-size、--render-scale、--dynamic-resolution、--target-gpu-ms、--command-recording-mode、--acceleration-structure-mode、--denoiser、--upscaler、--reflex-mode、--streamline-application-id）同时使用"
                 .to_string(),
         );
     }
@@ -223,6 +224,18 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                     let value = arguments.next().ok_or("--reflex-mode 缺少模式")?;
                     config.reflex_mode = parse_reflex_mode(&value)?;
                 }
+                "--streamline-application-id" => {
+                    let value = arguments
+                        .next()
+                        .ok_or("--streamline-application-id 缺少数值")?;
+                    let application_id = value
+                        .parse::<u32>()
+                        .map_err(|_| "--streamline-application-id 必须是非零 u32".to_string())?;
+                    if application_id == 0 {
+                        return Err("--streamline-application-id 必须是非零 u32".to_string());
+                    }
+                    config.streamline_application_id = Some(application_id);
+                }
                 _ => return Err(format!("未知参数：{argument}")),
             }
         }
@@ -236,6 +249,12 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
         }
         if config.capture_output.is_none() && config.capture_after_spp.is_some() {
             return Err("--capture-after-spp 只能与 --capture-output 一起使用".to_string());
+        }
+        if config.upscaler.uses_streamline() && config.streamline_application_id.is_none() {
+            return Err(format!(
+                "--upscaler {} 需要 NVIDIA 分配的 --streamline-application-id；不得使用临时或伪造 ID",
+                config.upscaler.as_str()
+            ));
         }
         return Ok(Command::Realtime(config));
     }
@@ -432,7 +451,7 @@ fn print_help() {
         "RayTracingDemo\n\n\
          用法：\n  \
          cargo run --release                 启动实时 DX12 窗口\n  \
-         cargo run --release -- --model <路径> [--animate-model] [--benchmark-seconds <秒> | --capture-output <PNG>] [--capture-after-spp <SPP>] [--debug-view <名称>] [--atrous-mode <模式>] [--output-size <宽x高>] [--render-scale <比例> | --dynamic-resolution [--target-gpu-ms <毫秒>]] [--command-recording-mode <模式>] [--acceleration-structure-mode <模式>] [--denoiser <后端>] [--upscaler <模式>]\n  \
+         cargo run --release -- --model <路径> [--animate-model] [--benchmark-seconds <秒> | --capture-output <PNG>] [--capture-after-spp <SPP>] [--debug-view <名称>] [--atrous-mode <模式>] [--output-size <宽x高>] [--render-scale <比例> | --dynamic-resolution [--target-gpu-ms <毫秒>]] [--command-recording-mode <模式>] [--acceleration-structure-mode <模式>] [--denoiser <后端>] [--upscaler <模式>] [--streamline-application-id <ID>]\n  \
          cargo run --release -- --cpu-reference [选项]\n\n\
          选项：\n  \
          --samples <数量>       每像素采样数，默认 1\n  \
@@ -452,7 +471,8 @@ fn print_help() {
          --acceleration-structure-mode <模式> AS 策略：baseline 或 optimized，默认 baseline\n  \
          --denoiser <后端>       重建后端：svgf 或 nrd-reblur，默认 svgf\n  \
          --upscaler <模式>       上采样：native、dlaa、dlss-quality、dlss-balanced、dlss-performance，默认 native\n  \
-         --reflex-mode <模式>    Reflex：off、on 或 on-boost，默认 on；feature-off 时 unavailable\n  \\
+         --reflex-mode <模式>    Reflex：off、on 或 on-boost，默认 on；feature-off 时 unavailable\n  \
+         --streamline-application-id <ID> NVIDIA 分配的非零 NGX application ID；DLSS/DLAA 必需\n  \\
          --help, -h             显示帮助"
     );
 }
@@ -752,7 +772,14 @@ mod tests {
                 crate::upscaler::UpscalerMode::DlssPerformance,
             ),
         ] {
-            let command = parse_arguments(["--upscaler".to_string(), value.to_string()]).unwrap();
+            let mut arguments = vec!["--upscaler".to_string(), value.to_string()];
+            if expected.uses_streamline() {
+                arguments.extend([
+                    "--streamline-application-id".to_string(),
+                    "12345".to_string(),
+                ]);
+            }
+            let command = parse_arguments(arguments).unwrap();
             assert!(matches!(
                 command,
                 Command::Realtime(RealtimeConfig { upscaler, .. }) if upscaler == expected
@@ -795,6 +822,8 @@ mod tests {
                 "dlss-quality".to_string(),
                 "--render-scale".to_string(),
                 "0.67".to_string(),
+                "--streamline-application-id".to_string(),
+                "12345".to_string(),
             ])
             .is_err()
         );
@@ -803,6 +832,8 @@ mod tests {
                 "--upscaler".to_string(),
                 "dlss-quality".to_string(),
                 "--dynamic-resolution".to_string(),
+                "--streamline-application-id".to_string(),
+                "12345".to_string(),
             ])
             .is_err()
         );
@@ -814,6 +845,33 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+
+    #[test]
+    fn dlss_requires_a_nonzero_registered_application_id() {
+        let missing = parse_arguments(["--upscaler".to_string(), "dlss-quality".to_string()]);
+        assert!(matches!(missing, Err(message) if message.contains("--streamline-application-id")));
+        assert!(
+            parse_arguments([
+                "--upscaler".to_string(),
+                "dlss-quality".to_string(),
+                "--streamline-application-id".to_string(),
+                "0".to_string(),
+            ])
+            .is_err()
+        );
+        assert!(matches!(
+            parse_arguments([
+                "--upscaler".to_string(),
+                "dlss-quality".to_string(),
+                "--streamline-application-id".to_string(),
+                "12345".to_string(),
+            ]),
+            Ok(Command::Realtime(RealtimeConfig {
+                streamline_application_id: Some(12345),
+                ..
+            }))
+        ));
     }
 
     #[test]
