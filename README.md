@@ -128,7 +128,7 @@ cargo run --release -- --model assets/gltf/NonIndexedMultiNode/NonIndexedMultiNo
 
 纹理 binding 保留 image、sampler 和 texCoord 语义。本阶段只使用 `TEXCOORD_0`：非零 `texCoord` 或有纹理但 primitive 缺少 UV0 会明确报错。sampler 支持 U/V 独立 Repeat、ClampToEdge、MirroredRepeat，以及 nearest/linear min/mag filter；sampler descriptor table 上限为 64，材质 texture/sampler index 在 CPU 侧做有界打包检查。`doubleSided=false` 的 glTF primitive 使用 DXR 背面剔除，`doubleSided=true` 和 legacy dielectric 允许双面命中，并使用 DXR HitKind 判断 front/back。
 
-`RawDiffuse` 仅表示可按 base color 重调制的 diffuse 信号；`RawSpecular` 表示未调制的 specular + emissive 信号。first-bounce 的两个 lobe 使用同一个 mixture PDF 分别拆分，黑色 base color 不会抹掉自发光。
+`RawDiffuse` 仅表示可按 base color 重调制的 diffuse 信号；`RawSpecular` 表示未调制的 specular + emissive 信号。SVGF 路径的 first-bounce 两个 lobe 使用同一个 mixture PDF 分别拆分；NRD 路径只在主表面使用 4×4 Bayer 分层的概率式 lobe 选择、独立 lobe MIS PDF 和 `AREA_3X3` hit-distance reconstruction，后续 bounce 恢复低方差 mixture estimator。黑色 base color 不会抹掉自发光。
 
 当前明确不支持并会报错：非 OPAQUE alpha、skin、morph target、animation channel、非 TRIANGLES primitive 和 `extensionsRequired`。压缩纹理、运行时网络下载、完整动画系统、阶段 8/9/10 优化也不在本阶段范围内。
 
@@ -145,6 +145,8 @@ cargo run --release --features nrd -- --benchmark-seconds 3 --denoiser nrd-reblu
 ```
 
 `F3` 可在支持 `nrd` feature 的构建中创建新 generation，在 SVGF 与 NRD 间切换；旧代按 fence 退休，历史显式 reset。NRD 调度会恢复应用 descriptor heap，inactive profiler pass 在 JSON 中为 `null`。离线版本、桥接说明和第三方许可见 [`third_party/nrd/README.md`](third_party/nrd/README.md)，短矩阵和未完成人工验收见 [`docs/阶段9验收记录.md`](docs/阶段9验收记录.md)。本阶段不包含 Streamline、DLSS、Ray Reconstruction、RELAX、SIGMA、SH 或 ReSTIR。
+
+镜面画质复验后，实时采样改为按像素/维度扰动的 Owen-Sobol 时域序列；glTF PBR 镜面方向使用 bounded GGX VNDF v3，并裁掉最低概率 5% 尾部。理想金属/玻璃路径会把首个 lobe 传给后续 bounce，只在其命中的直接面积光上使用 4 个分层样本，主路径仍为 1 SPP。RTX 4060 Laptop 的 DLSS Quality + NRD 64 帧固定截图中，镜中地面/玻璃顶面的 ROI 高频残差分别下降约 `5.5%/8.8%`；1 秒 GPU Total p50/p95 为 `5.57/6.35 ms`，Native + NRD 为 `9.67/10.23 ms`，仍低于 16.67 ms 门槛。NRD 对透明路径没有完整产品级保证，玻璃残余噪声仍需未来单独信号路径或 DLSS RR 处理。
 
 ## 阶段 10：DLSS Super Resolution 与 Reflex（验收未完成）
 

@@ -268,6 +268,11 @@ NrdBridgeStatus nrd_bridge_denoise(
         reblur_settings.maxFastAccumulatedFrameNum = 10;
         reblur_settings.maxStabilizedFrameNum = 60;
         reblur_settings.fireflySuppressorMinRelativeScale = 1.0f;
+        // The NRD path tracer uses a Bayer-stratified probabilistic
+        // diffuse/specular split at the primary hit. Skipped lobes export zero
+        // hitT, so REBLUR must reconstruct a valid in-lobe distance before its
+        // non-zero default pre-pass performs specular motion tracking.
+        reblur_settings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3;
         const nrd::Result settings_result = bridge->integration.SetDenoiserSettings(bridge->denoiser_identifier, &reblur_settings);
         if (settings_result != nrd::Result::SUCCESS) {
             set_error(bridge, "NRD SetDenoiserSettings failed");

@@ -848,7 +848,7 @@ struct CameraConstants {
     previous_yaw: f32,
     previous_pitch: f32,
     dlss_enabled: u32,
-    reserved: u32,
+    nrd_enabled: u32,
     reset_history: u32,
 }
 
@@ -1642,7 +1642,7 @@ impl Dx12Renderer {
                 previous_yaw: self.previous_camera_yaw,
                 previous_pitch: self.previous_camera_pitch,
                 dlss_enabled: u32::from(dlss_active),
-                reserved: 0,
+                nrd_enabled: u32::from(self.denoiser == DenoiserBackend::NrdReblur),
                 reset_history: u32::from(self.reset_history),
             };
             debug_assert_eq!(size_of::<CameraConstants>(), 16 * size_of::<u32>());
@@ -4653,6 +4653,25 @@ mod tests {
             3,
             "DLSS guide clear and both first-hit paths must remain uniformly guarded"
         );
+        assert!(shader.contains("uint NrdEnabled;"));
+        assert!(shader.contains("SampleOwenSobol2D"));
+        assert!(shader.contains("SampleGgxVndfDirection"));
+        assert!(shader.contains("SampleStratifiedLobe"));
+        assert!(shader.contains("payload.depth > 0u && payload.firstKind != 0u ? 4u : 1u"));
+        assert_eq!(shader.matches("6u + payload.depth * 8u").count(), 2);
+        assert!(!shader.contains("SampleGgxDirection"));
+    }
+
+    #[test]
+    fn nrd_probabilistic_lobes_enable_matching_hit_distance_reconstruction() {
+        let bridge = include_str!("../../native/nrd_bridge/src/nrd_bridge.cpp");
+        assert!(bridge.contains(
+            "hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3"
+        ));
+        let shader = include_str!("../../shaders/stage3_triangle.hlsl");
+        assert!(shader.contains("minimumProbability = useNrdProbabilisticLobe ? 0.25 : 0.05"));
+        assert!(shader.contains("NrdEnabled != 0u && payload.depth == 0u"));
+        assert!(shader.contains("only the selected in-lobe hitT is exported"));
     }
 
     #[test]

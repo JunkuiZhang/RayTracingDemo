@@ -1436,6 +1436,49 @@ mod tests {
         alpha_squared / (std::f32::consts::PI * denominator * denominator).max(1.0e-7)
     }
 
+    fn ggx_vndf_v3_pdf(no_v: f32, no_h: f32, roughness: f32) -> f32 {
+        let alpha = roughness * roughness;
+        let alpha_squared = alpha * alpha;
+        let tangent = (1.0 - no_v * no_v).max(0.0).sqrt();
+        let stretched_length = (alpha_squared * tangent * tangent + no_v * no_v).sqrt();
+        let scale = 1.0 + tangent;
+        let scale_squared = scale * scale;
+        let bound = (1.0 - alpha_squared) * scale_squared
+            / (scale_squared + alpha_squared * no_v * no_v).max(1.0e-6);
+        0.5 * ggx_d(no_h, roughness) / (bound * no_v + stretched_length).max(1.0e-6)
+    }
+
+    fn sample_ggx_vndf_v3(
+        view: glam::Vec3,
+        roughness: f32,
+        mut sample: glam::Vec2,
+    ) -> (glam::Vec3, glam::Vec3) {
+        sample.y *= 0.95;
+        let alpha = roughness * roughness;
+        let stretched_view = glam::Vec3::new(alpha * view.x, alpha * view.y, view.z).normalize();
+        let phi = std::f32::consts::TAU * sample.x;
+        let tangent = glam::Vec2::new(view.x, view.y).length();
+        let scale = 1.0 + tangent;
+        let alpha_squared = alpha * alpha;
+        let scale_squared = scale * scale;
+        let bound = (1.0 - alpha_squared) * scale_squared
+            / (scale_squared + alpha_squared * view.z * view.z).max(1.0e-6);
+        let lower_bound = bound * stretched_view.z;
+        let disk_z = 1.0 - sample.y * (1.0 + lower_bound);
+        let disk_radius = (1.0 - disk_z * disk_z).max(0.0).sqrt();
+        let visible_normal =
+            glam::Vec3::new(disk_radius * phi.cos(), disk_radius * phi.sin(), disk_z)
+                + stretched_view;
+        let half_vector = glam::Vec3::new(
+            alpha * visible_normal.x,
+            alpha * visible_normal.y,
+            visible_normal.z.max(1.0e-6),
+        )
+        .normalize();
+        let direction = (-view).reflect(half_vector).normalize();
+        (half_vector, direction)
+    }
+
     fn fresnel_schlick(cosine: f32, f0: f32) -> f32 {
         f0 + (1.0 - f0) * (1.0 - cosine.clamp(0.0, 1.0)).powi(5)
     }
@@ -1456,6 +1499,50 @@ mod tests {
         let dielectric_diffuse_weight = (1.0 - 0.0) * (1.0 - fresnel_schlick(0.5, 0.04));
         assert!(metallic_diffuse_weight.abs() < 1.0e-6);
         assert!(dielectric_diffuse_weight > 0.0);
+    }
+
+    #[test]
+    fn bounded_ggx_vndf_samples_and_pdfs_remain_finite() {
+        for roughness in [0.045, 0.1, 0.5, 1.0] {
+            for no_v in [0.001_f32, 0.05, 0.25, 0.75, 1.0] {
+                let view = glam::Vec3::new((1.0 - no_v * no_v).sqrt(), 0.0, no_v);
+                for y in 0..16 {
+                    for x in 0..16 {
+                        let sample =
+                            glam::Vec2::new((x as f32 + 0.5) / 16.0, (y as f32 + 0.5) / 16.0);
+                        let (half_vector, direction) = sample_ggx_vndf_v3(view, roughness, sample);
+                        assert!(half_vector.is_finite() && direction.is_finite());
+                        assert!(half_vector.z > 0.0);
+                        assert!((half_vector.length() - 1.0).abs() < 1.0e-5);
+                        assert!((direction.length() - 1.0).abs() < 1.0e-5);
+                        let pdf = ggx_vndf_v3_pdf(no_v, half_vector.z, roughness);
+                        assert!(pdf.is_finite() && pdf >= 0.0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nrd_bayer_lobe_pattern_covers_every_stratum() {
+        let bayer = [0_u32, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+        for frame in 0..16_u32 {
+            let mut strata = bayer.map(|value| (value + frame * 5) & 15);
+            strata.sort_unstable();
+            assert_eq!(
+                strata,
+                std::array::from_fn::<_, 16, _>(|index| index as u32)
+            );
+        }
+        for pixel_value in bayer {
+            let mut temporal =
+                std::array::from_fn::<_, 16, _>(|frame| (pixel_value + frame as u32 * 5) & 15);
+            temporal.sort_unstable();
+            assert_eq!(
+                temporal,
+                std::array::from_fn::<_, 16, _>(|index| index as u32)
+            );
+        }
     }
 
     #[test]

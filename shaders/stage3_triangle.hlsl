@@ -85,7 +85,7 @@ cbuffer FrameConstants : register(b0)
     float PreviousCameraYaw;
     float PreviousCameraPitch;
     uint DlssEnabled;
-    uint FrameConstantsReserved;
+    uint NrdEnabled;
     uint ResetHistory;
 };
 
@@ -115,10 +115,80 @@ float RandomFloat(inout uint state)
     return (RandomUint(state) & 0x00FFFFFFu) / 16777216.0;
 }
 
-float3 SampleCosineHemisphere(float3 normal, inout uint seed)
+uint HashUint(uint value)
 {
-    float radius = sqrt(RandomFloat(seed));
-    float angle = 6.28318530718 * RandomFloat(seed);
+    value ^= value >> 16u;
+    value *= 0x7FEB352Du;
+    value ^= value >> 15u;
+    value *= 0x846CA68Bu;
+    value ^= value >> 16u;
+    return value;
+}
+
+uint SobolDimensionOne(uint sampleIndex)
+{
+    uint value = 0u;
+    uint direction = 0x80000000u;
+    while (sampleIndex != 0u)
+    {
+        if ((sampleIndex & 1u) != 0u)
+            value ^= direction;
+        sampleIndex >>= 1u;
+        direction ^= direction >> 1u;
+    }
+    return value;
+}
+
+// Laine-Karras nested uniform scrambling applied to the first two Sobol
+// dimensions. Each pixel/dimension receives a stable scramble while the frame
+// index advances through a low-discrepancy temporal sequence.
+uint OwenScramble(uint value, uint seed)
+{
+    value = reversebits(value);
+    value ^= value * 0x3D20ADEAu;
+    value += seed;
+    value *= (seed >> 16u) | 1u;
+    value ^= value * 0x05526C56u;
+    value ^= value * 0x53A22864u;
+    return reversebits(value);
+}
+
+float UintToUnitFloat(uint value)
+{
+    return (float(value >> 8u) + 0.5) / 16777216.0;
+}
+
+float2 SampleOwenSobol2D(uint2 pixel, uint dimension)
+{
+    uint sampleIndex = FrameIndex + 1u;
+    uint pixelSeed = HashUint(pixel.x ^ HashUint(pixel.y + 0x9E3779B9u));
+    uint dimensionSeed = HashUint(pixelSeed ^ (dimension * 0xA511E9B3u));
+    uint x = OwenScramble(reversebits(sampleIndex), HashUint(dimensionSeed ^ 0x68BC21EBu));
+    uint y = OwenScramble(SobolDimensionOne(sampleIndex), HashUint(dimensionSeed ^ 0x02E5BE93u));
+    return float2(UintToUnitFloat(x), UintToUnitFloat(y));
+}
+
+uint Bayer4x4Value(uint2 pixel)
+{
+    static const uint values[16] = {
+        0u, 8u, 2u, 10u,
+        12u, 4u, 14u, 6u,
+        3u, 11u, 1u, 9u,
+        15u, 7u, 13u, 5u,
+    };
+    return values[(pixel.y & 3u) * 4u + (pixel.x & 3u)];
+}
+
+float SampleStratifiedLobe(uint2 pixel, inout uint seed)
+{
+    uint stratum = (Bayer4x4Value(pixel) + (FrameIndex * 5u)) & 15u;
+    return (float(stratum) + RandomFloat(seed)) / 16.0;
+}
+
+float3 SampleCosineHemisphere(float3 normal, float2 sample)
+{
+    float radius = sqrt(sample.x);
+    float angle = 6.28318530718 * sample.y;
     float2 disk = radius * float2(cos(angle), sin(angle));
     float z = sqrt(max(0.0, 1.0 - dot(disk, disk)));
     float3 tangent = normalize(abs(normal.z) < 0.999
@@ -240,6 +310,22 @@ float G_Smith(float NoV, float NoL, float roughness)
     return G_SchlickGGX(NoV, roughness) * G_SchlickGGX(NoL, roughness);
 }
 
+// Isotropic bounded GGX VNDF v3 PDF. This follows the public bounded-VNDF
+// formulation also used by the locked NVIDIA MathLib ML_VNDF_VERSION=3.
+float PdfGgxVndfV3(float NoV, float roughness, float distribution)
+{
+    float alpha = roughness * roughness;
+    float alphaSquared = alpha * alpha;
+    float viewTangentLength = sqrt(max(0.0, 1.0 - NoV * NoV));
+    float stretchedTangentSquared = alphaSquared * viewTangentLength * viewTangentLength;
+    float stretchedLength = sqrt(stretchedTangentSquared + NoV * NoV);
+    float scale = 1.0 + viewTangentLength;
+    float scaleSquared = scale * scale;
+    float bound = (1.0 - alphaSquared) * scaleSquared
+        / max(scaleSquared + alphaSquared * NoV * NoV, 1.0e-6);
+    return 0.5 * distribution / max(bound * NoV + stretchedLength, 1.0e-6);
+}
+
 struct BrdfEvaluation
 {
     float3 diffuse;
@@ -277,8 +363,24 @@ BrdfEvaluation EvaluateBrdf(
         / max(4.0 * NoV * NoL, 1.0e-6);
     value.diffuse = (1.0 - metallic) * (1.0 - fresnel) * baseColor / PI;
     value.diffusePdf = NoL / PI;
-    value.specularPdf = distribution * NoH / max(4.0 * VoH, 1.0e-6);
+    value.specularPdf = PdfGgxVndfV3(NoV, roughness, distribution);
     return value;
+}
+
+float ComputeSpecularProbability(float3 baseColor, float metallic, bool useNrdProbabilisticLobe)
+{
+    float3 f0 = lerp(0.04.xxx, baseColor, metallic);
+    float specularEnergy = max(max(f0.x, f0.y), f0.z);
+    float diffuseEnergy = max(max(baseColor.x, baseColor.y), baseColor.z) * (1.0 - metallic);
+    if (diffuseEnergy <= 1.0e-6)
+        return specularEnergy > 1.0e-6 ? 1.0 : 0.0;
+    if (specularEnergy <= 1.0e-6)
+        return 0.0;
+    float minimumProbability = useNrdProbabilisticLobe ? 0.25 : 0.05;
+    return clamp(
+        specularEnergy / (specularEnergy + diffuseEnergy),
+        minimumProbability,
+        1.0 - minimumProbability);
 }
 
 // This is the split-sum EnvBRDF approximation used for the reconstruction
@@ -300,30 +402,42 @@ float3 FiniteNonNegative(float3 value)
     return all(isfinite(value)) ? max(value, 0.0.xxx) : 0.0.xxx;
 }
 
-float3 SampleGgxDirection(
+float3 SampleGgxVndfDirection(
     float3 normal,
     float3 viewDirection,
     float roughness,
-    inout uint seed,
-    out float pdf)
+    float2 sample)
 {
+    // Trim the lowest-probability 5% tail as recommended by the NRD sample;
+    // this reduces denoiser-hostile grazing fireflies. The existing geometric
+    // normal check still rejects any remaining below-surface direction.
+    sample.y *= 0.95;
     float alpha = roughness * roughness;
-    float phi = 2.0 * PI * RandomFloat(seed);
-    float random = RandomFloat(seed);
-    float cosTheta = sqrt((1.0 - random) / (1.0 + (alpha * alpha - 1.0) * random));
-    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
-    float3 halfTangent = float3(sinTheta * cos(phi), sinTheta * sin(phi), cosTheta);
     float3 tangent = normalize(abs(normal.z) < 0.999
         ? cross(float3(0, 0, 1), normal)
         : cross(float3(0, 1, 0), normal));
     float3 bitangent = cross(normal, tangent);
+    float3 viewLocal = float3(
+        dot(viewDirection, tangent),
+        dot(viewDirection, bitangent),
+        max(dot(viewDirection, normal), 1.0e-6));
+    float3 stretchedView = normalize(float3(alpha * viewLocal.xy, viewLocal.z));
+    float phi = 2.0 * PI * sample.x;
+    float viewTangentLength = length(viewLocal.xy);
+    float scale = 1.0 + viewTangentLength;
+    float alphaSquared = alpha * alpha;
+    float scaleSquared = scale * scale;
+    float bound = (1.0 - alphaSquared) * scaleSquared
+        / max(scaleSquared + alphaSquared * viewLocal.z * viewLocal.z, 1.0e-6);
+    float lowerBound = viewLocal.z > 0.0 ? bound * stretchedView.z : stretchedView.z;
+    float diskZ = 1.0 - sample.y * (1.0 + lowerBound);
+    float diskRadius = sqrt(max(0.0, 1.0 - diskZ * diskZ));
+    float3 visibleNormal = float3(diskRadius * cos(phi), diskRadius * sin(phi), diskZ)
+        + stretchedView;
+    float3 halfLocal = normalize(float3(alpha * visibleNormal.xy, max(visibleNormal.z, 1.0e-6)));
     float3 halfVector = normalize(
-        tangent * halfTangent.x + bitangent * halfTangent.y + normal * halfTangent.z);
-    float3 lightDirection = normalize(reflect(-viewDirection, halfVector));
-    float NoH = saturate(dot(normal, halfVector));
-    float VoH = saturate(dot(viewDirection, halfVector));
-    pdf = D_GGX(NoH, roughness) * NoH / max(4.0 * VoH, 1.0e-6);
-    return lightDirection;
+        tangent * halfLocal.x + bitangent * halfLocal.y + normal * halfLocal.z);
+    return normalize(reflect(-viewDirection, halfVector));
 }
 
 [shader("raygeneration")]
@@ -332,7 +446,7 @@ void RayGen()
     uint2 pixel = DispatchRaysIndex().xy;
     uint2 size = DispatchRaysDimensions().xy;
     uint seed = pixel.x * 1973u + pixel.y * 9277u + FrameIndex * 26699u + 89173u;
-    float2 jitter = float2(RandomFloat(seed), RandomFloat(seed));
+    float2 jitter = SampleOwenSobol2D(pixel, 0u);
     float2 uv = (float2(pixel) + jitter + CameraJitterPx) / float2(size);
     float2 screen = uv * 2.0 - 1.0;
     screen.x *= float(size.x) / float(size.y);
@@ -577,71 +691,92 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     float3 directSpecular = 0;
     float diffuseHitDistance = 0.0;
     float specularHitDistance = 0.0;
+    bool useNrdProbabilisticLobe = NrdEnabled != 0u && payload.depth == 0u;
     if (kind == 0u)
     {
-        float2 lightRandom = float2(RandomFloat(payload.seed), RandomFloat(payload.seed));
-        float3 lightPoint = float3(-0.25 + lightRandom.x * 0.5, 0.9966667, 0.6666667 + lightRandom.y * 0.5);
-        float3 toLight = lightPoint - hitPosition;
-        float lightDistance = length(toLight);
-        float3 lightDirection = toLight / max(lightDistance, 1.0e-6);
-        float NoL = max(0.0, dot(normal, lightDirection));
-        float lightCosine = max(0.0, dot(float3(0, -1, 0), -lightDirection));
-        if (NoL > 0.0 && lightCosine > 0.0)
+        // Spend extra visibility rays only after a path starts in the
+        // specular/transmission lobe. This targets mirror/refraction noise
+        // without multiplying the full-screen primary path budget.
+        uint lightSampleCount = payload.depth > 0u && payload.firstKind != 0u ? 4u : 1u;
+        for (uint lightSampleIndex = 0u; lightSampleIndex < lightSampleCount; ++lightSampleIndex)
         {
-            Payload shadow;
-            shadow.radiance = 0;
-            shadow.seed = payload.seed;
-            shadow.depth = payload.depth;
-            shadow.lastPdf = 0;
-            shadow.firstKind = 0;
-            shadow.hitDistance = 0;
-            shadow.rawDiffuse = 0;
-            shadow.rawSpecular = 0;
-            RayDesc shadowRay;
-            shadowRay.Origin = hitPosition + normal * 0.002;
-            shadowRay.Direction = lightDirection;
-            shadowRay.TMin = 0.001;
-            shadowRay.TMax = lightDistance - 0.004;
-            TraceRay(
-                Scene,
-                RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH
-                    | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
-                    | RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
-                0xFF,
-                0,
-                1,
-                1,
-                shadowRay,
-                shadow);
-            BrdfEvaluation brdf = EvaluateBrdf(
-                normal,
-                viewDirection,
-                lightDirection,
-                baseColor.xyz,
-                metallic,
-                roughness);
-            float specularProbability = clamp(
-                max(max(lerp(0.04, baseColor.x, metallic), lerp(0.04, baseColor.y, metallic)),
-                    lerp(0.04, baseColor.z, metallic)),
-                0.05,
-                0.95);
-            float bsdfPdf = (1.0 - specularProbability) * brdf.diffusePdf
-                + specularProbability * brdf.specularPdf;
-            float lightPdf = lightDistance * lightDistance
-                / max(lightCosine * 0.25, 1.0e-6);
-            float lightSquared = lightPdf * lightPdf;
-            float bsdfSquared = bsdfPdf * bsdfPdf;
-            float misWeight = lightSquared / max(lightSquared + bsdfSquared, 1.0e-7);
-            float3 lightRadiance = Materials[3].emissiveFactor;
-            float visibility = shadow.radiance;
-            directDiffuse = visibility * lightRadiance * brdf.diffuse * NoL
-                * misWeight / max(lightPdf, 1.0e-6);
-            directSpecular = visibility * lightRadiance * brdf.specular * NoL
-                * misWeight / max(lightPdf, 1.0e-6);
-            if (any(directDiffuse > 0.0))
-                diffuseHitDistance = lightDistance;
-            if (any(directSpecular > 0.0))
-                specularHitDistance = lightDistance;
+            float2 lightRandom = SampleOwenSobol2D(
+                DispatchRaysIndex().xy,
+                2u + payload.depth * 8u + lightSampleIndex * 32u);
+            float3 lightPoint = float3(
+                -0.25 + lightRandom.x * 0.5,
+                0.9966667,
+                0.6666667 + lightRandom.y * 0.5);
+            float3 toLight = lightPoint - hitPosition;
+            float lightDistance = length(toLight);
+            float3 lightDirection = toLight / max(lightDistance, 1.0e-6);
+            float NoL = max(0.0, dot(normal, lightDirection));
+            float lightCosine = max(0.0, dot(float3(0, -1, 0), -lightDirection));
+            if (NoL > 0.0 && lightCosine > 0.0)
+            {
+                Payload shadow;
+                shadow.radiance = 0;
+                shadow.seed = payload.seed;
+                shadow.depth = payload.depth;
+                shadow.lastPdf = 0;
+                shadow.firstKind = 0;
+                shadow.hitDistance = 0;
+                shadow.rawDiffuse = 0;
+                shadow.rawSpecular = 0;
+                RayDesc shadowRay;
+                shadowRay.Origin = hitPosition + normal * 0.002;
+                shadowRay.Direction = lightDirection;
+                shadowRay.TMin = 0.001;
+                shadowRay.TMax = lightDistance - 0.004;
+                TraceRay(
+                    Scene,
+                    RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH
+                        | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
+                        | RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+                    0xFF,
+                    0,
+                    1,
+                    1,
+                    shadowRay,
+                    shadow);
+                BrdfEvaluation brdf = EvaluateBrdf(
+                    normal,
+                    viewDirection,
+                    lightDirection,
+                    baseColor.xyz,
+                    metallic,
+                    roughness);
+                float specularProbability = ComputeSpecularProbability(
+                    baseColor.xyz,
+                    metallic,
+                    useNrdProbabilisticLobe);
+                float diffuseBsdfPdf = (1.0 - specularProbability) * brdf.diffusePdf;
+                float specularBsdfPdf = specularProbability * brdf.specularPdf;
+                float bsdfPdf = diffuseBsdfPdf + specularBsdfPdf;
+                float lightPdf = lightDistance * lightDistance
+                    / max(lightCosine * 0.25, 1.0e-6);
+                float lightSquared = lightPdf * lightPdf;
+                float bsdfSquared = bsdfPdf * bsdfPdf;
+                float misWeight = lightSquared / max(lightSquared + bsdfSquared, 1.0e-7);
+                float diffuseMisWeight = useNrdProbabilisticLobe
+                    ? lightSquared / max(lightSquared + diffuseBsdfPdf * diffuseBsdfPdf, 1.0e-7)
+                    : misWeight;
+                float specularMisWeight = useNrdProbabilisticLobe
+                    ? lightSquared / max(lightSquared + specularBsdfPdf * specularBsdfPdf, 1.0e-7)
+                    : misWeight;
+                float3 lightRadiance = Materials[3].emissiveFactor;
+                float visibility = shadow.radiance;
+                float3 diffuseSampleRadiance = visibility * lightRadiance * brdf.diffuse * NoL
+                    * diffuseMisWeight / max(lightPdf, 1.0e-6);
+                float3 specularSampleRadiance = visibility * lightRadiance * brdf.specular * NoL
+                    * specularMisWeight / max(lightPdf, 1.0e-6);
+                directDiffuse += diffuseSampleRadiance / float(lightSampleCount);
+                directSpecular += specularSampleRadiance / float(lightSampleCount);
+                if (any(diffuseSampleRadiance > 0.0))
+                    diffuseHitDistance = lightDistance;
+                if (any(specularSampleRadiance > 0.0))
+                    specularHitDistance = lightDistance;
+            }
         }
     }
 
@@ -663,8 +798,11 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         float etaRatio = frontFace ? (1.0 / max(material.ior, 1.0001)) : max(material.ior, 1.0001);
         float cosine = saturate(dot(-WorldRayDirection(), normal));
         float3 refracted = refract(WorldRayDirection(), normal, etaRatio);
+        float fresnelSample = SampleOwenSobol2D(
+            DispatchRaysIndex().xy,
+            6u + payload.depth * 8u).x;
         bool reflectRay = length(refracted) < 0.001
-            || Schlick(cosine, etaRatio) > RandomFloat(payload.seed);
+            || Schlick(cosine, etaRatio) > fresnelSample;
         direction = reflectRay ? reflect(WorldRayDirection(), normal) : refracted;
         sampledTransmission = !reflectRay;
         bounceWeight = baseColor.xyz;
@@ -672,12 +810,21 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     }
     else
     {
-        float3 f0 = lerp(0.04.xxx, baseColor.xyz, metallic);
-        float specularProbability = clamp(max(max(f0.x, f0.y), f0.z), 0.05, 0.95);
-        sampledSpecular = RandomFloat(payload.seed) < specularProbability;
+        float specularProbability = ComputeSpecularProbability(
+            baseColor.xyz,
+            metallic,
+            useNrdProbabilisticLobe);
+        float lobeSample = useNrdProbabilisticLobe
+            ? SampleStratifiedLobe(DispatchRaysIndex().xy, payload.seed)
+            : RandomFloat(payload.seed);
+        sampledSpecular = specularProbability >= 1.0
+            || (specularProbability > 0.0 && lobeSample < specularProbability);
+        float2 directionSample = SampleOwenSobol2D(
+            DispatchRaysIndex().xy,
+            4u + payload.depth * 8u);
         if (sampledSpecular)
         {
-            direction = SampleGgxDirection(normal, viewDirection, roughness, payload.seed, samplePdf);
+            direction = SampleGgxVndfDirection(normal, viewDirection, roughness, directionSample);
             float NoL = max(0.0, dot(normal, direction));
             BrdfEvaluation brdf = EvaluateBrdf(
                 normal,
@@ -686,15 +833,23 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
                 baseColor.xyz,
                 metallic,
                 roughness);
-            samplePdf = specularProbability * brdf.specularPdf
-                + (1.0 - specularProbability) * brdf.diffusePdf;
-            diffuseBounceWeight = brdf.diffuse * NoL / max(samplePdf, 1.0e-6);
-            specularBounceWeight = brdf.specular * NoL / max(samplePdf, 1.0e-6);
+            if (useNrdProbabilisticLobe)
+            {
+                samplePdf = specularProbability * brdf.specularPdf;
+                specularBounceWeight = brdf.specular * NoL / max(samplePdf, 1.0e-6);
+            }
+            else
+            {
+                samplePdf = specularProbability * brdf.specularPdf
+                    + (1.0 - specularProbability) * brdf.diffusePdf;
+                diffuseBounceWeight = brdf.diffuse * NoL / max(samplePdf, 1.0e-6);
+                specularBounceWeight = brdf.specular * NoL / max(samplePdf, 1.0e-6);
+            }
             bounceWeight = diffuseBounceWeight + specularBounceWeight;
         }
         else
         {
-            direction = SampleCosineHemisphere(normal, payload.seed);
+            direction = SampleCosineHemisphere(normal, directionSample);
             float NoL = max(0.0, dot(normal, direction));
             BrdfEvaluation brdf = EvaluateBrdf(
                 normal,
@@ -703,10 +858,18 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
                 baseColor.xyz,
                 metallic,
                 roughness);
-            samplePdf = (1.0 - specularProbability) * brdf.diffusePdf
-                + specularProbability * brdf.specularPdf;
-            diffuseBounceWeight = brdf.diffuse * NoL / max(samplePdf, 1.0e-6);
-            specularBounceWeight = brdf.specular * NoL / max(samplePdf, 1.0e-6);
+            if (useNrdProbabilisticLobe)
+            {
+                samplePdf = (1.0 - specularProbability) * brdf.diffusePdf;
+                diffuseBounceWeight = brdf.diffuse * NoL / max(samplePdf, 1.0e-6);
+            }
+            else
+            {
+                samplePdf = (1.0 - specularProbability) * brdf.diffusePdf
+                    + specularProbability * brdf.specularPdf;
+                diffuseBounceWeight = brdf.diffuse * NoL / max(samplePdf, 1.0e-6);
+                specularBounceWeight = brdf.specular * NoL / max(samplePdf, 1.0e-6);
+            }
             bounceWeight = diffuseBounceWeight + specularBounceWeight;
         }
     }
@@ -727,7 +890,9 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     child.seed = payload.seed;
     child.depth = payload.depth + 1;
     child.lastPdf = kind == 0u ? max(samplePdf, 1.0e-6) : 0.0;
-    child.firstKind = 0;
+    child.firstKind = payload.depth == 0u
+        ? (sampledSpecular ? max(kind, 1u) : 0u)
+        : payload.firstKind;
     child.hitDistance = 0;
     child.rawDiffuse = 0;
     child.rawSpecular = 0;
@@ -748,10 +913,11 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         payload.rawSpecular = emissive
             + directSpecular
             + specularBounceWeight * child.radiance;
-        // The random branch selects one proposal distribution, but the mixture
-        // PDF evaluates both diffuse and specular BRDF lobes for the same
-        // continuation direction. Both non-zero estimators therefore share
-        // the child's first-bounce hitT; neither lobe was skipped.
+        // SVGF keeps the low-variance mixture estimator and therefore shares
+        // the continuation hitT across both non-zero lobe estimates. NRD uses
+        // a Bayer-stratified probabilistic lobe estimator: the skipped lobe is
+        // zero, and only the selected in-lobe hitT is exported for REBLUR's
+        // AREA_3X3 hit-distance reconstruction.
         if (any(diffuseBounceWeight > 0.0))
             diffuseHitDistance = child.hitDistance;
         if (any(specularBounceWeight > 0.0))
@@ -870,13 +1036,18 @@ void LegacyClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttri
         float etaRatio = frontFace ? (1.0 / 1.5) : 1.5;
         float cosine = saturate(dot(-WorldRayDirection(), normal));
         float3 refracted = refract(WorldRayDirection(), normal, etaRatio);
-        direction = length(refracted) < 0.001 || Schlick(cosine, etaRatio) > RandomFloat(payload.seed)
+        float fresnelSample = SampleOwenSobol2D(
+            DispatchRaysIndex().xy,
+            6u + payload.depth * 8u).x;
+        direction = length(refracted) < 0.001 || Schlick(cosine, etaRatio) > fresnelSample
             ? reflect(WorldRayDirection(), normal)
             : refracted;
     }
     else
     {
-        float2 lightRandom = float2(RandomFloat(payload.seed), RandomFloat(payload.seed));
+        float2 lightRandom = SampleOwenSobol2D(
+            DispatchRaysIndex().xy,
+            2u + payload.depth * 8u);
         float3 lightPoint = float3(-0.25 + lightRandom.x * 0.5, 0.9966667, 0.6666667 + lightRandom.y * 0.5);
         float3 toLight = lightPoint - hitPosition;
         float lightDistance = length(toLight);
@@ -916,7 +1087,9 @@ void LegacyClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttri
             directLighting = shadow.radiance * baseColor.xyz * Materials[3].emissiveFactor
                 * (surfaceCosine / 3.14159265359) * misWeight / lightPdf;
         }
-        direction = SampleCosineHemisphere(normal, payload.seed);
+        direction = SampleCosineHemisphere(
+            normal,
+            SampleOwenSobol2D(DispatchRaysIndex().xy, 4u + payload.depth * 8u));
     }
 
     RayDesc bounce;

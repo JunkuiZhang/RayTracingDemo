@@ -378,19 +378,23 @@ NRD hitT 必须遵守：
 - 只有真正跳过的 lobe 才以 0 表示无样本；
 - delta transmission 不得伪装为普通 rough specular hit。
 
-当前路径的随机分支只选择 proposal 分布；对得到的同一 continuation 方向，mixture PDF
-会同时评估 diffuse/specular BRDF，因而这不是 probabilistic lobe skip。两路非零 estimator
-必须显式共享 child 的第一 bounce hit distance；没有对应贡献时保持 NEE hitT 或 0。同时
-保留现有 SVGF hit-distance 资源语义，避免无意改变默认输出。
+后续镜面画质复验确认共享 continuation hitT 会削弱主表面 PBR 镜面 lobe 的追踪，现已按
+官方概率式方案收口：
 
-如果实现者把信号改成真正的 probabilistic lobe skip：
+- SVGF 保留原有 mixture estimator，同一方向的两路非零 estimator 继续共享 child hitT；
+- NRD 只在 `payload.depth == 0` 的主表面使用 probabilistic lobe split，后续 bounce 恢复
+  mixture estimator，避免把额外熵带进镜面中的间接照明；
+- 非零 diffuse/specular 概率钳制到 `[0.25, 0.75]`，纯金属/零 lobe 仍允许 `0/1`；
+- 4×4 Bayer strata 每帧以互质步长轮换，同时保证空间 4×4 和单像素 16 帧都覆盖全部
+  strata；跳过 lobe 的间接 radiance/hitT 为 0；
+- BSDF continuation 和面积光 NEE 对 diffuse/specular 使用各自的 `selectionProbability ×
+  conditionalPdf` 做 power-heuristic MIS，避免改变能量期望；
+- bridge 启用 `HitDistanceReconstructionMode::AREA_3X3`，并保留 REBLUR 默认非零 prepass；
+- glTF PBR 镜面使用 bounded GGX VNDF v3；理想金属/玻璃继续输出其确定的 specular hitT。
 
-- 跳过信号的 radiance 和 hitT 都必须为 0；
-- 选择概率和 estimator 权重必须保持无偏，禁止重复除概率；
-- 3x3 reconstruction 要把概率钳制到官方要求范围并使用官方 sample 的 Bayer-like 选择，不能继续用白噪声保证邻域样本；
-- `HitDistanceReconstructionMode::AREA_3X3` 和非零 prepass 必须一起启用。
-
-这条改动超出“最小后端”的推荐路线。除非现有共享 hitT 在 validation overlay 或画质门槛中失败，否则本阶段不实现 probabilistic skip 重构。
+此外，相机、面积光、cosine/VNDF 方向和 Fresnel 分支改用按像素/维度扰动的 Owen-Sobol
+时域序列。镜面/折射首跳只在后续 diffuse 表面的面积光 NEE 上使用 4 个分层样本；主路径
+仍为 1 SPP，避免全屏提高射线预算。
 
 ## 7. NRD 专属路径
 
