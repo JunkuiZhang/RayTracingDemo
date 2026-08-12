@@ -99,7 +99,11 @@ cbuffer FrameConstants : register(b0)
     float3 PreviousCameraPosition;
     float PreviousCameraYaw;
     float PreviousCameraPitch;
-    uint DlssEnabled;
+    // 0 = no Streamline guides, 1 = DLSS SR guides, 2 = DLSS RR guides.
+    // RR needs a distinct value because its specular hit-distance contract
+    // requires one unambiguous sampled lobe, while SR only consumes the dense
+    // primary depth/motion guides.
+    uint DlssGuideMode;
     uint NrdEnabled;
     uint ResetHistory;
 };
@@ -390,7 +394,7 @@ BrdfEvaluation EvaluateBrdf(
     return value;
 }
 
-float ComputeSpecularProbability(float3 baseColor, float metallic, bool useNrdProbabilisticLobe)
+float ComputeSpecularProbability(float3 baseColor, float metallic, bool useReconstructionLobe)
 {
     float3 f0 = lerp(0.04.xxx, baseColor, metallic);
     float specularEnergy = max(max(f0.x, f0.y), f0.z);
@@ -399,7 +403,7 @@ float ComputeSpecularProbability(float3 baseColor, float metallic, bool useNrdPr
         return specularEnergy > 1.0e-6 ? 1.0 : 0.0;
     if (specularEnergy <= 1.0e-6)
         return 0.0;
-    float minimumProbability = useNrdProbabilisticLobe ? 0.25 : 0.05;
+    float minimumProbability = useReconstructionLobe ? 0.25 : 0.05;
     return clamp(
         specularEnergy / (specularEnergy + diffuseEnergy),
         minimumProbability,
@@ -701,7 +705,7 @@ void RayGen()
     GBufferId[pixel] = 0xFFFFFFFFu;
     GBufferWorldPosition[pixel] = 0;
     GBufferHitDistance[pixel] = 0;
-    if (DlssEnabled != 0u)
+    if (DlssGuideMode != 0u)
     {
         DlssDepth[pixel] = 1.0;
         DlssMotion[pixel] = 0;
@@ -881,7 +885,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         GBufferMotion[pixel] = ResetHistory != 0u
             ? 0
             : (currentUv - previousUv) * float2(size);
-        if (DlssEnabled != 0u)
+        if (DlssGuideMode != 0u)
         {
             DlssDepth[pixel] = DlssDeviceDepth(hitPosition);
             DlssMotion[pixel] = ResetHistory != 0u
@@ -1008,7 +1012,14 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     // A PSR hit is the primary surface from NRD's point of view, even though it
     // appears at a later physical bounce. Apply the same lobe stratification
     // and in-lobe hit-distance rules there rather than at the hidden mirror.
-    bool useNrdProbabilisticLobe = NrdEnabled != 0u
+    // Both NRD and RR need a single, explicitly selected primary lobe so the
+    // exported specular hit distance describes the ray that produced the
+    // specular signal. The ordinary SVGF/DLSS-SR mixture estimator evaluates
+    // both lobes along one continuation direction; exporting that shared hitT
+    // to RR makes a diffuse-sampled ray look like moving reflected geometry.
+    // Keep NRD-only PSR/transmission behavior behind NrdEnabled; mode 2 opts RR
+    // into only this estimator contract.
+    bool useReconstructionLobe = (NrdEnabled != 0u || DlssGuideMode == 2u)
         && (payload.depth == 0u || isPsrSurface);
     if (kind == 0u)
     {
@@ -1068,7 +1079,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
                 float specularProbability = ComputeSpecularProbability(
                     baseColor.xyz,
                     metallic,
-                    useNrdProbabilisticLobe);
+                    useReconstructionLobe);
                 float diffuseBsdfPdf = (1.0 - specularProbability) * brdf.diffusePdf;
                 float specularBsdfPdf = specularProbability * brdf.specularPdf;
                 float bsdfPdf = diffuseBsdfPdf + specularBsdfPdf;
@@ -1077,10 +1088,10 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
                 float lightSquared = lightPdf * lightPdf;
                 float bsdfSquared = bsdfPdf * bsdfPdf;
                 float misWeight = lightSquared / max(lightSquared + bsdfSquared, 1.0e-7);
-                float diffuseMisWeight = useNrdProbabilisticLobe
+                float diffuseMisWeight = useReconstructionLobe
                     ? lightSquared / max(lightSquared + diffuseBsdfPdf * diffuseBsdfPdf, 1.0e-7)
                     : misWeight;
-                float specularMisWeight = useNrdProbabilisticLobe
+                float specularMisWeight = useReconstructionLobe
                     ? lightSquared / max(lightSquared + specularBsdfPdf * specularBsdfPdf, 1.0e-7)
                     : misWeight;
                 float3 lightRadiance = Materials[3].emissiveFactor;
@@ -1291,8 +1302,8 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         float specularProbability = ComputeSpecularProbability(
             baseColor.xyz,
             metallic,
-            useNrdProbabilisticLobe);
-        float lobeSample = useNrdProbabilisticLobe
+            useReconstructionLobe);
+        float lobeSample = useReconstructionLobe
             ? SampleStratifiedLobe(DispatchRaysIndex().xy, payload.seed)
             : RandomFloat(payload.seed);
         sampledSpecular = specularProbability >= 1.0
@@ -1311,7 +1322,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
                 baseColor.xyz,
                 metallic,
                 roughness);
-            if (useNrdProbabilisticLobe)
+            if (useReconstructionLobe)
             {
                 samplePdf = specularProbability * brdf.specularPdf;
                 specularBounceWeight = brdf.specular * NoL / max(samplePdf, 1.0e-6);
@@ -1336,7 +1347,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
                 baseColor.xyz,
                 metallic,
                 roughness);
-            if (useNrdProbabilisticLobe)
+            if (useReconstructionLobe)
             {
                 samplePdf = (1.0 - specularProbability) * brdf.diffusePdf;
                 diffuseBounceWeight = brdf.diffuse * NoL / max(samplePdf, 1.0e-6);
@@ -1417,10 +1428,10 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         payload.rawDiffuse = primaryUsesPsr ? child.rawDiffuse : localRawDiffuse;
         payload.rawSpecular = primaryUsesPsr ? child.rawSpecular : localRawSpecular;
         // SVGF keeps the low-variance mixture estimator and therefore shares
-        // the continuation hitT across both non-zero lobe estimates. NRD uses
-        // a Bayer-stratified probabilistic lobe estimator: the skipped lobe is
-        // zero, and only the selected in-lobe hitT is exported for REBLUR's
-        // AREA_3X3 hit-distance reconstruction.
+        // the continuation hitT across both non-zero lobe estimates. NRD and
+        // RR use a Bayer-stratified probabilistic lobe estimator: the skipped
+        // lobe is zero, so the exported hitT belongs to the signal that was
+        // actually sampled instead of fabricating moving reflection geometry.
         if (any(diffuseBounceWeight > 0.0))
             diffuseHitDistance = child.hitDistance;
         if (any(specularBounceWeight > 0.0))
@@ -1540,7 +1551,7 @@ void LegacyClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttri
         GBufferMotion[pixel] = ResetHistory != 0u
             ? 0
             : (currentUv - previousUv) * float2(size);
-        if (DlssEnabled != 0u)
+        if (DlssGuideMode != 0u)
         {
             DlssDepth[pixel] = DlssDeviceDepth(hitPosition);
             DlssMotion[pixel] = ResetHistory != 0u

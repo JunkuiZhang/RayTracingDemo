@@ -1106,6 +1106,20 @@ const RR_INPUT_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage11
 const TONEMAP_INPUT_SVGF_SPLIT: u32 = 0;
 const TONEMAP_INPUT_NRD_SPLIT: u32 = 1;
 const TONEMAP_INPUT_COMPOSED_HDR: u32 = 2;
+const DLSS_GUIDE_MODE_DISABLED: u32 = 0;
+const DLSS_GUIDE_MODE_SR: u32 = 1;
+const DLSS_GUIDE_MODE_RR: u32 = 2;
+
+fn dlss_guide_mode(dlss_sr_active: bool, rr_active: bool) -> u32 {
+    debug_assert!(!(dlss_sr_active && rr_active));
+    if rr_active {
+        DLSS_GUIDE_MODE_RR
+    } else if dlss_sr_active {
+        DLSS_GUIDE_MODE_SR
+    } else {
+        DLSS_GUIDE_MODE_DISABLED
+    }
+}
 
 fn tonemap_input_mode(denoiser: DenoiserBackend, dlss_active: bool) -> u32 {
     if dlss_active {
@@ -1295,7 +1309,7 @@ struct CameraConstants {
     previous_position: [f32; 3],
     previous_yaw: f32,
     previous_pitch: f32,
-    dlss_enabled: u32,
+    dlss_guide_mode: u32,
     nrd_enabled: u32,
     reset_history: u32,
 }
@@ -2117,7 +2131,11 @@ impl Dx12Renderer {
                 // The DXR pass writes the dense DLSS guides for both SR and
                 // RR. RR consumes the same direction/mvecScale contract, but
                 // never enters the DLSS SR compose path.
-                dlss_enabled: u32::from(dlss_active || rr_active),
+                // RR consumes the same dense primary guides as SR, but also
+                // requires the path shader to export a hit distance from the
+                // actual sampled specular lobe. Preserve that distinction in
+                // the existing 16-DWORD root-constant ABI.
+                dlss_guide_mode: dlss_guide_mode(dlss_active, rr_active),
                 nrd_enabled: u32::from(self.denoiser == DenoiserBackend::NrdReblur),
                 reset_history: u32::from(self.reset_history),
             };
@@ -5522,6 +5540,13 @@ mod tests {
     }
 
     #[test]
+    fn dlss_guide_mode_preserves_rr_path_semantics() {
+        assert_eq!(dlss_guide_mode(false, false), DLSS_GUIDE_MODE_DISABLED);
+        assert_eq!(dlss_guide_mode(true, false), DLSS_GUIDE_MODE_SR);
+        assert_eq!(dlss_guide_mode(false, true), DLSS_GUIDE_MODE_RR);
+    }
+
+    #[test]
     fn svgf_does_not_clip_stable_sparse_history_to_one_frame() {
         let shader = include_str!("../../shaders/stage6_temporal.hlsl");
         assert!(shader.contains("bool movingHistory = motionMagnitude > 0.01"));
@@ -5593,7 +5618,7 @@ mod tests {
             );
         }
         assert_eq!(
-            shader.matches("if (DlssEnabled != 0u)").count(),
+            shader.matches("if (DlssGuideMode != 0u)").count(),
             3,
             "DLSS guide clear and both first-hit paths must remain uniformly guarded"
         );
@@ -5647,18 +5672,20 @@ mod tests {
     }
 
     #[test]
-    fn nrd_probabilistic_lobes_enable_matching_hit_distance_reconstruction() {
+    fn reconstruction_lobes_export_matching_hit_distances() {
         let bridge = include_str!("../../native/nrd_bridge/src/nrd_bridge.cpp");
         assert!(bridge.contains(
             "hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3"
         ));
         let shader = include_str!("../../shaders/stage3_triangle.hlsl");
-        assert!(shader.contains("minimumProbability = useNrdProbabilisticLobe ? 0.25 : 0.05"));
+        assert!(shader.contains("minimumProbability = useReconstructionLobe ? 0.25 : 0.05"));
+        assert!(shader.contains("NrdEnabled != 0u || DlssGuideMode == 2u"));
         assert!(shader.contains("(payload.depth == 0u || isPsrSurface)"));
         assert!(shader.contains("WritePsrSurfaceGuides"));
         assert!(shader.contains("child.psrActive == 2u"));
         assert!(shader.contains("psrMirrorIsStatic"));
-        assert!(shader.contains("only the selected in-lobe hitT is exported"));
+        assert!(shader.contains("if (any(diffuseBounceWeight > 0.0))"));
+        assert!(shader.contains("if (any(specularBounceWeight > 0.0))"));
 
         let prep = include_str!("../../shaders/stage9_nrd_prep.hlsl");
         assert!(prep.contains("float materialId = clamp(round(baseColorKind.w), 0.0, 3.0)"));
