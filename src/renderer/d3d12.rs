@@ -176,12 +176,21 @@ struct StreamlineViewport {
     viewport: crate::streamline::Viewport,
     _options: crate::streamline::DlssOptions,
     optimal: crate::streamline::OptimalSettings,
+    #[cfg(feature = "streamline-rr")]
+    rr_options: Option<crate::streamline::RrOptions>,
+    #[cfg(feature = "streamline-rr")]
+    rr_optimal: Option<crate::streamline::RrOptimalSettings>,
+    #[cfg(feature = "streamline-rr")]
+    is_rr: bool,
     resources_allocated: bool,
 }
 
 #[cfg(feature = "streamline")]
 impl StreamlineRuntime {
-    fn create_before_dxgi(application_id: Option<u32>) -> Result<crate::streamline::Bridge> {
+    fn create_before_dxgi(
+        application_id: Option<u32>,
+        enable_rr: bool,
+    ) -> Result<crate::streamline::Bridge> {
         let plugin_directory = std::env::current_exe()
             .ok()
             .and_then(|path| path.parent().map(PathBuf::from))
@@ -202,7 +211,7 @@ impl StreamlineRuntime {
             development: u32::from(cfg!(debug_assertions)),
             enable_dlss: 1,
             application_id: application_id.unwrap_or(0),
-            enable_dlss_rr: 0,
+            enable_dlss_rr: u32::from(enable_rr),
             plugin_path: plugin_path.as_ptr(),
             log_path: std::ptr::null(),
             project_id: project_id.as_ptr(),
@@ -254,6 +263,18 @@ impl StreamlineRuntime {
                 bridge.last_error(),
             ));
         }
+        eprintln!(
+            "Streamline support: dlss={}({}), reflex={}({}), pcl={}({}), rr={}({}), adapter_luid=0x{:016x}",
+            support.dlss_supported,
+            support.dlss_result,
+            support.reflex_supported,
+            support.reflex_result,
+            support.pcl_supported,
+            support.pcl_result,
+            support.rr_supported,
+            support.rr_result,
+            support.adapter_luid,
+        );
         if support.reflex_supported != 0 {
             let status = unsafe {
                 crate::streamline::streamline_bridge_reflex_set_mode(
@@ -474,8 +495,153 @@ impl StreamlineRuntime {
             viewport,
             _options: options,
             optimal,
+            #[cfg(feature = "streamline-rr")]
+            rr_options: None,
+            #[cfg(feature = "streamline-rr")]
+            rr_optimal: None,
+            #[cfg(feature = "streamline-rr")]
+            is_rr: false,
             resources_allocated: false,
         })
+    }
+
+    #[cfg(feature = "streamline-rr")]
+    unsafe fn create_rr_viewport(
+        &self,
+        mode: crate::upscaler::UpscalerMode,
+        output_extent: Extent2D,
+        id: u32,
+    ) -> Result<StreamlineViewport> {
+        if !self.dlss_configured {
+            return Err(streamline_error_with_detail(
+                "DLSS RR application identity",
+                crate::streamline::STATUS_NOT_INITIALIZED,
+                "DLSS RR 未加载；请提供 NVIDIA 分配的 --streamline-application-id",
+            ));
+        }
+        if self._support.rr_supported == 0 {
+            return Err(streamline_error_with_detail(
+                "DLSS RR support",
+                self._support.rr_result,
+                format!(
+                    "GPU/driver 不支持 DLSS RR，SDK result={}",
+                    self._support.rr_result
+                ),
+            ));
+        }
+        let rr_options = crate::streamline::RrOptions {
+            struct_size: size_of::<crate::streamline::RrOptions>() as u32,
+            abi_version: crate::streamline::ABI_VERSION,
+            mode: mode.dlss_mode().ok_or_else(|| {
+                streamline_error(
+                    "DLSS RR 模式映射",
+                    crate::streamline::STATUS_INVALID_ARGUMENT,
+                )
+            })?,
+            output_width: output_extent.width,
+            output_height: output_extent.height,
+            sharpness: 0.0,
+            pre_exposure: 1.0,
+            exposure_scale: 1.0,
+            color_buffers_hdr: 1,
+            indicator_invert_axis_x: 0,
+            indicator_invert_axis_y: 0,
+            normal_roughness_mode: 1,
+            world_to_camera_view: glam::Mat4::IDENTITY.to_cols_array(),
+            camera_view_to_world: glam::Mat4::IDENTITY.to_cols_array(),
+            alpha_upscaling_enabled: 0,
+            dlaa_preset: 0,
+            quality_preset: 0,
+            balanced_preset: 0,
+            performance_preset: 0,
+            ultra_performance_preset: 0,
+            ultra_quality_preset: 0,
+        };
+        let mut optimal = crate::streamline::RrOptimalSettings {
+            struct_size: size_of::<crate::streamline::RrOptimalSettings>() as u32,
+            abi_version: crate::streamline::ABI_VERSION,
+            ..Default::default()
+        };
+        let status = unsafe {
+            crate::streamline::streamline_bridge_rr_get_optimal_settings(
+                self.bridge.as_raw(),
+                &rr_options,
+                &mut optimal,
+            )
+        };
+        if status != crate::streamline::STATUS_OK {
+            return Err(streamline_error_with_detail(
+                "查询 DLSS RR optimal settings",
+                status,
+                self.bridge.last_error(),
+            ));
+        }
+        crate::upscaler::render_extent_from_optimal(
+            mode,
+            output_extent,
+            crate::upscaler::DlssOptimalSettings {
+                render_width: optimal.optimal_render_width,
+                render_height: optimal.optimal_render_height,
+            },
+        )
+        .map_err(|error| {
+            WindowsError::new(
+                windows::core::HRESULT(0x80070057_u32 as i32),
+                format!("DLSS RR optimal settings 无效：{error:?}"),
+            )
+        })?;
+        let viewport = crate::streamline::Viewport {
+            struct_size: size_of::<crate::streamline::Viewport>() as u32,
+            abi_version: crate::streamline::ABI_VERSION,
+            id,
+            reserved: 0,
+        };
+        let status = unsafe {
+            crate::streamline::streamline_bridge_rr_set_options(
+                self.bridge.as_raw(),
+                &viewport,
+                &rr_options,
+            )
+        };
+        if status != crate::streamline::STATUS_OK {
+            return Err(streamline_error_with_detail(
+                "设置 DLSS RR options",
+                status,
+                self.bridge.last_error(),
+            ));
+        }
+        Ok(StreamlineViewport {
+            viewport,
+            _options: crate::streamline::DlssOptions::default(),
+            optimal: crate::streamline::OptimalSettings::default(),
+            rr_options: Some(rr_options),
+            rr_optimal: Some(optimal),
+            is_rr: true,
+            resources_allocated: false,
+        })
+    }
+
+    unsafe fn create_reconstruction_viewport(
+        &self,
+        backend: DenoiserBackend,
+        mode: crate::upscaler::UpscalerMode,
+        output_extent: Extent2D,
+        id: u32,
+    ) -> Result<StreamlineViewport> {
+        if backend == DenoiserBackend::DlssRayReconstruction {
+            #[cfg(feature = "streamline-rr")]
+            {
+                return unsafe { self.create_rr_viewport(mode, output_extent, id) };
+            }
+            #[cfg(not(feature = "streamline-rr"))]
+            {
+                return Err(streamline_error(
+                    "DLSS RR feature",
+                    crate::streamline::STATUS_UNSUPPORTED,
+                ));
+            }
+        }
+        unsafe { self.create_viewport(mode, output_extent, id) }
     }
 
     unsafe fn begin_frame(
@@ -502,6 +668,65 @@ impl StreamlineRuntime {
             ));
         }
         Ok(*token)
+    }
+
+    #[cfg(feature = "streamline-rr")]
+    unsafe fn begin_rr_frame(
+        &self,
+        viewport: &mut StreamlineViewport,
+        token: &crate::streamline::FrameToken,
+        input: &DlssFrameInput,
+        camera: CameraPose,
+    ) -> Result<crate::streamline::FrameToken> {
+        let _ = unsafe { self.begin_frame(viewport, token, input, camera)? };
+        let mut options = viewport.rr_options.ok_or_else(|| {
+            streamline_error(
+                "DLSS RR viewport options",
+                crate::streamline::STATUS_NOT_INITIALIZED,
+            )
+        })?;
+        options.world_to_camera_view = input.world_to_view;
+        options.camera_view_to_world = row_major_inverse(input.world_to_view);
+        let status = unsafe {
+            crate::streamline::streamline_bridge_rr_set_options(
+                self.bridge.as_raw(),
+                &viewport.viewport,
+                &options,
+            )
+        };
+        if status != crate::streamline::STATUS_OK {
+            return Err(streamline_error_with_detail(
+                "提交 DLSS RR frame options",
+                status,
+                self.bridge.last_error(),
+            ));
+        }
+        viewport.rr_options = Some(options);
+        Ok(*token)
+    }
+
+    unsafe fn begin_reconstruction_frame(
+        &self,
+        backend: DenoiserBackend,
+        viewport: &mut StreamlineViewport,
+        token: &crate::streamline::FrameToken,
+        input: &DlssFrameInput,
+        camera: CameraPose,
+    ) -> Result<crate::streamline::FrameToken> {
+        if backend == DenoiserBackend::DlssRayReconstruction {
+            #[cfg(feature = "streamline-rr")]
+            {
+                return unsafe { self.begin_rr_frame(viewport, token, input, camera) };
+            }
+            #[cfg(not(feature = "streamline-rr"))]
+            {
+                return Err(streamline_error(
+                    "DLSS RR feature",
+                    crate::streamline::STATUS_UNSUPPORTED,
+                ));
+            }
+        }
+        unsafe { self.begin_frame(viewport, token, input, camera) }
     }
 
     unsafe fn set_tags_and_evaluate(
@@ -551,15 +776,79 @@ impl StreamlineRuntime {
         Ok(())
     }
 
+    #[cfg(feature = "streamline-rr")]
+    unsafe fn set_rr_tags_and_evaluate(
+        &self,
+        viewport: &mut StreamlineViewport,
+        token: &crate::streamline::FrameToken,
+        tags: &[crate::streamline::ResourceTag],
+        command_list: &ID3D12GraphicsCommandList,
+    ) -> Result<()> {
+        let status = unsafe {
+            crate::streamline::streamline_bridge_set_tags(
+                self.bridge.as_raw(),
+                token,
+                &viewport.viewport,
+                tags.as_ptr(),
+                tags.len() as u32,
+                command_list.as_raw(),
+            )
+        };
+        if status != crate::streamline::STATUS_OK {
+            return Err(streamline_error_with_detail(
+                "提交 DLSS RR resource tags",
+                status,
+                self.bridge.last_error(),
+            ));
+        }
+        let status = unsafe {
+            crate::streamline::streamline_bridge_evaluate_rr(
+                self.bridge.as_raw(),
+                token,
+                &viewport.viewport,
+                command_list.as_raw(),
+            )
+        };
+        if status != crate::streamline::STATUS_OK {
+            return Err(streamline_error_with_detail(
+                "执行 DLSS RR evaluate",
+                status,
+                self.bridge.last_error(),
+            ));
+        }
+        viewport.resources_allocated = true;
+        Ok(())
+    }
+
     unsafe fn free_resources(&self, viewport: &mut StreamlineViewport) {
         if !viewport.resources_allocated {
             return;
         }
-        let status = unsafe {
-            crate::streamline::streamline_bridge_free_resources(
-                self.bridge.as_raw(),
-                &viewport.viewport,
-            )
+        #[cfg(feature = "streamline-rr")]
+        let is_rr = viewport.is_rr;
+        #[cfg(not(feature = "streamline-rr"))]
+        let is_rr = false;
+        let status = if is_rr {
+            #[cfg(feature = "streamline-rr")]
+            {
+                unsafe {
+                    crate::streamline::streamline_bridge_rr_free_resources(
+                        self.bridge.as_raw(),
+                        &viewport.viewport,
+                    )
+                }
+            }
+            #[cfg(not(feature = "streamline-rr"))]
+            {
+                crate::streamline::STATUS_UNSUPPORTED
+            }
+        } else {
+            unsafe {
+                crate::streamline::streamline_bridge_free_resources(
+                    self.bridge.as_raw(),
+                    &viewport.viewport,
+                )
+            }
         };
         if status != crate::streamline::STATUS_OK {
             eprintln!("Streamline free resources 失败：status={status}");
@@ -579,6 +868,15 @@ impl StreamlineRuntime {
 #[cfg(feature = "streamline")]
 impl StreamlineViewport {
     fn optimal_extent(&self) -> Extent2D {
+        #[cfg(feature = "streamline-rr")]
+        if self.is_rr
+            && let Some(optimal) = self.rr_optimal
+        {
+            return Extent2D {
+                width: optimal.optimal_render_width,
+                height: optimal.optimal_render_height,
+            };
+        }
         Extent2D {
             width: self.optimal.optimal_render_width,
             height: self.optimal.optimal_render_height,
@@ -654,6 +952,18 @@ fn dlss_streamline_constants(
     }
 }
 
+#[cfg(feature = "streamline-rr")]
+fn row_major_inverse(row_major: [f32; 16]) -> [f32; 16] {
+    // `glam` stores column-major arrays. Transpose at the ABI boundary so the
+    // matrix sent to DLSSD remains row-major and is the exact inverse of the
+    // same-frame world-to-view matrix, without projection jitter.
+    Mat4::from_cols_array(&row_major)
+        .transpose()
+        .inverse()
+        .transpose()
+        .to_cols_array()
+}
+
 #[cfg(feature = "streamline")]
 fn streamline_resource_tag(
     resource: &TrackedResource,
@@ -692,8 +1002,10 @@ const FRAME_COUNT: usize = 3;
 const SHADER_DESCRIPTOR_COUNT: usize = 314;
 #[cfg(all(feature = "nrd", not(feature = "streamline")))]
 const SHADER_DESCRIPTOR_COUNT: usize = 363;
-#[cfg(feature = "streamline")]
+#[cfg(all(feature = "streamline", not(feature = "streamline-rr")))]
 const SHADER_DESCRIPTOR_COUNT: usize = 386;
+#[cfg(feature = "streamline-rr")]
+const SHADER_DESCRIPTOR_COUNT: usize = 403;
 const DXR_UAV_REGISTER_COUNT: usize = 31;
 const RECONSTRUCTION_DIFFUSE_HIT_DISTANCE_UAV_REGISTER: usize = 15;
 const RECONSTRUCTION_SPECULAR_HIT_DISTANCE_UAV_REGISTER: usize = 16;
@@ -728,6 +1040,8 @@ const NRD_COMPOSE_SHADER: &[u8] =
 #[cfg(feature = "streamline")]
 const DLSS_COMPOSE_SHADER: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/stage10_dlss_input.dxil"));
+#[cfg(feature = "streamline-rr")]
+const RR_INPUT_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage11_rr_input.dxil"));
 
 const TONEMAP_INPUT_SVGF_SPLIT: u32 = 0;
 const TONEMAP_INPUT_NRD_SPLIT: u32 = 1;
@@ -759,6 +1073,10 @@ const TONEMAP_TABLE_BASES: [usize; 2] = [284, 299];
 const DLSS_COMPOSE_TABLE_BASES: [usize; 2] = [363, 367];
 #[cfg(feature = "streamline")]
 const DLSS_TONEMAP_TABLE_BASE: usize = 371;
+#[cfg(feature = "streamline-rr")]
+const RR_INPUT_TABLE_BASE: usize = 386;
+#[cfg(feature = "streamline-rr")]
+const RR_TONEMAP_TABLE_BASE: usize = 388;
 
 #[cfg(feature = "nrd")]
 fn bridge_resource(resource: &TrackedResource) -> reconstruction::NrdBridgeResource {
@@ -842,6 +1160,7 @@ fn set_bridge_resource_state(resource: &mut TrackedResource, state: u32) -> Resu
 fn active_gpu_passes(
     path: ReconstructionPath,
     dlss_sr_active: bool,
+    rr_active: bool,
 ) -> [bool; profiler::PASS_COUNT] {
     let mut active = [false; profiler::PASS_COUNT];
     for pass in [
@@ -871,8 +1190,8 @@ fn active_gpu_passes(
             }
         }
         ReconstructionPath::DlssRayReconstruction => {
-            active[GpuPass::RrInputAdapter as usize] = true;
-            active[GpuPass::RrEvaluate as usize] = true;
+            active[GpuPass::RrInputAdapter as usize] = rr_active;
+            active[GpuPass::RrEvaluate as usize] = rr_active;
         }
     }
     if dlss_sr_active {
@@ -982,6 +1301,8 @@ pub struct Dx12Renderer {
     tonemap_pipeline: ComputePipeline,
     #[cfg(feature = "streamline")]
     dlss_compose_pipeline: ComputePipeline,
+    #[cfg(feature = "streamline-rr")]
+    rr_input_pipeline: ComputePipeline,
     #[cfg(feature = "nrd")]
     nrd_prep_pipeline: ComputePipeline,
     #[cfg(feature = "nrd")]
@@ -1066,6 +1387,7 @@ impl Dx12Renderer {
             #[cfg(feature = "streamline")]
             let streamline_bridge = Some(StreamlineRuntime::create_before_dxgi(
                 config.streamline_application_id,
+                config.denoiser == DenoiserBackend::DlssRayReconstruction,
             )?);
 
             let factory_flags = if cfg!(debug_assertions) {
@@ -1239,6 +1561,16 @@ impl Dx12Renderer {
                 "阶段 10 DLSS HDR 合成",
             )
             .map_err(|error| dx_error("创建 DLSS HDR 合成管线", error))?;
+            #[cfg(feature = "streamline-rr")]
+            let rr_input_pipeline = ComputePipeline::new(
+                &device,
+                RR_INPUT_SHADER,
+                1,
+                1,
+                1,
+                "阶段 11 DLSS RR normal/roughness 适配",
+            )
+            .map_err(|error| dx_error("创建 DLSS RR 输入适配管线", error))?;
             #[cfg(feature = "nrd")]
             let nrd_prep_pipeline = ComputePipeline::new(
                 &device,
@@ -1302,11 +1634,15 @@ impl Dx12Renderer {
             #[cfg(feature = "streamline")]
             let mut next_streamline_viewport_id = 1;
             #[cfg(feature = "streamline")]
-            let active_streamline_viewport = if config.upscaler.uses_streamline() {
+            let active_streamline_viewport = if config.denoiser
+                == DenoiserBackend::DlssRayReconstruction
+                || config.upscaler.uses_streamline()
+            {
                 let streamline = streamline.as_ref().ok_or_else(|| {
                     streamline_error("DLSS runtime", crate::streamline::STATUS_NOT_INITIALIZED)
                 })?;
-                let viewport = streamline.create_viewport(
+                let viewport = streamline.create_reconstruction_viewport(
+                    config.denoiser,
                     config.upscaler,
                     output_extent,
                     next_streamline_viewport_id,
@@ -1430,6 +1766,8 @@ impl Dx12Renderer {
                 tonemap_pipeline,
                 #[cfg(feature = "streamline")]
                 dlss_compose_pipeline,
+                #[cfg(feature = "streamline-rr")]
+                rr_input_pipeline,
                 #[cfg(feature = "nrd")]
                 nrd_prep_pipeline,
                 #[cfg(feature = "nrd")]
@@ -1579,10 +1917,12 @@ impl Dx12Renderer {
                     reset: self.reset_history,
                     delta_time_ms,
                 });
+            let rr_path = self.denoiser == DenoiserBackend::DlssRayReconstruction;
             let dlss_active =
-                self.upscaler.uses_streamline() && self.debug_view == DebugView::Final;
+                !rr_path && self.upscaler.uses_streamline() && self.debug_view == DebugView::Final;
+            let rr_active = rr_path && self.debug_view == DebugView::Final;
             #[cfg(feature = "streamline")]
-            let dlss_frame_input = if dlss_active {
+            let dlss_frame_input = if dlss_active || rr_active {
                 Some(DlssFrameInput::from_cameras(
                     CameraPose {
                         position: self.camera_position,
@@ -1625,7 +1965,7 @@ impl Dx12Renderer {
             #[cfg(feature = "streamline")]
             let dlss_token = if let (Some(streamline), Some(viewport), Some(input)) = (
                 self.streamline.as_ref(),
-                self.active_streamline_viewport.as_ref(),
+                self.active_streamline_viewport.as_mut(),
                 dlss_frame_input.as_ref(),
             ) {
                 let token = frame_token.as_ref().ok_or_else(|| {
@@ -1634,7 +1974,8 @@ impl Dx12Renderer {
                         crate::streamline::STATUS_NOT_INITIALIZED,
                     )
                 })?;
-                Some(streamline.begin_frame(
+                Some(streamline.begin_reconstruction_frame(
+                    self.denoiser,
                     viewport,
                     token,
                     input,
@@ -1712,7 +2053,10 @@ impl Dx12Renderer {
                 previous_position: self.previous_camera_position,
                 previous_yaw: self.previous_camera_yaw,
                 previous_pitch: self.previous_camera_pitch,
-                dlss_enabled: u32::from(dlss_active),
+                // The DXR pass writes the dense DLSS guides for both SR and
+                // RR. RR consumes the same direction/mvecScale contract, but
+                // never enters the DLSS SR compose path.
+                dlss_enabled: u32::from(dlss_active || rr_active),
                 nrd_enabled: u32::from(self.denoiser == DenoiserBackend::NrdReblur),
                 reset_history: u32::from(self.reset_history),
             };
@@ -1756,6 +2100,9 @@ impl Dx12Renderer {
                     render_groups_y,
                     &mut command_recording_stats,
                 )?;
+            } else if rr_path {
+                // RR is fused: its noisy HDR and guides are consumed below.
+                // Do not populate SVGF histories or NRD resources on this path.
             } else {
                 self.collect_frame_input_transitions(
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -2120,6 +2467,166 @@ impl Dx12Renderer {
                 self.submit_transition_batch(&mut command_recording_stats);
             }
 
+            #[cfg(feature = "streamline-rr")]
+            if rr_active {
+                let token = dlss_token.as_ref().ok_or_else(|| {
+                    streamline_error(
+                        "DLSS RR frame token",
+                        crate::streamline::STATUS_NOT_INITIALIZED,
+                    )
+                })?;
+                {
+                    let generation = &mut self.active_generation;
+                    let rr = generation.rr.as_mut().ok_or_else(|| {
+                        streamline_error(
+                            "DLSS RR generation resources",
+                            crate::streamline::STATUS_NOT_INITIALIZED,
+                        )
+                    })?;
+                    generation
+                        .reconstruction_normal_roughness
+                        .collect_transition(
+                            &mut self.transition_batch,
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                        );
+                    rr.normal_roughness.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    );
+                }
+                self.submit_transition_batch(&mut command_recording_stats);
+
+                self.gpu_profiler
+                    .begin(&self.command_list, frame_index, GpuPass::RrInputAdapter);
+                self.gpu_profiler
+                    .begin_event(&self.command_list, GpuPass::RrInputAdapter);
+                self.rr_input_pipeline.bind(
+                    &self.command_list,
+                    self.active_generation
+                        .shader_heap
+                        .gpu_handle(RR_INPUT_TABLE_BASE),
+                    &[u32::from(self.reset_history)],
+                );
+                self.command_list
+                    .Dispatch(render_groups_x, render_groups_y, 1);
+                self.gpu_profiler
+                    .end(&self.command_list, frame_index, GpuPass::RrInputAdapter);
+                self.gpu_profiler.end_event(&self.command_list);
+
+                let tags = {
+                    let generation = &mut self.active_generation;
+                    let rr = generation.rr.as_mut().unwrap();
+                    generation.reconstruction_noisy_hdr.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                    generation.reconstruction_diffuse_albedo.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                    generation
+                        .reconstruction_specular_albedo
+                        .collect_transition(
+                            &mut self.transition_batch,
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                        );
+                    generation
+                        .reconstruction_specular_hit_distance
+                        .collect_transition(
+                            &mut self.transition_batch,
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                        );
+                    rr.normal_roughness.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                    rr.depth.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                    rr.motion.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                    rr.output_hdr.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    );
+                    [
+                        streamline_resource_tag(
+                            &generation.reconstruction_noisy_hdr,
+                            3,
+                            0,
+                            render_extent,
+                        ),
+                        streamline_resource_tag(&rr.output_hdr, 4, 0, output_extent),
+                        streamline_resource_tag(
+                            &generation.reconstruction_diffuse_albedo,
+                            7,
+                            0,
+                            render_extent,
+                        ),
+                        streamline_resource_tag(
+                            &generation.reconstruction_specular_albedo,
+                            8,
+                            0,
+                            render_extent,
+                        ),
+                        streamline_resource_tag(&rr.normal_roughness, 14, 0, render_extent),
+                        streamline_resource_tag(&rr.motion, 1, 0, render_extent),
+                        streamline_resource_tag(&rr.depth, 0, 1, render_extent),
+                        streamline_resource_tag(
+                            &generation.reconstruction_specular_hit_distance,
+                            42,
+                            0,
+                            render_extent,
+                        ),
+                    ]
+                };
+                self.submit_transition_batch(&mut command_recording_stats);
+
+                self.gpu_profiler
+                    .begin(&self.command_list, frame_index, GpuPass::RrEvaluate);
+                self.gpu_profiler
+                    .begin_event(&self.command_list, GpuPass::RrEvaluate);
+                self.streamline
+                    .as_ref()
+                    .ok_or_else(|| {
+                        streamline_error(
+                            "DLSS RR runtime",
+                            crate::streamline::STATUS_NOT_INITIALIZED,
+                        )
+                    })?
+                    .set_rr_tags_and_evaluate(
+                        self.active_streamline_viewport.as_mut().ok_or_else(|| {
+                            streamline_error(
+                                "DLSS RR viewport",
+                                crate::streamline::STATUS_NOT_INITIALIZED,
+                            )
+                        })?,
+                        token,
+                        &tags,
+                        &self.command_list,
+                    )?;
+                self.command_list.SetDescriptorHeaps(&[
+                    Some(self.active_generation.shader_heap.heap().clone()),
+                    Some(self._sampler_heap.heap().clone()),
+                ]);
+                self.gpu_profiler
+                    .end(&self.command_list, frame_index, GpuPass::RrEvaluate);
+                self.gpu_profiler.end_event(&self.command_list);
+                self.active_generation
+                    .rr
+                    .as_mut()
+                    .expect("DLSS RR generation validated above")
+                    .output_hdr
+                    .collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                self.submit_transition_batch(&mut command_recording_stats);
+            }
+
             self.gpu_profiler
                 .begin(&self.command_list, frame_index, GpuPass::ToneMap);
             self.gpu_profiler
@@ -2130,6 +2637,17 @@ impl Dx12Renderer {
                 self.active_generation
                     .shader_heap
                     .gpu_handle(DLSS_TONEMAP_TABLE_BASE)
+            } else if rr_active {
+                #[cfg(feature = "streamline-rr")]
+                {
+                    self.active_generation
+                        .shader_heap
+                        .gpu_handle(RR_TONEMAP_TABLE_BASE)
+                }
+                #[cfg(not(feature = "streamline-rr"))]
+                {
+                    unreachable!("RR cannot be active without streamline-rr")
+                }
             } else {
                 self.active_generation
                     .shader_heap
@@ -2146,7 +2664,7 @@ impl Dx12Renderer {
                 &[
                     self.debug_view.hlsl_value(),
                     1.0_f32.to_bits(),
-                    tonemap_input_mode(self.denoiser, dlss_active),
+                    tonemap_input_mode(self.denoiser, dlss_active || rr_active),
                 ],
             );
             self.command_list
@@ -2190,7 +2708,11 @@ impl Dx12Renderer {
             self.gpu_profiler.resolve_frame(
                 &self.command_list,
                 frame_index,
-                active_gpu_passes(ReconstructionPath::from_backend(self.denoiser), dlss_active),
+                active_gpu_passes(
+                    ReconstructionPath::from_backend(self.denoiser),
+                    dlss_active,
+                    rr_active,
+                ),
             );
             self.command_list.Close()?;
             self.gpu_profiler.record_command_recording(
@@ -2232,8 +2754,11 @@ impl Dx12Renderer {
             self.frames[frame_index].fence_value = fence_value;
             self.frames[frame_index].timing_valid = !self.reset_history;
             self.frames[frame_index].timing_generation_id = self.active_generation.id;
-            self.frames[frame_index].timing_passes =
-                active_gpu_passes(ReconstructionPath::from_backend(self.denoiser), dlss_active);
+            self.frames[frame_index].timing_passes = active_gpu_passes(
+                ReconstructionPath::from_backend(self.denoiser),
+                dlss_active,
+                rr_active,
+            );
             self.active_generation.last_used_fence = fence_value;
             if self.benchmark_measurement_active {
                 self.benchmark_render_min.width =
@@ -2545,8 +3070,12 @@ impl Dx12Renderer {
                     streamline_error("DLSS runtime", crate::streamline::STATUS_NOT_INITIALIZED)
                 })?;
                 let viewport_id = self.next_streamline_viewport_id;
-                let viewport =
-                    runtime.create_viewport(self.upscaler, output_extent, viewport_id)?;
+                let viewport = runtime.create_reconstruction_viewport(
+                    self.denoiser,
+                    self.upscaler,
+                    output_extent,
+                    viewport_id,
+                )?;
                 self.next_streamline_viewport_id = viewport_id.saturating_add(1);
                 Some(viewport)
             } else {
@@ -2837,8 +3366,14 @@ impl Dx12Renderer {
                     streamline_error("DLSS runtime", crate::streamline::STATUS_NOT_INITIALIZED)
                 })?;
                 let viewport_id = self.next_streamline_viewport_id;
-                let viewport =
-                    unsafe { runtime.create_viewport(next, output_extent, viewport_id) }?;
+                let viewport = unsafe {
+                    runtime.create_reconstruction_viewport(
+                        self.denoiser,
+                        next,
+                        output_extent,
+                        viewport_id,
+                    )
+                }?;
                 self.next_streamline_viewport_id = viewport_id.saturating_add(1);
                 Some(viewport)
             } else {
@@ -3316,6 +3851,7 @@ impl Dx12Renderer {
                 upscaler_mode: self.upscaler.as_str(),
                 dlss_optimal: self.dlss_optimal_json(),
                 dlss_viewport_id,
+                rr_support: self.rr_support_json(),
                 reflex: self.reflex_json(),
                 denoiser_switch_count: self
                     .denoiser_switch_count
@@ -3347,7 +3883,23 @@ impl Dx12Renderer {
     fn dlss_optimal_json(&self) -> serde_json::Value {
         #[cfg(feature = "streamline")]
         if let Some(viewport) = self.active_streamline_viewport.as_ref() {
+            #[cfg(feature = "streamline-rr")]
+            if viewport.is_rr
+                && let Some(optimal) = viewport.rr_optimal
+            {
+                return serde_json::json!({
+                    "kind": "dlss_rr",
+                    "optimal_render_width": optimal.optimal_render_width,
+                    "optimal_render_height": optimal.optimal_render_height,
+                    "render_width_min": optimal.render_width_min,
+                    "render_height_min": optimal.render_height_min,
+                    "render_width_max": optimal.render_width_max,
+                    "render_height_max": optimal.render_height_max,
+                    "optimal_sharpness": optimal.optimal_sharpness,
+                });
+            }
             return serde_json::json!({
+                "kind": "dlss",
                 "optimal_render_width": viewport.optimal.optimal_render_width,
                 "optimal_render_height": viewport.optimal.optimal_render_height,
                 "render_width_min": viewport.optimal.render_width_min,
@@ -3358,6 +3910,35 @@ impl Dx12Renderer {
             });
         }
         serde_json::Value::Null
+    }
+
+    #[cfg(feature = "streamline")]
+    fn rr_support_json(&self) -> serde_json::Value {
+        #[cfg(feature = "streamline-rr")]
+        if let Some(runtime) = self.streamline.as_ref() {
+            return serde_json::json!({
+                "compiled": true,
+                "supported": runtime._support.rr_supported != 0,
+                "supported_raw": runtime._support.rr_supported,
+                "result_raw": runtime._support.rr_result,
+            });
+        }
+        serde_json::json!({
+            "compiled": cfg!(feature = "streamline-rr"),
+            "supported": false,
+            "supported_raw": 0,
+            "result_raw": crate::streamline::STATUS_UNSUPPORTED,
+        })
+    }
+
+    #[cfg(not(feature = "streamline"))]
+    fn rr_support_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "compiled": false,
+            "supported": false,
+            "supported_raw": 0,
+            "result_raw": 5,
+        })
     }
 
     fn reflex_json(&self) -> serde_json::Value {
@@ -3548,6 +4129,7 @@ struct BenchmarkJsonContext<'a> {
     upscaler_mode: &'a str,
     dlss_optimal: serde_json::Value,
     dlss_viewport_id: Option<u32>,
+    rr_support: serde_json::Value,
     reflex: serde_json::Value,
     denoiser_switch_count: u64,
     nrd_compiled: bool,
@@ -3591,6 +4173,7 @@ fn benchmark_json_line(
         upscaler_mode,
         dlss_optimal,
         dlss_viewport_id,
+        rr_support,
         reflex,
         denoiser_switch_count,
         nrd_compiled,
@@ -3647,6 +4230,7 @@ fn benchmark_json_line(
             "dlss_optimal": dlss_optimal,
             "viewport_id": dlss_viewport_id,
         },
+        "dlss_rr": rr_support,
         "reflex": reflex,
         "denoiser": {
             "requested": denoiser_backend,
@@ -3714,6 +4298,8 @@ fn benchmark_json_line(
             "nrd_compose": gpu_pass_json(report.pass(GpuPass::NrdCompose)),
             "dlss_compose": gpu_pass_json(report.pass(GpuPass::DlssCompose)),
             "dlss_evaluate": gpu_pass_json(report.pass(GpuPass::DlssEvaluate)),
+            "rr_input_adapter": gpu_pass_json(report.pass(GpuPass::RrInputAdapter)),
+            "rr_evaluate": gpu_pass_json(report.pass(GpuPass::RrEvaluate)),
         },
         "memory": {
             "usage_bytes": memory.usage_bytes,
@@ -3845,6 +4431,13 @@ impl Dx12Renderer {
             dlss.depth
                 .collect_transition(&mut self.transition_batch, state);
             dlss.motion
+                .collect_transition(&mut self.transition_batch, state);
+        }
+        #[cfg(feature = "streamline-rr")]
+        if let Some(rr) = generation.rr.as_mut() {
+            rr.depth
+                .collect_transition(&mut self.transition_batch, state);
+            rr.motion
                 .collect_transition(&mut self.transition_batch, state);
         }
         generation
@@ -4946,6 +5539,12 @@ mod tests {
                 upscaler_mode: "native",
                 dlss_optimal: serde_json::Value::Null,
                 dlss_viewport_id: None,
+                rr_support: serde_json::json!({
+                    "compiled": false,
+                    "supported": false,
+                    "supported_raw": 0,
+                    "result_raw": 5,
+                }),
                 reflex: serde_json::Value::Null,
                 denoiser_switch_count: 0,
                 nrd_compiled: false,

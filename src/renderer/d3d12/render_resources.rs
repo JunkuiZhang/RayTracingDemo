@@ -100,6 +100,20 @@ pub(super) struct DlssGenerationResources {
     pub(super) motion: TrackedResource,
 }
 
+#[cfg(feature = "streamline-rr")]
+pub(super) struct RrGenerationResources {
+    /// RR consumes the unfiltered noisy HDR signal directly. This output is
+    /// the only HDR signal handed to ToneMap when the RR path is active.
+    pub(super) output_hdr: TrackedResource,
+    /// Adapter output: signed normalized world normal in RGB and linear
+    /// roughness in A, matching DLSSD's packed normal/roughness contract.
+    pub(super) normal_roughness: TrackedResource,
+    /// Dense DLSS motion/depth are written by the DXR pass under the same
+    /// guide contract as Stage 10, but remain generation-owned for RR.
+    pub(super) depth: TrackedResource,
+    pub(super) motion: TrackedResource,
+}
+
 /// All resources whose descriptors or dimensions depend on the current render
 /// extent. Every generation owns its complete shader-visible heap so an extent
 /// switch never overwrites descriptors that an in-flight frame may still use.
@@ -130,6 +144,8 @@ pub(super) struct RenderResourceGeneration {
     #[cfg(feature = "streamline")]
     #[allow(dead_code)] // 10D consumes the DLSS generation from its pass.
     pub(super) dlss: Option<DlssGenerationResources>,
+    #[cfg(feature = "streamline-rr")]
+    pub(super) rr: Option<RrGenerationResources>,
     #[cfg(feature = "nrd")]
     pub(super) nrd: Option<NrdGenerationResources>,
     pub(super) nrd_validation: TrackedResource,
@@ -371,6 +387,39 @@ impl RenderResourceGeneration {
         let _ = with_dlss_rr;
         #[cfg(not(feature = "streamline"))]
         let _ = (with_dlss_sr, with_dlss_rr);
+        #[cfg(feature = "streamline-rr")]
+        let rr = if with_dlss_rr {
+            Some(RrGenerationResources {
+                output_hdr: create_uav_texture(
+                    device,
+                    output_extent,
+                    DXGI_FORMAT_R16G16B16A16_FLOAT,
+                    format!("代际 {id} DLSS RR HDR 输出"),
+                )?,
+                normal_roughness: create_uav_texture(
+                    device,
+                    render_extent,
+                    DXGI_FORMAT_R16G16B16A16_FLOAT,
+                    format!("代际 {id} DLSS RR packed normal roughness"),
+                )?,
+                depth: create_uav_texture(
+                    device,
+                    render_extent,
+                    DXGI_FORMAT_R32_FLOAT,
+                    format!("代际 {id} DLSS RR device depth"),
+                )?,
+                motion: create_uav_texture(
+                    device,
+                    render_extent,
+                    DXGI_FORMAT_R16G16_FLOAT,
+                    format!("代际 {id} DLSS RR dense pixel motion"),
+                )?,
+            })
+        } else {
+            None
+        };
+        #[cfg(not(feature = "streamline-rr"))]
+        let _ = with_dlss_rr;
         #[cfg(feature = "nrd")]
         let nrd = if with_nrd {
             Some(NrdGenerationResources {
@@ -520,6 +569,8 @@ impl RenderResourceGeneration {
             reconstruction_primary_emissive,
             #[cfg(feature = "streamline")]
             dlss,
+            #[cfg(feature = "streamline-rr")]
+            rr,
             #[cfg(feature = "nrd")]
             nrd,
             nrd_validation,
@@ -600,7 +651,15 @@ impl RenderResourceGeneration {
         // The DXR table remains ABI-compatible at u0..u19. Native generations
         // bind existing guides as inert fallback descriptors and the shader's
         // uniform DlssEnabled guard guarantees there are no extra UAV writes.
-        #[cfg(feature = "streamline")]
+        #[cfg(feature = "streamline-rr")]
+        let (dlss_depth, dlss_motion) = if let Some(rr) = self.rr.as_ref() {
+            (&rr.depth, &rr.motion)
+        } else if let Some(dlss) = self.dlss.as_ref() {
+            (&dlss.depth, &dlss.motion)
+        } else {
+            (depth, motion)
+        };
+        #[cfg(all(feature = "streamline", not(feature = "streamline-rr")))]
         let (dlss_depth, dlss_motion) = self
             .dlss
             .as_ref()
@@ -945,6 +1004,45 @@ impl RenderResourceGeneration {
                     );
                 };
             }
+        }
+        #[cfg(feature = "streamline-rr")]
+        if let Some(rr) = self.rr.as_ref() {
+            let input_srvs = [reconstruction_normal_roughness];
+            let input_uavs = [&rr.normal_roughness];
+            unsafe {
+                populate_texture_table(
+                    device,
+                    &self.shader_heap,
+                    super::RR_INPUT_TABLE_BASE,
+                    &input_srvs,
+                    &input_uavs,
+                )
+            };
+            let rr_tonemap_srvs = [
+                &rr.output_hdr,
+                raw_specular,
+                raw_diffuse,
+                raw_specular,
+                albedo,
+                normal,
+                depth,
+                motion,
+                &self.histories[0].moments,
+                rejection,
+                &self.histories[0].length,
+                id,
+                hit_distance,
+                &self.nrd_validation,
+            ];
+            unsafe {
+                populate_texture_table(
+                    device,
+                    &self.shader_heap,
+                    super::RR_TONEMAP_TABLE_BASE,
+                    &rr_tonemap_srvs,
+                    &[display_output],
+                )
+            };
         }
     }
 }
