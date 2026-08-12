@@ -102,9 +102,15 @@ pub(super) struct DlssGenerationResources {
 
 #[cfg(feature = "streamline-rr")]
 pub(super) struct RrGenerationResources {
+    /// RR input after directly visible primary emission has been removed.
+    /// Reflected emissive radiance remains part of this stochastic signal.
+    pub(super) input_hdr: TrackedResource,
     /// RR consumes the unfiltered noisy HDR signal directly. This output is
     /// the only HDR signal handed to ToneMap when the RR path is active.
     pub(super) output_hdr: TrackedResource,
+    /// Output-resolution primary-emission histories. RGB is resolved HDR
+    /// emission and alpha is the bounded temporal sample count.
+    pub(super) emissive_history: [TrackedResource; 2],
     /// Adapter output: signed normalized world normal in RGB and linear
     /// roughness in A, matching DLSSD's packed normal/roughness contract.
     pub(super) normal_roughness: TrackedResource,
@@ -394,12 +400,32 @@ impl RenderResourceGeneration {
         #[cfg(feature = "streamline-rr")]
         let rr = if with_dlss_rr {
             Some(RrGenerationResources {
+                input_hdr: create_uav_texture(
+                    device,
+                    render_extent,
+                    DXGI_FORMAT_R16G16B16A16_FLOAT,
+                    format!("代际 {id} DLSS RR 分层 HDR 输入"),
+                )?,
                 output_hdr: create_uav_texture(
                     device,
                     output_extent,
                     DXGI_FORMAT_R16G16B16A16_FLOAT,
                     format!("代际 {id} DLSS RR HDR 输出"),
                 )?,
+                emissive_history: [
+                    create_uav_texture(
+                        device,
+                        output_extent,
+                        DXGI_FORMAT_R16G16B16A16_FLOAT,
+                        format!("代际 {id} DLSS RR emissive 历史 0"),
+                    )?,
+                    create_uav_texture(
+                        device,
+                        output_extent,
+                        DXGI_FORMAT_R16G16B16A16_FLOAT,
+                        format!("代际 {id} DLSS RR emissive 历史 1"),
+                    )?,
+                ],
                 normal_roughness: create_uav_texture(
                     device,
                     render_extent,
@@ -1033,8 +1059,12 @@ impl RenderResourceGeneration {
         }
         #[cfg(feature = "streamline-rr")]
         if let Some(rr) = self.rr.as_ref() {
-            let input_srvs = [reconstruction_normal_roughness];
-            let input_uavs = [&rr.normal_roughness];
+            let input_srvs = [
+                reconstruction_normal_roughness,
+                reconstruction_noisy_hdr,
+                reconstruction_primary_emissive,
+            ];
+            let input_uavs = [&rr.normal_roughness, &rr.input_hdr];
             unsafe {
                 populate_texture_table(
                     device,
@@ -1044,34 +1074,55 @@ impl RenderResourceGeneration {
                     &input_uavs,
                 )
             };
-            let rr_tonemap_srvs = [
-                &rr.output_hdr,
-                raw_specular,
-                raw_diffuse,
-                raw_specular,
-                albedo,
-                normal,
-                depth,
-                motion,
-                &self.histories[0].moments,
-                rejection,
-                &self.histories[0].length,
-                id,
-                reconstruction_specular_hit_distance,
-                // t13 is NRD validation on conventional paths and the
-                // explicit reflected-geometry guide on RR. InputMode keeps
-                // the two debug interpretations unambiguous.
-                &rr.specular_motion,
-            ];
-            unsafe {
-                populate_texture_table(
-                    device,
-                    &self.shader_heap,
-                    super::RR_TONEMAP_TABLE_BASE,
-                    &rr_tonemap_srvs,
-                    &[display_output],
-                )
-            };
+            for current_index in 0..2 {
+                let previous_index = 1 - current_index;
+                let emissive_srvs = [
+                    reconstruction_primary_emissive,
+                    &rr.motion,
+                    &rr.emissive_history[previous_index],
+                ];
+                unsafe {
+                    populate_texture_table(
+                        device,
+                        &self.shader_heap,
+                        super::RR_EMISSIVE_TABLE_BASES[current_index],
+                        &emissive_srvs,
+                        &[&rr.emissive_history[current_index]],
+                    )
+                };
+
+                let rr_tonemap_srvs = [
+                    &rr.output_hdr,
+                    // Prepared for the RR-only post-reconstruction composite.
+                    // The first infrastructure commit intentionally leaves
+                    // InputMode 3 energy unchanged until the split is enabled.
+                    &rr.emissive_history[current_index],
+                    raw_diffuse,
+                    raw_specular,
+                    albedo,
+                    normal,
+                    depth,
+                    motion,
+                    &self.histories[current_index].moments,
+                    rejection,
+                    &self.histories[current_index].length,
+                    id,
+                    reconstruction_specular_hit_distance,
+                    // t13 is NRD validation on conventional paths and the
+                    // explicit reflected-geometry guide on RR. InputMode keeps
+                    // the two debug interpretations unambiguous.
+                    &rr.specular_motion,
+                ];
+                unsafe {
+                    populate_texture_table(
+                        device,
+                        &self.shader_heap,
+                        super::RR_TONEMAP_TABLE_BASES[current_index],
+                        &rr_tonemap_srvs,
+                        &[display_output],
+                    )
+                };
+            }
         }
     }
 }

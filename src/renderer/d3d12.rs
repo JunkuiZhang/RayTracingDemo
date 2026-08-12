@@ -1067,7 +1067,7 @@ const SHADER_DESCRIPTOR_COUNT: usize = 363;
 #[cfg(all(feature = "streamline", not(feature = "streamline-rr")))]
 const SHADER_DESCRIPTOR_COUNT: usize = 386;
 #[cfg(feature = "streamline-rr")]
-const SHADER_DESCRIPTOR_COUNT: usize = 403;
+const SHADER_DESCRIPTOR_COUNT: usize = 429;
 const DXR_UAV_REGISTER_COUNT: usize = 32;
 const RECONSTRUCTION_DIFFUSE_HIT_DISTANCE_UAV_REGISTER: usize = 15;
 const RECONSTRUCTION_SPECULAR_HIT_DISTANCE_UAV_REGISTER: usize = 16;
@@ -1105,6 +1105,9 @@ const DLSS_COMPOSE_SHADER: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/stage10_dlss_input.dxil"));
 #[cfg(feature = "streamline-rr")]
 const RR_INPUT_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage11_rr_input.dxil"));
+#[cfg(feature = "streamline-rr")]
+const RR_EMISSIVE_SHADER: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/stage11_rr_emissive.dxil"));
 
 const TONEMAP_INPUT_SVGF_SPLIT: u32 = 0;
 const TONEMAP_INPUT_NRD_SPLIT: u32 = 1;
@@ -1161,7 +1164,9 @@ const DLSS_TONEMAP_TABLE_BASE: usize = 371;
 #[cfg(feature = "streamline-rr")]
 const RR_INPUT_TABLE_BASE: usize = 386;
 #[cfg(feature = "streamline-rr")]
-const RR_TONEMAP_TABLE_BASE: usize = 388;
+const RR_EMISSIVE_TABLE_BASES: [usize; 2] = [391, 395];
+#[cfg(feature = "streamline-rr")]
+const RR_TONEMAP_TABLE_BASES: [usize; 2] = [399, 414];
 
 #[cfg(feature = "nrd")]
 fn bridge_resource(resource: &TrackedResource) -> reconstruction::NrdBridgeResource {
@@ -1388,6 +1393,8 @@ pub struct Dx12Renderer {
     dlss_compose_pipeline: ComputePipeline,
     #[cfg(feature = "streamline-rr")]
     rr_input_pipeline: ComputePipeline,
+    #[cfg(feature = "streamline-rr")]
+    rr_emissive_pipeline: ComputePipeline,
     #[cfg(feature = "nrd")]
     nrd_prep_pipeline: ComputePipeline,
     #[cfg(feature = "nrd")]
@@ -1651,12 +1658,22 @@ impl Dx12Renderer {
             let rr_input_pipeline = ComputePipeline::new(
                 &device,
                 RR_INPUT_SHADER,
+                3,
+                2,
                 1,
-                1,
-                1,
-                "阶段 11 DLSS RR normal/roughness 适配",
+                "阶段 11 DLSS RR 输入分层与 guide 适配",
             )
             .map_err(|error| dx_error("创建 DLSS RR 输入适配管线", error))?;
+            #[cfg(feature = "streamline-rr")]
+            let rr_emissive_pipeline = ComputePipeline::new(
+                &device,
+                RR_EMISSIVE_SHADER,
+                3,
+                1,
+                3,
+                "阶段 11 DLSS RR primary emissive 稳定层",
+            )
+            .map_err(|error| dx_error("创建 DLSS RR emissive 稳定管线", error))?;
             #[cfg(feature = "nrd")]
             let nrd_prep_pipeline = ComputePipeline::new(
                 &device,
@@ -1854,6 +1871,8 @@ impl Dx12Renderer {
                 dlss_compose_pipeline,
                 #[cfg(feature = "streamline-rr")]
                 rr_input_pipeline,
+                #[cfg(feature = "streamline-rr")]
+                rr_emissive_pipeline,
                 #[cfg(feature = "nrd")]
                 nrd_prep_pipeline,
                 #[cfg(feature = "nrd")]
@@ -2583,7 +2602,33 @@ impl Dx12Renderer {
                             &mut self.transition_batch,
                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                         );
+                    generation.reconstruction_noisy_hdr.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                    generation
+                        .reconstruction_primary_emissive
+                        .collect_transition(
+                            &mut self.transition_batch,
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                        );
                     rr.normal_roughness.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    );
+                    rr.input_hdr.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    );
+                    rr.motion.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                    rr.emissive_history[previous_history].collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                    rr.emissive_history[current_history].collect_transition(
                         &mut self.transition_batch,
                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     );
@@ -2603,6 +2648,19 @@ impl Dx12Renderer {
                 );
                 self.command_list
                     .Dispatch(render_groups_x, render_groups_y, 1);
+                self.rr_emissive_pipeline.bind(
+                    &self.command_list,
+                    self.active_generation
+                        .shader_heap
+                        .gpu_handle(RR_EMISSIVE_TABLE_BASES[current_history]),
+                    &[
+                        camera_jitter_px[0].to_bits(),
+                        camera_jitter_px[1].to_bits(),
+                        u32::from(self.reset_history),
+                    ],
+                );
+                self.command_list
+                    .Dispatch(output_groups_x, output_groups_y, 1);
                 self.gpu_profiler
                     .end(&self.command_list, frame_index, GpuPass::RrInputAdapter);
                 self.gpu_profiler.end_event(&self.command_list);
@@ -2714,6 +2772,15 @@ impl Dx12Renderer {
                         &mut self.transition_batch,
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     );
+                self.active_generation
+                    .rr
+                    .as_mut()
+                    .expect("DLSS RR generation validated above")
+                    .emissive_history[current_history]
+                    .collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
                 self.submit_transition_batch(&mut command_recording_stats);
             }
 
@@ -2732,7 +2799,7 @@ impl Dx12Renderer {
                 {
                     self.active_generation
                         .shader_heap
-                        .gpu_handle(RR_TONEMAP_TABLE_BASE)
+                        .gpu_handle(RR_TONEMAP_TABLE_BASES[current_history])
                 }
                 #[cfg(not(feature = "streamline-rr"))]
                 {
@@ -5013,6 +5080,24 @@ impl Dx12Renderer {
             1,
             "阶段 10 DLSS HDR 合成",
         )?;
+        #[cfg(feature = "streamline-rr")]
+        let rr_input = ComputePipeline::new(
+            &self.device,
+            &shaders.rr_input,
+            3,
+            2,
+            1,
+            "阶段 11 DLSS RR 输入分层与 guide 适配",
+        )?;
+        #[cfg(feature = "streamline-rr")]
+        let rr_emissive = ComputePipeline::new(
+            &self.device,
+            &shaders.rr_emissive,
+            3,
+            1,
+            3,
+            "阶段 11 DLSS RR primary emissive 稳定层",
+        )?;
         #[cfg(feature = "nrd")]
         let nrd_prep = ComputePipeline::new(
             &self.device,
@@ -5039,6 +5124,11 @@ impl Dx12Renderer {
         #[cfg(feature = "streamline")]
         {
             self.dlss_compose_pipeline = dlss_compose;
+        }
+        #[cfg(feature = "streamline-rr")]
+        {
+            self.rr_input_pipeline = rr_input;
+            self.rr_emissive_pipeline = rr_emissive;
         }
         #[cfg(feature = "nrd")]
         {
@@ -5521,6 +5611,7 @@ mod tests {
         let shader = include_str!("../../shaders/stage11_rr_input.hlsl");
         assert!(shader.contains("ReconstructionNormalRoughness.GetDimensions"));
         assert!(shader.contains("dispatchId.x >= sourceWidth || dispatchId.y >= sourceHeight"));
+        assert!(shader.contains("max(noisyHdr - primaryEmissive, 0.0)"));
 
         let (normal, roughness) = decode([0.5, 0.5, 1.0, 0.25]);
         assert_eq!(normal, [0.0, 0.0, 1.0]);
@@ -5536,6 +5627,18 @@ mod tests {
         assert_eq!(invalid_roughness, 1.0);
         assert!(invalid_normal.iter().all(|value| value.is_finite()));
         assert!(invalid_roughness.is_finite());
+    }
+
+    #[cfg(feature = "streamline-rr")]
+    #[test]
+    fn rr_primary_emissive_resolve_has_stable_lattice_and_bounded_history() {
+        let shader = include_str!("../../shaders/stage11_rr_emissive.hlsl");
+        assert!(shader.contains("- 0.5 - CameraJitterPx"));
+        assert!(shader.contains("previousPosition = float2(dispatchId.xy) + outputMotion"));
+        assert!(shader.contains("ResetHistory == 0u && previousInBounds"));
+        assert!(shader.contains("clamp(\n        previousValid ? previous.xyz : current"));
+        assert!(shader.contains("MaxHistorySamples = 64.0"));
+        assert!(shader.contains("motionMagnitude > 2.0"));
     }
 
     #[test]
@@ -5604,6 +5707,23 @@ mod tests {
                 NRD_TRANSMISSION_PREP_TABLE_BASE + 18,
             ));
             ranges.push((NRD_COMPOSE_TABLE_BASE, NRD_COMPOSE_TABLE_BASE + 13));
+        }
+        #[cfg(feature = "streamline")]
+        {
+            for base in DLSS_COMPOSE_TABLE_BASES {
+                ranges.push((base, base + 4));
+            }
+            ranges.push((DLSS_TONEMAP_TABLE_BASE, DLSS_TONEMAP_TABLE_BASE + 15));
+        }
+        #[cfg(feature = "streamline-rr")]
+        {
+            ranges.push((RR_INPUT_TABLE_BASE, RR_INPUT_TABLE_BASE + 5));
+            for base in RR_EMISSIVE_TABLE_BASES {
+                ranges.push((base, base + 4));
+            }
+            for base in RR_TONEMAP_TABLE_BASES {
+                ranges.push((base, base + 15));
+            }
         }
         ranges.sort_unstable();
 

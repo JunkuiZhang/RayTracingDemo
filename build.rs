@@ -40,6 +40,11 @@ fn main() {
             "stage11_rr_input.dxil",
             "cs_6_6",
         ),
+        (
+            "shaders/stage11_rr_emissive.hlsl",
+            "stage11_rr_emissive.dxil",
+            "cs_6_6",
+        ),
     ];
     for (source, _, _) in shaders {
         println!("cargo:rerun-if-changed={source}");

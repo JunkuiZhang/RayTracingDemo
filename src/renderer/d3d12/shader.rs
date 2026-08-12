@@ -28,6 +28,10 @@ pub struct ReloadedShaders {
     pub tonemap: Vec<u8>,
     #[cfg(feature = "streamline")]
     pub dlss_compose: Vec<u8>,
+    #[cfg(feature = "streamline-rr")]
+    pub rr_input: Vec<u8>,
+    #[cfg(feature = "streamline-rr")]
+    pub rr_emissive: Vec<u8>,
     #[cfg(feature = "nrd")]
     pub nrd_prep: Vec<u8>,
     #[cfg(feature = "nrd")]
@@ -81,6 +85,25 @@ impl ShaderReloader {
                 "cs_6_6",
                 None,
             ));
+            descriptions
+        };
+        #[cfg(feature = "streamline-rr")]
+        let descriptions = {
+            let mut descriptions = descriptions;
+            descriptions.extend([
+                (
+                    "stage11_rr_input.hlsl",
+                    "stage11_rr_input.dxil",
+                    "cs_6_6",
+                    None,
+                ),
+                (
+                    "stage11_rr_emissive.hlsl",
+                    "stage11_rr_emissive.dxil",
+                    "cs_6_6",
+                    None,
+                ),
+            ]);
             descriptions
         };
         #[cfg(feature = "nrd")]
@@ -183,6 +206,9 @@ impl ShaderReloader {
                 )
             })
         };
+        let nrd_base = 5
+            + usize::from(cfg!(feature = "streamline"))
+            + 2 * usize::from(cfg!(feature = "streamline-rr"));
         let shaders = ReloadedShaders {
             raytracing: match read(0) {
                 Ok(value) => value,
@@ -209,13 +235,23 @@ impl ShaderReloader {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             },
-            #[cfg(feature = "nrd")]
-            nrd_prep: match read(if cfg!(feature = "streamline") { 6 } else { 5 }) {
+            #[cfg(feature = "streamline-rr")]
+            rr_input: match read(6) {
+                Ok(value) => value,
+                Err(error) => return Some(Err(error)),
+            },
+            #[cfg(feature = "streamline-rr")]
+            rr_emissive: match read(7) {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             },
             #[cfg(feature = "nrd")]
-            nrd_compose: match read(if cfg!(feature = "streamline") { 7 } else { 6 }) {
+            nrd_prep: match read(nrd_base) {
+                Ok(value) => value,
+                Err(error) => return Some(Err(error)),
+            },
+            #[cfg(feature = "nrd")]
+            nrd_compose: match read(nrd_base + 1) {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             },
@@ -307,6 +343,12 @@ mod tests {
             expected.push("stage10_dlss_input.hlsl");
             expected
         };
+        #[cfg(feature = "streamline-rr")]
+        let expected = {
+            let mut expected = expected;
+            expected.extend(["stage11_rr_input.hlsl", "stage11_rr_emissive.hlsl"]);
+            expected
+        };
         #[cfg(feature = "nrd")]
         let expected = {
             let mut expected = expected;
@@ -317,7 +359,9 @@ mod tests {
 
         #[cfg(feature = "nrd")]
         {
-            let nrd_base = if cfg!(feature = "streamline") { 6 } else { 5 };
+            let nrd_base = 5
+                + usize::from(cfg!(feature = "streamline"))
+                + 2 * usize::from(cfg!(feature = "streamline-rr"));
             assert!(reloader.sources[nrd_base].extra_include.is_some());
             assert!(reloader.sources[nrd_base + 1].extra_include.is_some());
         }
