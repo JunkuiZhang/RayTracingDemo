@@ -5678,6 +5678,18 @@ mod tests {
     }
 
     #[test]
+    fn streamline_primary_rays_use_only_the_submitted_global_jitter() {
+        let shader = include_str!("../../shaders/stage3_triangle.hlsl");
+
+        assert!(shader.contains("float2 PrimaryRaySampleOffset(uint2 pixel)"));
+        assert!(shader.contains("return DlssGuideMode != 0u"));
+        assert!(shader.contains("? float2(0.5, 0.5)"));
+        assert!(shader.contains(": SampleOwenSobol2D(pixel, 0u);"));
+        assert!(shader.contains("primarySampleOffset + CameraJitterPx"));
+        assert!(!shader.contains("float2 jitter = SampleOwenSobol2D(pixel, 0u);"));
+    }
+
+    #[test]
     fn nrd_glass_layers_are_denoised_before_fresnel_composition() {
         let shader = include_str!("../../shaders/stage3_triangle.hlsl");
         assert!(shader.contains("payload.psrActive == 3u"));

@@ -198,6 +198,18 @@ float2 SampleOwenSobol2D(uint2 pixel, uint dimension)
     return float2(UintToUnitFloat(x), UintToUnitFloat(y));
 }
 
+float2 PrimaryRaySampleOffset(uint2 pixel)
+{
+    // DLSS SR and Ray Reconstruction must see exactly the global projection
+    // jitter submitted through Streamline. Adding an independent per-pixel
+    // offset here creates hidden primary-coverage motion at hard silhouettes.
+    // Native rendering has no temporal-upscaler jitter contract, so it keeps
+    // the existing Owen-Sobol subpixel sampling for stochastic anti-aliasing.
+    return DlssGuideMode != 0u
+        ? float2(0.5, 0.5)
+        : SampleOwenSobol2D(pixel, 0u);
+}
+
 uint Bayer4x4Value(uint2 pixel)
 {
     static const uint values[16] = {
@@ -787,8 +799,8 @@ void RayGen()
     uint2 pixel = DispatchRaysIndex().xy;
     uint2 size = DispatchRaysDimensions().xy;
     uint seed = pixel.x * 1973u + pixel.y * 9277u + FrameIndex * 26699u + 89173u;
-    float2 jitter = SampleOwenSobol2D(pixel, 0u);
-    float2 uv = (float2(pixel) + jitter + CameraJitterPx) / float2(size);
+    float2 primarySampleOffset = PrimaryRaySampleOffset(pixel);
+    float2 uv = (float2(pixel) + primarySampleOffset + CameraJitterPx) / float2(size);
     float2 screen = uv * 2.0 - 1.0;
     screen.x *= float(size.x) / float(size.y);
 
