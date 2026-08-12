@@ -1,12 +1,12 @@
-// Stage 11D adapter: the path tracer stores normal.xyz as [0,1] for its
-// reconstruction contract, while DLSS RR requires a signed normalized world
-// normal and linear roughness in the alpha channel. Keep this conversion in a
-// separate pass so the DXR shader and the SVGF/NRD contracts remain unchanged.
+// Stage 11D adapter: normalize RR's guide contract and split deterministic
+// directly visible emission from stochastic radiance before reconstruction.
+// Keeping this in a separate pass leaves the DXR and SVGF/NRD ABIs unchanged.
 Texture2D<float4> ReconstructionNormalRoughness : register(t0);
 Texture2D<float4> ReconstructionNoisyHdr : register(t1);
-Texture2D<float4> PrimaryEmissive : register(t2);
+Texture2D<float4> PrimarySurface : register(t2);
 RWTexture2D<float4> PackedNormalRoughness : register(u0);
 RWTexture2D<float4> RrNoisyHdr : register(u1);
+RWTexture2D<float4> RrPrimaryEmissive : register(u2);
 
 cbuffer AdapterConstants : register(b0)
 {
@@ -55,8 +55,14 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
     // separately stabilized layer is composited after RR. Reflected emission
     // remains in NoisyHdr because PrimaryEmissive is written only at depth 0.
     float3 noisyHdr = ReconstructionNoisyHdr.Load(int3(dispatchId.xy, 0)).xyz;
-    float3 primaryEmissive = PrimaryEmissive.Load(int3(dispatchId.xy, 0)).xyz;
+    float primaryKind = PrimarySurface.Load(int3(dispatchId.xy, 0)).w;
     noisyHdr = all(isfinite(noisyHdr)) ? max(noisyHdr, 0.0) : 0.0;
-    primaryEmissive = all(isfinite(primaryEmissive)) ? max(primaryEmissive, 0.0) : 0.0;
+    // GBufferAlbedo.a is the explicit first-hit material class. On a direct
+    // emissive hit the complete noisy signal is emitted radiance; extracting
+    // it here avoids relying on the NRD-specific primary-emission UAV.
+    bool directlyVisibleEmissive = isfinite(primaryKind)
+        && abs(primaryKind - 3.0) < 0.25;
+    float3 primaryEmissive = directlyVisibleEmissive ? noisyHdr : 0.0;
     RrNoisyHdr[dispatchId.xy] = float4(max(noisyHdr - primaryEmissive, 0.0), 1.0);
+    RrPrimaryEmissive[dispatchId.xy] = float4(primaryEmissive, 1.0);
 }

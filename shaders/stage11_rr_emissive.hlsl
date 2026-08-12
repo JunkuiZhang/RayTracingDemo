@@ -144,7 +144,7 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 
     bool previousValid = Finite3(previous.xyz)
         && isfinite(previous.w) && previous.w > 0.0;
-    float historyCount = previousValid ? min(previous.w, MaxHistorySamples - 1.0) : 0.0;
+    float historyCount = previousValid ? min(previous.w, MaxHistorySamples) : 0.0;
     float motionMagnitude = length(outputMotion);
     if (motionMagnitude > 2.0)
     {
@@ -157,15 +157,25 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
         historyCount = min(historyCount, 4.0);
     }
 
-    // Clamp reprojected radiance to the current 2x2 footprint. This rejects
-    // stale light coverage at disocclusions without erasing legitimate
-    // fractional coverage along a stationary light silhouette.
-    float3 clampedPrevious = clamp(
-        previousValid ? previous.xyz : current,
-        neighborhoodMinimum,
-        neighborhoodMaximum);
-    float historyWeight = historyCount / (historyCount + 1.0);
-    float3 resolved = lerp(current, clampedPrevious, historyWeight);
+    bool stationaryProjection = motionMagnitude <= 0.01;
+    // A changing jitter sample is not a disocclusion. Clamping a stationary
+    // silhouette to the current binary footprint would erase the accumulated
+    // subpixel coverage and reintroduce the exact edge flicker this pass owns.
+    // Moving projections still need the clamp to prevent emissive trails.
+    float3 acceptedPrevious = previousValid ? previous.xyz : current;
+    if (!stationaryProjection)
+    {
+        acceptedPrevious = clamp(
+            acceptedPrevious,
+            neighborhoodMinimum,
+            neighborhoodMaximum);
+    }
+    // Once a static edge has enough samples, copy the previous solution
+    // exactly. This also synchronizes both ping-pong histories and makes a
+    // truly static lamp bit-stable instead of retaining a perpetual 1/64 EMA.
+    bool converged = stationaryProjection && historyCount >= MaxHistorySamples;
+    float historyWeight = converged ? 1.0 : historyCount / (historyCount + 1.0);
+    float3 resolved = lerp(current, acceptedPrevious, historyWeight);
     CurrentHistory[dispatchId.xy] = float4(
         max(Finite3(resolved) ? resolved : current, 0.0),
         min(historyCount + 1.0, MaxHistorySamples));

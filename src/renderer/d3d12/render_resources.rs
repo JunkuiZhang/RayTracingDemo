@@ -105,8 +105,11 @@ pub(super) struct RrGenerationResources {
     /// RR input after directly visible primary emission has been removed.
     /// Reflected emissive radiance remains part of this stochastic signal.
     pub(super) input_hdr: TrackedResource,
-    /// RR consumes the unfiltered noisy HDR signal directly. This output is
-    /// the only HDR signal handed to ToneMap when the RR path is active.
+    /// Directly visible emission extracted from NoisyHdr using the explicit
+    /// first-hit material class. This is the low-resolution stabilization input.
+    pub(super) primary_emissive: TrackedResource,
+    /// RR's reconstructed stochastic HDR output. ToneMap combines it with the
+    /// independent primary-emission history when the RR path is active.
     pub(super) output_hdr: TrackedResource,
     /// Output-resolution primary-emission histories. RGB is resolved HDR
     /// emission and alpha is the bounded temporal sample count.
@@ -405,6 +408,12 @@ impl RenderResourceGeneration {
                     render_extent,
                     DXGI_FORMAT_R16G16B16A16_FLOAT,
                     format!("代际 {id} DLSS RR 分层 HDR 输入"),
+                )?,
+                primary_emissive: create_uav_texture(
+                    device,
+                    render_extent,
+                    DXGI_FORMAT_R16G16B16A16_FLOAT,
+                    format!("代际 {id} DLSS RR primary emissive"),
                 )?,
                 output_hdr: create_uav_texture(
                     device,
@@ -1062,9 +1071,9 @@ impl RenderResourceGeneration {
             let input_srvs = [
                 reconstruction_normal_roughness,
                 reconstruction_noisy_hdr,
-                reconstruction_primary_emissive,
+                albedo,
             ];
-            let input_uavs = [&rr.normal_roughness, &rr.input_hdr];
+            let input_uavs = [&rr.normal_roughness, &rr.input_hdr, &rr.primary_emissive];
             unsafe {
                 populate_texture_table(
                     device,
@@ -1077,7 +1086,7 @@ impl RenderResourceGeneration {
             for current_index in 0..2 {
                 let previous_index = 1 - current_index;
                 let emissive_srvs = [
-                    reconstruction_primary_emissive,
+                    &rr.primary_emissive,
                     &rr.motion,
                     &rr.emissive_history[previous_index],
                 ];
@@ -1093,9 +1102,9 @@ impl RenderResourceGeneration {
 
                 let rr_tonemap_srvs = [
                     &rr.output_hdr,
-                    // Prepared for the RR-only post-reconstruction composite.
-                    // The first infrastructure commit intentionally leaves
-                    // InputMode 3 energy unchanged until the split is enabled.
+                    // RR reconstructs the stochastic HDR lobes; directly
+                    // visible emission is stabilized independently and added
+                    // exactly once by ToneMap's RR-only composite path.
                     &rr.emissive_history[current_index],
                     raw_diffuse,
                     raw_specular,

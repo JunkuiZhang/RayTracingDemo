@@ -399,7 +399,7 @@ fn parse_capture_after_spp(value: &str) -> Result<u32, String> {
 fn parse_debug_view(value: &str) -> Result<DebugView, String> {
     DebugView::from_name(value).ok_or_else(|| {
         format!(
-            "无效的 --debug-view：{value}（支持 final、raw、albedo、normal-roughness、depth、motion、variance、history-rejection、history-length、object-material-id、specular-hit-distance、nrd-validation、specular-motion）"
+            "无效的 --debug-view：{value}（支持 final、raw、albedo、normal-roughness、depth、motion、variance、history-rejection、history-length、object-material-id、specular-hit-distance、nrd-validation、specular-motion、rr-primary-emissive）"
         )
     })
 }

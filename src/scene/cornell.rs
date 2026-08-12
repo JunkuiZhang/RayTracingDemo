@@ -18,7 +18,13 @@ pub fn create() -> SceneAsset {
             emissive_factor: [7.0; 3],
             ior: 1.5,
             kind: MaterialKind::Emissive,
-            double_sided: false,
+            // This mesh is both the sampled area light and its visible lamp
+            // surface. Keep it camera-visible from the Cornell interior even
+            // if the imported winding convention classifies that side as a
+            // back face; otherwise primary rays expose the near-coplanar
+            // ceiling hotspot behind it and turn 1-SPP direct-light variance
+            // into an unstable fake lamp edge.
+            double_sided: true,
             base_color_texture: None,
             metallic_roughness_texture: None,
             normal_texture: None,

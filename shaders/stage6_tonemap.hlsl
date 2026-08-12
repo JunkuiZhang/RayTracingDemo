@@ -19,9 +19,10 @@ cbuffer ToneMapConstants : register(b0)
 {
     uint DebugMode;
     float Exposure;
-    // 0 = SVGF split signal, 1 = NRD split radiance, 2 = already-composed HDR.
-    // DLSS consumes the split signal before this pass and therefore returns a
-    // single composed HDR texture that must never be added a second time.
+    // 0 = SVGF split signal, 1 = NRD split radiance, 2 = composed DLSS SR HDR,
+    // 3 = RR-reconstructed HDR plus an independent primary-emission layer.
+    // DLSS SR returns a complete HDR texture. RR instead excludes direct
+    // emissive coverage so it can be stabilized and added exactly once here.
     uint InputMode;
 };
 
@@ -149,8 +150,18 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         }
         if (InputMode >= 2u)
         {
-            // The DLSS input pass has already composed diffuse + specular.
-            color = ToneMap(diffuse);
+            float3 composed = diffuse;
+            if (InputMode == 3u)
+            {
+                // On the RR table t1 is an output-resolution, unjittered
+                // primary-emission history rather than a specular lobe.
+                float3 stableEmissive = FilteredSpecular.Load(int3(pixel, 0)).xyz;
+                stableEmissive = all(isfinite(stableEmissive))
+                    ? max(stableEmissive, 0.0)
+                    : 0.0;
+                composed += stableEmissive;
+            }
+            color = ToneMap(composed);
         }
         else
         {
@@ -252,6 +263,15 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
             : LoadBilinear(NrdValidation, pixel, size, renderSize)).xy;
         color = InputMode == 3u
             ? float3(saturate(abs(specularMotion) * 0.05), 0.0)
+            : 0.0.xxx;
+    }
+    else if (DebugMode == 13u)
+    {
+        // t1 is the independently stabilized output-resolution layer only on
+        // RR. Other reconstruction paths deliberately show black here.
+        float3 stableEmissive = FilteredSpecular.Load(int3(pixel, 0)).xyz;
+        color = InputMode == 3u
+            ? ToneMap(all(isfinite(stableEmissive)) ? max(stableEmissive, 0.0) : 0.0)
             : 0.0.xxx;
     }
     else

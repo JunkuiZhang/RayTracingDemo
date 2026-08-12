@@ -457,6 +457,15 @@ mod tests {
                 .enumerate()
                 .all(|(index, instance)| instance.stable_id == index as u32)
         );
+        let area_light = scene
+            .materials
+            .iter()
+            .find(|material| material.kind == MaterialKind::Emissive)
+            .expect("Cornell scene owns one visible area-light material");
+        assert!(
+            area_light.double_sided,
+            "the sampled area light must also remain primary-ray visible"
+        );
     }
 
     #[test]

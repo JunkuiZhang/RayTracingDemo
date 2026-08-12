@@ -17,10 +17,11 @@ pub enum DebugView {
     SpecularHitDistance = 10,
     NrdValidation = 11,
     SpecularMotion = 12,
+    RrPrimaryEmissive = 13,
 }
 
 impl DebugView {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Final,
         Self::Raw,
         Self::Albedo,
@@ -34,6 +35,7 @@ impl DebugView {
         Self::SpecularHitDistance,
         Self::NrdValidation,
         Self::SpecularMotion,
+        Self::RrPrimaryEmissive,
     ];
 
     pub const fn from_index(index: u32) -> Option<Self> {
@@ -51,6 +53,7 @@ impl DebugView {
             10 => Some(Self::SpecularHitDistance),
             11 => Some(Self::NrdValidation),
             12 => Some(Self::SpecularMotion),
+            13 => Some(Self::RrPrimaryEmissive),
             _ => None,
         }
     }
@@ -70,6 +73,7 @@ impl DebugView {
             "specular-hit-distance" => Some(Self::SpecularHitDistance),
             "nrd-validation" => Some(Self::NrdValidation),
             "specular-motion" => Some(Self::SpecularMotion),
+            "rr-primary-emissive" => Some(Self::RrPrimaryEmissive),
             _ => None,
         }
     }
@@ -97,6 +101,7 @@ impl DebugView {
             Self::SpecularHitDistance => "specular-hit-distance",
             Self::NrdValidation => "nrd-validation",
             Self::SpecularMotion => "specular-motion",
+            Self::RrPrimaryEmissive => "rr-primary-emissive",
         }
     }
 
@@ -115,6 +120,7 @@ impl DebugView {
             Self::SpecularHitDistance => "镜面命中距离",
             Self::NrdValidation => "NRD guide validation",
             Self::SpecularMotion => "RR 镜面运动矢量",
+            Self::RrPrimaryEmissive => "RR 稳定 primary emissive",
         }
     }
 
@@ -138,7 +144,7 @@ mod tests {
             assert_eq!(DebugView::from_name(view.name()), Some(view));
             assert!(!view.title().is_empty());
         }
-        assert_eq!(DebugView::from_index(13), None);
+        assert_eq!(DebugView::from_index(14), None);
         assert_eq!(DebugView::from_name("unknown"), None);
     }
 

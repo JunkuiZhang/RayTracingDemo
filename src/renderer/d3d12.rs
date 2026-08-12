@@ -1067,7 +1067,7 @@ const SHADER_DESCRIPTOR_COUNT: usize = 363;
 #[cfg(all(feature = "streamline", not(feature = "streamline-rr")))]
 const SHADER_DESCRIPTOR_COUNT: usize = 386;
 #[cfg(feature = "streamline-rr")]
-const SHADER_DESCRIPTOR_COUNT: usize = 429;
+const SHADER_DESCRIPTOR_COUNT: usize = 430;
 const DXR_UAV_REGISTER_COUNT: usize = 32;
 const RECONSTRUCTION_DIFFUSE_HIT_DISTANCE_UAV_REGISTER: usize = 15;
 const RECONSTRUCTION_SPECULAR_HIT_DISTANCE_UAV_REGISTER: usize = 16;
@@ -1164,9 +1164,9 @@ const DLSS_TONEMAP_TABLE_BASE: usize = 371;
 #[cfg(feature = "streamline-rr")]
 const RR_INPUT_TABLE_BASE: usize = 386;
 #[cfg(feature = "streamline-rr")]
-const RR_EMISSIVE_TABLE_BASES: [usize; 2] = [391, 395];
+const RR_EMISSIVE_TABLE_BASES: [usize; 2] = [392, 396];
 #[cfg(feature = "streamline-rr")]
-const RR_TONEMAP_TABLE_BASES: [usize; 2] = [399, 414];
+const RR_TONEMAP_TABLE_BASES: [usize; 2] = [400, 415];
 
 #[cfg(feature = "nrd")]
 fn bridge_resource(resource: &TrackedResource) -> reconstruction::NrdBridgeResource {
@@ -1659,7 +1659,7 @@ impl Dx12Renderer {
                 &device,
                 RR_INPUT_SHADER,
                 3,
-                2,
+                3,
                 1,
                 "阶段 11 DLSS RR 输入分层与 guide 适配",
             )
@@ -2606,17 +2606,19 @@ impl Dx12Renderer {
                         &mut self.transition_batch,
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     );
-                    generation
-                        .reconstruction_primary_emissive
-                        .collect_transition(
-                            &mut self.transition_batch,
-                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                        );
+                    generation.gbuffer_albedo.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
                     rr.normal_roughness.collect_transition(
                         &mut self.transition_batch,
                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     );
                     rr.input_hdr.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    );
+                    rr.primary_emissive.collect_transition(
                         &mut self.transition_batch,
                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     );
@@ -2648,6 +2650,20 @@ impl Dx12Renderer {
                 );
                 self.command_list
                     .Dispatch(render_groups_x, render_groups_y, 1);
+                // The adapter produces the low-resolution emissive layer that
+                // the following output-resolution pass samples immediately.
+                // An explicit UAV->SRV transition provides both ordering and
+                // the correct read state without stalling unrelated outputs.
+                self.active_generation
+                    .rr
+                    .as_mut()
+                    .expect("DLSS RR generation validated above")
+                    .primary_emissive
+                    .collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                self.submit_transition_batch(&mut command_recording_stats);
                 self.rr_emissive_pipeline.bind(
                     &self.command_list,
                     self.active_generation
@@ -2668,7 +2684,7 @@ impl Dx12Renderer {
                 let tags = {
                     let generation = &mut self.active_generation;
                     let rr = generation.rr.as_mut().unwrap();
-                    generation.reconstruction_noisy_hdr.collect_transition(
+                    rr.input_hdr.collect_transition(
                         &mut self.transition_batch,
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     );
@@ -2703,12 +2719,7 @@ impl Dx12Renderer {
                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     );
                     [
-                        streamline_resource_tag(
-                            &generation.reconstruction_noisy_hdr,
-                            3,
-                            0,
-                            render_extent,
-                        ),
+                        streamline_resource_tag(&rr.input_hdr, 3, 0, render_extent),
                         streamline_resource_tag(&rr.output_hdr, 4, 0, output_extent),
                         streamline_resource_tag(
                             &generation.reconstruction_diffuse_albedo,
@@ -5085,7 +5096,7 @@ impl Dx12Renderer {
             &self.device,
             &shaders.rr_input,
             3,
-            2,
+            3,
             1,
             "阶段 11 DLSS RR 输入分层与 guide 适配",
         )?;
@@ -5611,7 +5622,9 @@ mod tests {
         let shader = include_str!("../../shaders/stage11_rr_input.hlsl");
         assert!(shader.contains("ReconstructionNormalRoughness.GetDimensions"));
         assert!(shader.contains("dispatchId.x >= sourceWidth || dispatchId.y >= sourceHeight"));
+        assert!(shader.contains("abs(primaryKind - 3.0) < 0.25"));
         assert!(shader.contains("max(noisyHdr - primaryEmissive, 0.0)"));
+        assert!(shader.contains("RrPrimaryEmissive[dispatchId.xy]"));
 
         let (normal, roughness) = decode([0.5, 0.5, 1.0, 0.25]);
         assert_eq!(normal, [0.0, 0.0, 1.0]);
@@ -5636,9 +5649,12 @@ mod tests {
         assert!(shader.contains("- 0.5 - CameraJitterPx"));
         assert!(shader.contains("previousPosition = float2(dispatchId.xy) + outputMotion"));
         assert!(shader.contains("ResetHistory == 0u && previousInBounds"));
-        assert!(shader.contains("clamp(\n        previousValid ? previous.xyz : current"));
+        assert!(shader.contains("if (!stationaryProjection)"));
+        assert!(shader.contains("acceptedPrevious = clamp("));
         assert!(shader.contains("MaxHistorySamples = 64.0"));
         assert!(shader.contains("motionMagnitude > 2.0"));
+        assert!(shader.contains("stationaryProjection && historyCount >= MaxHistorySamples"));
+        assert!(shader.contains("converged ? 1.0"));
     }
 
     #[test]
@@ -5654,7 +5670,11 @@ mod tests {
 
         let shader = include_str!("../../shaders/stage6_tonemap.hlsl");
         assert!(shader.contains("if (InputMode >= 2u)"));
-        assert!(shader.contains("color = ToneMap(diffuse);"));
+        assert!(shader.contains("if (InputMode == 3u)"));
+        assert!(shader.contains("composed += stableEmissive"));
+
+        let renderer = include_str!("d3d12.rs");
+        assert!(renderer.contains("streamline_resource_tag(&rr.input_hdr, 3"));
 
         let resources = include_str!("d3d12/render_resources.rs");
         assert!(resources.contains("DLSS_TONEMAP_TABLE_BASE + 1"));
@@ -5717,7 +5737,7 @@ mod tests {
         }
         #[cfg(feature = "streamline-rr")]
         {
-            ranges.push((RR_INPUT_TABLE_BASE, RR_INPUT_TABLE_BASE + 5));
+            ranges.push((RR_INPUT_TABLE_BASE, RR_INPUT_TABLE_BASE + 6));
             for base in RR_EMISSIVE_TABLE_BASES {
                 ranges.push((base, base + 4));
             }
