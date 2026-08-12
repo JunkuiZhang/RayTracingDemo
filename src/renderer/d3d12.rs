@@ -4670,7 +4670,9 @@ mod tests {
         ));
         let shader = include_str!("../../shaders/stage3_triangle.hlsl");
         assert!(shader.contains("minimumProbability = useNrdProbabilisticLobe ? 0.25 : 0.05"));
-        assert!(shader.contains("NrdEnabled != 0u && payload.depth == 0u"));
+        assert!(shader.contains("(payload.depth == 0u || isPsrSurface)"));
+        assert!(shader.contains("WritePsrSurfaceGuides"));
+        assert!(shader.contains("child.psrActive == 2u"));
         assert!(shader.contains("only the selected in-lobe hitT is exported"));
     }
 

@@ -99,6 +99,14 @@ struct Payload
     float hitDistance;
     float3 rawDiffuse;
     float3 rawSpecular;
+    // NRD Primary Surface Replacement (PSR) state. A single planar mirror is
+    // deliberately stored as a plane instead of a full affine transform to
+    // keep the recursive DXR payload below 96 bytes on laptop GPUs. A second
+    // consecutive mirror falls back to the ordinary specular signal.
+    uint psrActive;
+    uint sampleDimensionOffset;
+    float3 psrThroughput;
+    float4 psrMirrorPlane;
 };
 
 uint RandomUint(inout uint state)
@@ -402,6 +410,112 @@ float3 FiniteNonNegative(float3 value)
     return all(isfinite(value)) ? max(value, 0.0.xxx) : 0.0.xxx;
 }
 
+float4 MakeMirrorPlane(float3 normal, float3 planePoint)
+{
+    // Reflecting geometry across the mirror plane unfolds the reflected ray
+    // into a straight camera ray. XYZ is the unit plane normal and W is the
+    // signed plane distance in the n dot x = d convention.
+    float3 n = normalize(normal);
+    return float4(n, dot(n, planePoint));
+}
+
+float3 ReflectPointAcrossPlane(float4 plane, float3 position)
+{
+    return position - 2.0 * (dot(plane.xyz, position) - plane.w) * plane.xyz;
+}
+
+float3 ReflectVectorAcrossPlane(float4 plane, float3 vector)
+{
+    return vector - 2.0 * dot(plane.xyz, vector) * plane.xyz;
+}
+
+void WritePsrSurfaceGuides(
+    Payload payload,
+    float3 physicalPosition,
+    float3 previousPhysicalPosition,
+    float3 physicalNormal,
+    float3 baseColor,
+    float metallic,
+    float roughness,
+    float3 emissive,
+    uint kind,
+    uint stableSurfaceId)
+{
+    uint2 pixel = DispatchRaysIndex().xy;
+    uint2 size = DispatchRaysDimensions().xy;
+    float3 virtualPosition = ReflectPointAcrossPlane(payload.psrMirrorPlane, physicalPosition);
+    // The current mirror transform is also applied to the previous physical
+    // hit. Animated/rotating mirrors must reset history until a previous-frame
+    // reflection transform is carried separately; static Cornell mirrors are
+    // exact under this representation.
+    float3 previousVirtualPosition = ReflectPointAcrossPlane(
+        payload.psrMirrorPlane,
+        previousPhysicalPosition);
+    float3 virtualNormal = normalize(ReflectVectorAcrossPlane(
+        payload.psrMirrorPlane,
+        physicalNormal));
+    if (dot(virtualNormal, CameraPosition - virtualPosition) < 0.0)
+        virtualNormal = -virtualNormal;
+
+    float2 currentUv = ProjectToCurrentUv(virtualPosition, size);
+    float2 previousUv = ProjectToPreviousUv(previousVirtualPosition, size);
+    float2 svgfMotion = ResetHistory != 0u
+        ? 0
+        : (currentUv - previousUv) * float2(size);
+
+    float3 cameraForward;
+    float3 cameraRight;
+    float3 cameraUp;
+    CameraBasis(CameraYaw, CameraPitch, cameraForward, cameraRight, cameraUp);
+    float3 previousCameraForward;
+    float3 previousCameraRight;
+    float3 previousCameraUp;
+    CameraBasis(
+        PreviousCameraYaw,
+        PreviousCameraPitch,
+        previousCameraForward,
+        previousCameraRight,
+        previousCameraUp);
+    float viewZ = dot(virtualPosition - CameraPosition, cameraForward);
+    float previousViewZ = dot(
+        previousVirtualPosition - PreviousCameraPosition,
+        previousCameraForward);
+    float3 viewDirection = normalize(CameraPosition - virtualPosition);
+    float NoV = saturate(dot(virtualNormal, viewDirection));
+    float3 f0 = lerp(0.04.xxx, baseColor, metallic);
+
+    // Replace the complete application G-buffer only while NRD is active.
+    // This keeps validation views coherent with the virtual reconstruction
+    // surface without changing the feature-off/SVGF shading path.
+    GBufferAlbedo[pixel] = float4(baseColor, float(kind));
+    GBufferNormalRoughness[pixel] = float4(virtualNormal * 0.5 + 0.5, roughness);
+    GBufferDepth[pixel] = length(virtualPosition - CameraPosition);
+    GBufferMotion[pixel] = svgfMotion;
+    GBufferId[pixel] = stableSurfaceId;
+    GBufferWorldPosition[pixel] = float4(virtualPosition, 1.0);
+    GBufferHitDistance[pixel] = 0.0;
+
+    ReconstructionDiffuseAlbedo[pixel] = float4(
+        FiniteNonNegative(baseColor * (1.0 - metallic)),
+        metallic);
+    ReconstructionSpecularAlbedo[pixel] = float4(
+        FiniteNonNegative(ComputeReconstructionSpecularAlbedo(f0, roughness, NoV)),
+        float(kind));
+    ReconstructionNormalRoughness[pixel] = float4(
+        virtualNormal * 0.5 + 0.5,
+        roughness);
+    ReconstructionViewZ[pixel] = viewZ > 0.0 && isfinite(viewZ) ? viewZ : 1001.0;
+    ReconstructionMotion[pixel] = ResetHistory != 0u
+        ? 0
+        : float4(
+            (previousUv - currentUv) * float2(size),
+            previousViewZ - viewZ,
+            0.0);
+    ReconstructionPrimaryEmissive[pixel] = float4(
+        FiniteNonNegative(payload.psrThroughput * emissive),
+        1.0);
+}
+
 float3 SampleGgxVndfDirection(
     float3 normal,
     float3 viewDirection,
@@ -471,6 +585,10 @@ void RayGen()
     payload.hitDistance = 0;
     payload.rawDiffuse = 0;
     payload.rawSpecular = 0;
+    payload.psrActive = 0;
+    payload.sampleDimensionOffset = 0;
+    payload.psrThroughput = 0;
+    payload.psrMirrorPlane = 0;
 
     GBufferAlbedo[pixel] = 0;
     GBufferNormalRoughness[pixel] = 0;
@@ -591,6 +709,24 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     float3 hitPosition = mul(ObjectToWorld3x4(), float4(localPosition, 1.0));
     float3 previousHitPosition = PreviousWorldPosition(localPosition, instanceData);
     payload.hitDistance = RayTCurrent();
+    bool isPsrSurface = NrdEnabled != 0u
+        && payload.psrActive != 0u
+        && kind != 1u;
+
+    if (isPsrSurface)
+    {
+        WritePsrSurfaceGuides(
+            payload,
+            hitPosition,
+            previousHitPosition,
+            normal,
+            baseColor.xyz,
+            metallic,
+            roughness,
+            emissive,
+            kind,
+            instanceData.stableSurfaceId);
+    }
 
     if (payload.depth == 0)
     {
@@ -671,7 +807,16 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
             weight = bsdfSquared / max(bsdfSquared + lightPdf * lightPdf, 1.0e-7);
         }
         payload.radiance = emissive * weight;
-        if (payload.depth == 0)
+        if (isPsrSurface)
+        {
+            payload.rawDiffuse = 0;
+            payload.rawSpecular = payload.psrThroughput * payload.radiance;
+            payload.psrActive = 2u;
+            ReconstructionNoisyHdr[DispatchRaysIndex().xy] = float4(
+                FiniteNonNegative(payload.rawSpecular),
+                1.0);
+        }
+        else if (payload.depth == 0)
         {
             payload.rawSpecular = payload.radiance;
             ReconstructionNoisyHdr[DispatchRaysIndex().xy] = float4(
@@ -691,7 +836,11 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     float3 directSpecular = 0;
     float diffuseHitDistance = 0.0;
     float specularHitDistance = 0.0;
-    bool useNrdProbabilisticLobe = NrdEnabled != 0u && payload.depth == 0u;
+    // A PSR hit is the primary surface from NRD's point of view, even though it
+    // appears at a later physical bounce. Apply the same lobe stratification
+    // and in-lobe hit-distance rules there rather than at the hidden mirror.
+    bool useNrdProbabilisticLobe = NrdEnabled != 0u
+        && (payload.depth == 0u || isPsrSurface);
     if (kind == 0u)
     {
         // Spend extra visibility rays only after a path starts in the
@@ -896,6 +1045,17 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     child.hitDistance = 0;
     child.rawDiffuse = 0;
     child.rawSpecular = 0;
+    child.psrActive = 0;
+    child.sampleDimensionOffset = payload.sampleDimensionOffset;
+    child.psrThroughput = 0;
+    child.psrMirrorPlane = 0;
+
+    if (NrdEnabled != 0u && kind == 1u && payload.depth == 0u && payload.psrActive == 0u)
+    {
+        child.psrActive = 1u;
+        child.psrThroughput = baseColor.xyz;
+        child.psrMirrorPlane = MakeMirrorPlane(normal, hitPosition);
+    }
     TraceRay(
         Scene,
         RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
@@ -907,12 +1067,18 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         child);
     payload.seed = child.seed;
     float3 bouncedRadiance = bounceWeight * child.radiance;
+    float3 localRawDiffuse = directDiffuse + diffuseBounceWeight * child.radiance;
+    float3 localRawSpecular = emissive
+        + directSpecular
+        + specularBounceWeight * child.radiance;
+    bool primaryUsesPsr = NrdEnabled != 0u
+        && payload.depth == 0u
+        && kind == 1u
+        && child.psrActive == 2u;
     if (payload.depth == 0)
     {
-        payload.rawDiffuse = directDiffuse + diffuseBounceWeight * child.radiance;
-        payload.rawSpecular = emissive
-            + directSpecular
-            + specularBounceWeight * child.radiance;
+        payload.rawDiffuse = primaryUsesPsr ? child.rawDiffuse : localRawDiffuse;
+        payload.rawSpecular = primaryUsesPsr ? child.rawSpecular : localRawSpecular;
         // SVGF keeps the low-variance mixture estimator and therefore shares
         // the continuation hitT across both non-zero lobe estimates. NRD uses
         // a Bayer-stratified probabilistic lobe estimator: the skipped lobe is
@@ -926,10 +1092,30 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
             FiniteNonNegative(payload.rawDiffuse + payload.rawSpecular),
             1.0);
     }
+    else if (isPsrSurface)
+    {
+        // Split radiance at the virtual primary surface, not at the mirror.
+        // Mirror tint is path throughput and therefore stays in the signal;
+        // the PSR material factors describe only the visible replacement hit.
+        payload.rawDiffuse = payload.psrThroughput * localRawDiffuse;
+        payload.rawSpecular = payload.psrThroughput * localRawSpecular;
+        payload.psrActive = 2u;
+        ReconstructionNoisyHdr[DispatchRaysIndex().xy] = float4(
+            FiniteNonNegative(payload.rawDiffuse + payload.rawSpecular),
+            1.0);
+    }
     if (payload.depth == 0)
     {
         if (sampledSpecular)
             GBufferHitDistance[DispatchRaysIndex().xy] = child.hitDistance;
+        if (!primaryUsesPsr)
+        {
+            ReconstructionDiffuseHitDistance[DispatchRaysIndex().xy] = diffuseHitDistance;
+            ReconstructionSpecularHitDistance[DispatchRaysIndex().xy] = specularHitDistance;
+        }
+    }
+    else if (isPsrSurface)
+    {
         ReconstructionDiffuseHitDistance[DispatchRaysIndex().xy] = diffuseHitDistance;
         ReconstructionSpecularHitDistance[DispatchRaysIndex().xy] = specularHitDistance;
     }

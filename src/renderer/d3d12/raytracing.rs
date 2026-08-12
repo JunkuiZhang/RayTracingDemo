@@ -1183,7 +1183,10 @@ impl RaytracingPipeline {
             IntersectionShaderImport: PCWSTR::null(),
         };
         let shader_config = D3D12_RAYTRACING_SHADER_CONFIG {
-            MaxPayloadSizeInBytes: 64,
+            // The 92-byte payload includes NRD PSR's mirror plane and path
+            // throughput. Keep a small aligned ceiling for laptop GPUs;
+            // increasing this value further directly raises DXR payload cost.
+            MaxPayloadSizeInBytes: 96,
             MaxAttributeSizeInBytes: 8,
         };
         let global_root = D3D12_GLOBAL_ROOT_SIGNATURE {
@@ -1481,6 +1484,24 @@ mod tests {
 
     fn fresnel_schlick(cosine: f32, f0: f32) -> f32 {
         f0 + (1.0 - f0) * (1.0 - cosine.clamp(0.0, 1.0)).powi(5)
+    }
+
+    fn reflect_point_across_plane(
+        point: glam::Vec3,
+        normal: glam::Vec3,
+        plane_distance: f32,
+    ) -> glam::Vec3 {
+        point - 2.0 * (normal.dot(point) - plane_distance) * normal
+    }
+
+    #[test]
+    fn planar_psr_unfolding_is_an_involution() {
+        let normal = glam::Vec3::Z;
+        let physical_hit = glam::Vec3::new(0.25, -0.4, -3.0);
+        let virtual_hit = reflect_point_across_plane(physical_hit, normal, 0.0);
+        assert!((virtual_hit - glam::Vec3::new(0.25, -0.4, 3.0)).length() < 1.0e-6);
+        let round_trip = reflect_point_across_plane(virtual_hit, normal, 0.0);
+        assert!((round_trip - physical_hit).length() < 1.0e-6);
     }
 
     #[test]
