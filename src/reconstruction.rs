@@ -57,6 +57,20 @@ impl DenoiserBackend {
         cfg!(feature = "nrd")
     }
 
+    /// Select the F3 peer that is actually usable in the current Streamline
+    /// session. RR is opt-in at `slInit`, so a normal SVGF/NRD launch must not
+    /// pretend it can enter RR later; an RR launch can safely A/B back to RR
+    /// after temporarily using SVGF + DLSS SR.
+    pub const fn next_runtime_backend(self, nrd_available: bool, rr_loaded: bool) -> Option<Self> {
+        match self {
+            Self::DlssRayReconstruction => Some(Self::Svgf),
+            Self::Svgf if rr_loaded => Some(Self::DlssRayReconstruction),
+            Self::Svgf if nrd_available => Some(Self::NrdReblur),
+            Self::NrdReblur => Some(Self::Svgf),
+            Self::Svgf => None,
+        }
+    }
+
     pub fn requested_startup_error(self) -> Option<String> {
         match self {
             Self::Svgf => None,
@@ -415,6 +429,30 @@ mod tests {
         assert_eq!(DenoiserBackend::NrdReblur.as_str(), "nrd-reblur");
         assert_eq!(DenoiserBackend::DlssRayReconstruction.as_str(), "dlss-rr");
         assert_eq!(DenoiserBackend::Svgf.nrd_compiled(), cfg!(feature = "nrd"));
+    }
+
+    #[test]
+    fn runtime_backend_cycle_respects_loaded_optional_plugins() {
+        assert_eq!(
+            DenoiserBackend::DlssRayReconstruction.next_runtime_backend(false, true),
+            Some(DenoiserBackend::Svgf)
+        );
+        assert_eq!(
+            DenoiserBackend::Svgf.next_runtime_backend(false, true),
+            Some(DenoiserBackend::DlssRayReconstruction)
+        );
+        assert_eq!(
+            DenoiserBackend::Svgf.next_runtime_backend(true, false),
+            Some(DenoiserBackend::NrdReblur)
+        );
+        assert_eq!(
+            DenoiserBackend::NrdReblur.next_runtime_backend(true, false),
+            Some(DenoiserBackend::Svgf)
+        );
+        assert_eq!(
+            DenoiserBackend::Svgf.next_runtime_backend(false, false),
+            None
+        );
     }
 
     #[cfg(not(feature = "nrd"))]

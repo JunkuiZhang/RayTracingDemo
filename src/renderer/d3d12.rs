@@ -169,12 +169,13 @@ struct StreamlineRuntime {
     bridge: crate::streamline::Bridge,
     _support: crate::streamline::Support,
     dlss_configured: bool,
+    _rr_configured: bool,
 }
 
 #[cfg(feature = "streamline")]
 struct StreamlineViewport {
     viewport: crate::streamline::Viewport,
-    _options: crate::streamline::DlssOptions,
+    options: crate::streamline::DlssOptions,
     optimal: crate::streamline::OptimalSettings,
     #[cfg(feature = "streamline-rr")]
     rr_options: Option<crate::streamline::RrOptions>,
@@ -227,6 +228,7 @@ impl StreamlineRuntime {
         adapter: &IDXGIAdapter1,
         reflex_mode: crate::realtime::ReflexMode,
         dlss_configured: bool,
+        rr_configured: bool,
     ) -> Result<Self> {
         let adapter_description = unsafe { adapter.GetDesc1()? };
         let adapter_luid = u64::from(adapter_description.AdapterLuid.LowPart)
@@ -294,6 +296,7 @@ impl StreamlineRuntime {
             bridge,
             _support: support,
             dlss_configured,
+            _rr_configured: rr_configured,
         })
     }
 
@@ -386,6 +389,62 @@ impl StreamlineRuntime {
         Ok(())
     }
 
+    fn dlss_options(
+        mode: crate::upscaler::UpscalerMode,
+        output_extent: Extent2D,
+    ) -> Result<crate::streamline::DlssOptions> {
+        Ok(crate::streamline::DlssOptions {
+            struct_size: size_of::<crate::streamline::DlssOptions>() as u32,
+            abi_version: crate::streamline::ABI_VERSION,
+            mode: mode.dlss_mode().ok_or_else(|| {
+                streamline_error("DLSS 模式映射", crate::streamline::STATUS_INVALID_ARGUMENT)
+            })?,
+            output_width: output_extent.width,
+            output_height: output_extent.height,
+            sharpness: 0.0,
+            pre_exposure: 1.0,
+            exposure_scale: 1.0,
+            color_buffers_hdr: 1,
+            use_auto_exposure: 0,
+            alpha_upscaling_enabled: 0,
+        })
+    }
+
+    #[cfg(feature = "streamline-rr")]
+    fn rr_options(
+        mode: crate::upscaler::UpscalerMode,
+        output_extent: Extent2D,
+    ) -> Result<crate::streamline::RrOptions> {
+        Ok(crate::streamline::RrOptions {
+            struct_size: size_of::<crate::streamline::RrOptions>() as u32,
+            abi_version: crate::streamline::ABI_VERSION,
+            mode: mode.dlss_mode().ok_or_else(|| {
+                streamline_error(
+                    "DLSS RR 模式映射",
+                    crate::streamline::STATUS_INVALID_ARGUMENT,
+                )
+            })?,
+            output_width: output_extent.width,
+            output_height: output_extent.height,
+            sharpness: 0.0,
+            pre_exposure: 1.0,
+            exposure_scale: 1.0,
+            color_buffers_hdr: 1,
+            indicator_invert_axis_x: 0,
+            indicator_invert_axis_y: 0,
+            normal_roughness_mode: 1,
+            world_to_camera_view: glam::Mat4::IDENTITY.to_cols_array(),
+            camera_view_to_world: glam::Mat4::IDENTITY.to_cols_array(),
+            alpha_upscaling_enabled: 0,
+            dlaa_preset: 0,
+            quality_preset: 0,
+            balanced_preset: 0,
+            performance_preset: 0,
+            ultra_performance_preset: 0,
+            ultra_quality_preset: 0,
+        })
+    }
+
     unsafe fn create_viewport(
         &self,
         mode: crate::upscaler::UpscalerMode,
@@ -406,21 +465,7 @@ impl StreamlineRuntime {
                 format!("GPU 不支持 DLSS，SDK result={}", self._support.dlss_result),
             ));
         }
-        let options = crate::streamline::DlssOptions {
-            struct_size: size_of::<crate::streamline::DlssOptions>() as u32,
-            abi_version: crate::streamline::ABI_VERSION,
-            mode: mode.dlss_mode().ok_or_else(|| {
-                streamline_error("DLSS 模式映射", crate::streamline::STATUS_INVALID_ARGUMENT)
-            })?,
-            output_width: output_extent.width,
-            output_height: output_extent.height,
-            sharpness: 0.0,
-            pre_exposure: 1.0,
-            exposure_scale: 1.0,
-            color_buffers_hdr: 1,
-            use_auto_exposure: 0,
-            alpha_upscaling_enabled: 0,
-        };
+        let options = Self::dlss_options(mode, output_extent)?;
         let mut optimal = crate::streamline::OptimalSettings {
             struct_size: size_of::<crate::streamline::OptimalSettings>() as u32,
             abi_version: crate::streamline::ABI_VERSION,
@@ -493,7 +538,7 @@ impl StreamlineRuntime {
         }
         Ok(StreamlineViewport {
             viewport,
-            _options: options,
+            options,
             optimal,
             #[cfg(feature = "streamline-rr")]
             rr_options: None,
@@ -519,6 +564,13 @@ impl StreamlineRuntime {
                 "DLSS RR 未加载；请提供 NVIDIA 分配的 --streamline-application-id",
             ));
         }
+        if !self._rr_configured {
+            return Err(streamline_error_with_detail(
+                "DLSS RR plugin lifecycle",
+                crate::streamline::STATUS_NOT_INITIALIZED,
+                "当前 Streamline 会话未加载 RR；只能从以 --denoiser dlss-rr 启动的会话进行 RR A/B",
+            ));
+        }
         if self._support.rr_supported == 0 {
             return Err(streamline_error_with_detail(
                 "DLSS RR support",
@@ -529,34 +581,8 @@ impl StreamlineRuntime {
                 ),
             ));
         }
-        let rr_options = crate::streamline::RrOptions {
-            struct_size: size_of::<crate::streamline::RrOptions>() as u32,
-            abi_version: crate::streamline::ABI_VERSION,
-            mode: mode.dlss_mode().ok_or_else(|| {
-                streamline_error(
-                    "DLSS RR 模式映射",
-                    crate::streamline::STATUS_INVALID_ARGUMENT,
-                )
-            })?,
-            output_width: output_extent.width,
-            output_height: output_extent.height,
-            sharpness: 0.0,
-            pre_exposure: 1.0,
-            exposure_scale: 1.0,
-            color_buffers_hdr: 1,
-            indicator_invert_axis_x: 0,
-            indicator_invert_axis_y: 0,
-            normal_roughness_mode: 1,
-            world_to_camera_view: glam::Mat4::IDENTITY.to_cols_array(),
-            camera_view_to_world: glam::Mat4::IDENTITY.to_cols_array(),
-            alpha_upscaling_enabled: 0,
-            dlaa_preset: 0,
-            quality_preset: 0,
-            balanced_preset: 0,
-            performance_preset: 0,
-            ultra_performance_preset: 0,
-            ultra_quality_preset: 0,
-        };
+        let dlss_options = Self::dlss_options(mode, output_extent)?;
+        let rr_options = Self::rr_options(mode, output_extent)?;
         let mut optimal = crate::streamline::RrOptimalSettings {
             struct_size: size_of::<crate::streamline::RrOptimalSettings>() as u32,
             abi_version: crate::streamline::ABI_VERSION,
@@ -596,6 +622,23 @@ impl StreamlineRuntime {
             id,
             reserved: 0,
         };
+        // DLSSDOptions extends, rather than replaces, the compatible DLSS
+        // options. Submit the base contract first on the same viewport so the
+        // plugin sees one coherent mode/output/HDR configuration.
+        let status = unsafe {
+            crate::streamline::streamline_bridge_dlss_set_options(
+                self.bridge.as_raw(),
+                &viewport,
+                &dlss_options,
+            )
+        };
+        if status != crate::streamline::STATUS_OK {
+            return Err(streamline_error_with_detail(
+                "设置 DLSS RR compatible DLSS options",
+                status,
+                self.bridge.last_error(),
+            ));
+        }
         let status = unsafe {
             crate::streamline::streamline_bridge_rr_set_options(
                 self.bridge.as_raw(),
@@ -612,7 +655,7 @@ impl StreamlineRuntime {
         }
         Ok(StreamlineViewport {
             viewport,
-            _options: crate::streamline::DlssOptions::default(),
+            options: dlss_options,
             optimal: crate::streamline::OptimalSettings::default(),
             rr_options: Some(rr_options),
             rr_optimal: Some(optimal),
@@ -679,6 +722,23 @@ impl StreamlineRuntime {
         camera: CameraPose,
     ) -> Result<crate::streamline::FrameToken> {
         let _ = unsafe { self.begin_frame(viewport, token, input, camera)? };
+        // Keep the v2.12 DLSS + DLSSD option pair ordered on every RR frame.
+        // Most fields are stable, but resubmitting both avoids retaining a
+        // partially updated plugin state when RR matrices change below.
+        let status = unsafe {
+            crate::streamline::streamline_bridge_dlss_set_options(
+                self.bridge.as_raw(),
+                &viewport.viewport,
+                &viewport.options,
+            )
+        };
+        if status != crate::streamline::STATUS_OK {
+            return Err(streamline_error_with_detail(
+                "提交 DLSS RR compatible DLSS frame options",
+                status,
+                self.bridge.last_error(),
+            ));
+        }
         let mut options = viewport.rr_options.ok_or_else(|| {
             streamline_error(
                 "DLSS RR viewport options",
@@ -1414,6 +1474,7 @@ impl Dx12Renderer {
                     &adapter,
                     config.reflex_mode,
                     true,
+                    config.denoiser == DenoiserBackend::DlssRayReconstruction,
                 )?)
             } else {
                 None
@@ -3462,86 +3523,120 @@ impl Dx12Renderer {
     /// replaced; the old generation keeps its bridge and descriptors until
     /// its last submitted fence is complete.
     pub fn cycle_denoiser(&mut self) -> Result<()> {
-        #[cfg(not(feature = "nrd"))]
-        {
-            Err(WindowsError::new(
-                windows::core::HRESULT(0x80070057_u32 as i32),
-                "F3 切换 NRD 需要使用 cargo run --features nrd 构建",
-            ))
-        }
+        #[cfg(feature = "streamline-rr")]
+        let rr_loaded = self
+            .streamline
+            .as_ref()
+            .is_some_and(|runtime| runtime._rr_configured);
+        #[cfg(not(feature = "streamline-rr"))]
+        let rr_loaded = false;
 
-        #[cfg(feature = "nrd")]
-        {
-            let next = match self.denoiser {
-                DenoiserBackend::Svgf => DenoiserBackend::NrdReblur,
-                DenoiserBackend::NrdReblur => DenoiserBackend::Svgf,
-                // F3 exits the fused RR path but deliberately keeps the
-                // resolved DLSS quality mode for the following SR path.
-                DenoiserBackend::DlssRayReconstruction => DenoiserBackend::Svgf,
-            };
-            let generation_id = self.next_generation_id;
-            let new_generation = RenderResourceGeneration::new(
-                &self.device,
-                &self._textures,
-                &self._scene_geometry,
-                &self._acceleration_structures,
-                RenderGenerationDesc {
-                    output_extent: self.active_generation.output_extent,
-                    render_extent: self.active_generation.render_extent,
-                    id: generation_id,
-                    with_nrd: next == DenoiserBackend::NrdReblur,
-                    with_dlss_sr: !self.upscaler.is_native()
-                        && next != DenoiserBackend::DlssRayReconstruction,
-                    with_dlss_rr: next == DenoiserBackend::DlssRayReconstruction,
-                },
-            )
-            .map_err(|error| {
-                eprintln!(
-                    "denoiser_switch blocked=create_failed from={} to={} error={error}",
-                    self.denoiser.as_str(),
-                    next.as_str()
-                );
+        let next = self
+            .denoiser
+            .next_runtime_backend(cfg!(feature = "nrd"), rr_loaded)
+            .ok_or_else(|| {
                 WindowsError::new(
-                    windows::core::HRESULT(0x80004005_u32 as i32),
-                    format!("创建 denoiser generation {generation_id} 失败：{error}"),
+                    windows::core::HRESULT(0x80070057_u32 as i32),
+                    "F3 没有可用的重建后端；请启用 nrd，或从 dlss-rr 会话进行 RR/SVGF A/B",
                 )
             })?;
-            let old_name = self.denoiser.as_str();
-            let previous = std::mem::replace(&mut self.active_generation, new_generation);
-            let retire_fence = previous.last_used_fence;
-            self.retire_generation(
-                previous,
-                #[cfg(feature = "streamline")]
-                None,
-            );
-            self.next_generation_id = self.next_generation_id.saturating_add(1);
-            self.render_generation_create_count =
-                self.render_generation_create_count.saturating_add(1);
-            self.render_generation_switch_count =
-                self.render_generation_switch_count.saturating_add(1);
-            self.denoiser = next;
-            self.denoiser_switch_count = self.denoiser_switch_count.saturating_add(1);
-            self.history_index = 0;
-            self.accumulated_frames = 0;
-            self.previous_camera_position = self.camera_position;
-            self.previous_camera_yaw = self.camera_yaw;
-            self.previous_camera_pitch = self.camera_pitch;
-            self.request_history_reset();
-            self.reconstruction_frame_state = self
-                .reconstruction_frame_state
-                .reset_for_extent(self.render_width(), self.render_height());
-            if let Some(controller) = self.dynamic_resolution.as_mut() {
-                controller.reset_after_discontinuity(self.requested_render_scale);
-            }
-            self.reclaim_retired_generations();
+        let output_extent = self.active_generation.output_extent;
+
+        // A Streamline viewport owns feature-specific persistent state. Build
+        // a fresh viewport for the destination backend and later fence-retire
+        // the old viewport together with the generation that last used it.
+        #[cfg(feature = "streamline")]
+        let new_streamline_viewport = if self.upscaler.uses_streamline() {
+            let runtime = self.streamline.as_ref().ok_or_else(|| {
+                streamline_error("DLSS runtime", crate::streamline::STATUS_NOT_INITIALIZED)
+            })?;
+            let viewport_id = self.next_streamline_viewport_id;
+            let viewport = unsafe {
+                runtime.create_reconstruction_viewport(
+                    next,
+                    self.upscaler,
+                    output_extent,
+                    viewport_id,
+                )
+            }?;
+            self.next_streamline_viewport_id = viewport_id.saturating_add(1);
+            Some(viewport)
+        } else {
+            None
+        };
+        #[cfg(feature = "streamline")]
+        let new_render_extent = new_streamline_viewport.as_ref().map_or(
+            self.active_generation.render_extent,
+            StreamlineViewport::optimal_extent,
+        );
+        #[cfg(not(feature = "streamline"))]
+        let new_render_extent = self.active_generation.render_extent;
+
+        let generation_id = self.next_generation_id;
+        let new_generation = RenderResourceGeneration::new(
+            &self.device,
+            &self._textures,
+            &self._scene_geometry,
+            &self._acceleration_structures,
+            RenderGenerationDesc {
+                output_extent,
+                render_extent: new_render_extent,
+                id: generation_id,
+                with_nrd: next == DenoiserBackend::NrdReblur,
+                with_dlss_sr: !self.upscaler.is_native()
+                    && next != DenoiserBackend::DlssRayReconstruction,
+                with_dlss_rr: next == DenoiserBackend::DlssRayReconstruction,
+            },
+        )
+        .map_err(|error| {
             eprintln!(
-                "denoiser_switch from={old_name} to={} generation={} history_reset=1 idle_waits=0 retire_fence={}",
-                next.as_str(),
-                self.active_generation.id,
-                retire_fence
+                "denoiser_switch blocked=create_failed from={} to={} error={error}",
+                self.denoiser.as_str(),
+                next.as_str()
             );
-            Ok(())
+            WindowsError::new(
+                windows::core::HRESULT(0x80004005_u32 as i32),
+                format!("创建 denoiser generation {generation_id} 失败：{error}"),
+            )
+        })?;
+        let old_name = self.denoiser.as_str();
+        let previous = std::mem::replace(&mut self.active_generation, new_generation);
+        #[cfg(feature = "streamline")]
+        let previous_streamline_viewport = std::mem::replace(
+            &mut self.active_streamline_viewport,
+            new_streamline_viewport,
+        );
+        let retire_fence = previous.last_used_fence;
+        self.retire_generation(
+            previous,
+            #[cfg(feature = "streamline")]
+            previous_streamline_viewport,
+        );
+        self.next_generation_id = self.next_generation_id.saturating_add(1);
+        self.render_generation_create_count = self.render_generation_create_count.saturating_add(1);
+        self.render_generation_switch_count = self.render_generation_switch_count.saturating_add(1);
+        self.denoiser = next;
+        self.denoiser_switch_count = self.denoiser_switch_count.saturating_add(1);
+        self.history_index = 0;
+        self.accumulated_frames = 0;
+        self.previous_camera_position = self.camera_position;
+        self.previous_camera_yaw = self.camera_yaw;
+        self.previous_camera_pitch = self.camera_pitch;
+        self.request_history_reset();
+        self.reconstruction_frame_state = self
+            .reconstruction_frame_state
+            .reset_for_extent(self.render_width(), self.render_height());
+        if let Some(controller) = self.dynamic_resolution.as_mut() {
+            controller.reset_after_discontinuity(self.requested_render_scale);
         }
+        self.reclaim_retired_generations();
+        eprintln!(
+            "denoiser_switch from={old_name} to={} generation={} history_reset=1 idle_waits=0 retire_fence={}",
+            next.as_str(),
+            self.active_generation.id,
+            retire_fence
+        );
+        Ok(())
     }
 
     fn reclaim_retired_generations(&mut self) {
@@ -5331,6 +5426,33 @@ mod tests {
     #[test]
     fn camera_constants_match_the_sixteen_dword_root_constant_contract() {
         assert_eq!(size_of::<CameraConstants>(), 16 * size_of::<u32>());
+    }
+
+    #[cfg(feature = "streamline-rr")]
+    #[test]
+    fn rr_and_compatible_dlss_options_share_one_viewport_contract() {
+        let output_extent = Extent2D {
+            width: 1920,
+            height: 1080,
+        };
+        let dlss = StreamlineRuntime::dlss_options(
+            crate::upscaler::UpscalerMode::DlssBalanced,
+            output_extent,
+        )
+        .unwrap();
+        let rr = StreamlineRuntime::rr_options(
+            crate::upscaler::UpscalerMode::DlssBalanced,
+            output_extent,
+        )
+        .unwrap();
+
+        assert_eq!(dlss.mode, rr.mode);
+        assert_eq!(dlss.output_width, rr.output_width);
+        assert_eq!(dlss.output_height, rr.output_height);
+        assert_eq!(dlss.pre_exposure, rr.pre_exposure);
+        assert_eq!(dlss.exposure_scale, rr.exposure_scale);
+        assert_eq!(dlss.color_buffers_hdr, rr.color_buffers_hdr);
+        assert_eq!(dlss.alpha_upscaling_enabled, rr.alpha_upscaling_enabled);
     }
 
     #[test]
