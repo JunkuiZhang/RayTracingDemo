@@ -5455,6 +5455,55 @@ mod tests {
         assert_eq!(dlss.alpha_upscaling_enabled, rr.alpha_upscaling_enabled);
     }
 
+    #[cfg(feature = "streamline-rr")]
+    #[test]
+    fn rr_input_adapter_bounds_dispatch_and_emits_finite_guides() {
+        fn decode(encoded: [f32; 4]) -> ([f32; 3], f32) {
+            let mut normal = [
+                encoded[0] * 2.0 - 1.0,
+                encoded[1] * 2.0 - 1.0,
+                encoded[2] * 2.0 - 1.0,
+            ];
+            let length_squared = normal.iter().map(|value| value * value).sum::<f32>();
+            let present = encoded[..3].iter().any(|value| *value != 0.0);
+            if present
+                && encoded[..3].iter().all(|value| value.is_finite())
+                && length_squared.is_finite()
+                && length_squared >= 1.0e-10
+            {
+                let inverse_length = length_squared.sqrt().recip();
+                normal.iter_mut().for_each(|value| *value *= inverse_length);
+            } else {
+                normal = [0.0, 0.0, 1.0];
+            }
+            let roughness = if encoded[3].is_finite() {
+                encoded[3].clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            (normal, roughness)
+        }
+
+        let shader = include_str!("../../shaders/stage11_rr_input.hlsl");
+        assert!(shader.contains("ReconstructionNormalRoughness.GetDimensions"));
+        assert!(shader.contains("dispatchId.x >= sourceWidth || dispatchId.y >= sourceHeight"));
+
+        let (normal, roughness) = decode([0.5, 0.5, 1.0, 0.25]);
+        assert_eq!(normal, [0.0, 0.0, 1.0]);
+        assert_eq!(roughness, 0.25);
+        let length = normal.iter().map(|value| value * value).sum::<f32>().sqrt();
+        assert!((length - 1.0).abs() <= f32::EPSILON);
+
+        let (cleared_normal, cleared_roughness) = decode([0.0; 4]);
+        assert_eq!(cleared_normal, [0.0, 0.0, 1.0]);
+        assert_eq!(cleared_roughness, 0.0);
+        let (invalid_normal, invalid_roughness) = decode([f32::NAN; 4]);
+        assert_eq!(invalid_normal, [0.0, 0.0, 1.0]);
+        assert_eq!(invalid_roughness, 1.0);
+        assert!(invalid_normal.iter().all(|value| value.is_finite()));
+        assert!(invalid_roughness.is_finite());
+    }
+
     #[test]
     fn tonemap_distinguishes_split_signals_from_composed_dlss_hdr() {
         assert_eq!(tonemap_input_mode(DenoiserBackend::Svgf, false), 0);

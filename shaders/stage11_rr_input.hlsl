@@ -13,19 +13,36 @@ cbuffer AdapterConstants : register(b0)
 [numthreads(8, 8, 1)]
 void main(uint3 dispatchId : SV_DispatchThreadID)
 {
+    uint sourceWidth;
+    uint sourceHeight;
+    ReconstructionNormalRoughness.GetDimensions(sourceWidth, sourceHeight);
+    // Render extents are not required to be multiples of the 8x8 group size.
+    // Guard the padded edge threads before either the SRV load or UAV store.
+    if (dispatchId.x >= sourceWidth || dispatchId.y >= sourceHeight)
+    {
+        return;
+    }
+
     float4 encoded = ReconstructionNormalRoughness.Load(int3(dispatchId.xy, 0));
     float3 normal = encoded.xyz * 2.0 - 1.0;
-    float normalLength = length(normal);
-    // Invalid/empty guides use a stable +Z normal. RR will reject them using
-    // the depth guide; emitting finite data here avoids undefined normalize(0)
-    // behavior in the plugin and keeps reset frames deterministic.
-    if (any(!isfinite(normal)) || !isfinite(encoded.w) || normalLength < 1.0e-5)
+    float normalLengthSquared = dot(normal, normal);
+    // The path tracer clears an absent guide to encoded (0,0,0). Decoding it
+    // first would produce a finite (-1,-1,-1), so validity must be established
+    // in encoded space before normalizing. Depth still marks the pixel absent;
+    // finite fallback data only keeps the plugin input deterministic.
+    bool encodedNormalPresent = any(encoded.xyz != 0.0);
+    bool normalValid = encodedNormalPresent && all(isfinite(encoded.xyz))
+        && isfinite(normalLengthSquared) && normalLengthSquared >= 1.0e-10;
+    if (!normalValid)
     {
         normal = float3(0.0, 0.0, 1.0);
     }
     else
     {
-        normal /= normalLength;
+        normal *= rsqrt(normalLengthSquared);
     }
-    PackedNormalRoughness[dispatchId.xy] = float4(normal, saturate(encoded.w));
+    // A non-finite roughness must never cross the plugin ABI even when depth
+    // rejects the guide. Maximally rough is the conservative finite fallback.
+    float roughness = isfinite(encoded.w) ? saturate(encoded.w) : 1.0;
+    PackedNormalRoughness[dispatchId.xy] = float4(normal, roughness);
 }
