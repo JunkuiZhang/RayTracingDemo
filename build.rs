@@ -59,6 +59,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=VSDEVCMD_BAT");
     println!("cargo:rerun-if-env-changed=CMAKE");
     println!("cargo:rerun-if-env-changed=STREAMLINE_SOURCE_DIR");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_STREAMLINE_RR");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         if env::var_os("CARGO_FEATURE_NRD").is_some() {
             panic!("NRD feature 仅支持 Windows D3D12 目标");
@@ -104,7 +105,10 @@ fn main() {
     }
     deploy_winpix_runtime(&output_directory);
     if env::var_os("CARGO_FEATURE_STREAMLINE").is_some() {
-        validate_streamline_sdk(&output_directory);
+        validate_streamline_sdk(
+            &output_directory,
+            env::var_os("CARGO_FEATURE_STREAMLINE_RR").is_some(),
+        );
         build_streamline_bridge(&output_directory);
     }
     println!("cargo:rustc-env=RAY_TRACING_DXC={}", dxc.display());
@@ -115,13 +119,13 @@ fn main() {
     }
 }
 
-fn validate_streamline_sdk(output_directory: &Path) {
+fn validate_streamline_sdk(output_directory: &Path, rr_enabled: bool) {
     let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let sdk = dependency_path(
         "STREAMLINE_SOURCE_DIR",
         &repository_root.join("external/streamline-v2.12.0"),
     );
-    validate_streamline_lock(repository_root, &sdk);
+    validate_streamline_lock(repository_root, &sdk, rr_enabled);
     let required = [
         "include/sl.h",
         "include/sl_consts.h",
@@ -146,14 +150,18 @@ fn validate_streamline_sdk(output_directory: &Path) {
     } else {
         "development/"
     };
-    for name in [
+    let mut runtime_files = vec![
         "sl.interposer.dll",
         "sl.common.dll",
         "sl.dlss.dll",
         "sl.reflex.dll",
         "sl.pcl.dll",
         "nvngx_dlss.dll",
-    ] {
+    ];
+    if rr_enabled {
+        runtime_files.extend(["sl.dlss_d.dll", "nvngx_dlssd.dll"]);
+    }
+    for name in runtime_files.iter() {
         let relative = format!("bin/x64/{flavor}{name}");
         if !sdk.join(&relative).is_file() {
             panic!(
@@ -171,14 +179,7 @@ fn validate_streamline_sdk(output_directory: &Path) {
         .ancestors()
         .nth(3)
         .expect("无法从 OUT_DIR 定位 Cargo profile 输出目录");
-    for name in [
-        "sl.interposer.dll",
-        "sl.common.dll",
-        "sl.dlss.dll",
-        "sl.reflex.dll",
-        "sl.pcl.dll",
-        "nvngx_dlss.dll",
-    ] {
+    for name in runtime_files {
         copy_if_changed(
             &sdk.join(format!("bin/x64/{flavor}{name}")),
             &profile_directory.join(name),
@@ -204,7 +205,7 @@ fn validate_streamline_sdk(output_directory: &Path) {
     );
 }
 
-fn validate_streamline_lock(repository_root: &Path, sdk: &Path) {
+fn validate_streamline_lock(repository_root: &Path, sdk: &Path, rr_enabled: bool) {
     let lock_path = repository_root.join("third_party/streamline/version.lock.json");
     println!("cargo:rerun-if-changed={}", lock_path.display());
     let lock: serde_json::Value = serde_json::from_slice(
@@ -221,6 +222,12 @@ fn validate_streamline_lock(repository_root: &Path, sdk: &Path) {
             .and_then(serde_json::Value::as_array)
             .unwrap_or_else(|| panic!("Streamline lock 缺少 {group} 数组"));
         for entry in entries {
+            let optional_feature = entry
+                .get("optional_feature")
+                .and_then(serde_json::Value::as_str);
+            if optional_feature == Some("streamline-rr") && !rr_enabled {
+                continue;
+            }
             let relative = entry
                 .get("path")
                 .and_then(serde_json::Value::as_str)
