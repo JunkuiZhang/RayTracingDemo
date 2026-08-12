@@ -306,6 +306,14 @@ fn build_streamline_bridge(output_directory: &Path) {
         format!("-DCMAKE_BUILD_TYPE={build_type}"),
         format!("-DSTREAMLINE_SOURCE_DIR={}", sdk.display()),
         format!("-DSTREAMLINE_LIB_DIR={}", sdk.join("lib/x64").display()),
+        format!(
+            "-DSTREAMLINE_ENABLE_RR={}",
+            if env::var_os("CARGO_FEATURE_STREAMLINE_RR").is_some() {
+                "ON"
+            } else {
+                "OFF"
+            }
+        ),
     ];
     run_cmake(
         &cmake,

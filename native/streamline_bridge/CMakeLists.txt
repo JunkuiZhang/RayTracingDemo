@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.22)
 
 project(RayTracingDemoStreamlineBridge LANGUAGES CXX)
 
+option(STREAMLINE_ENABLE_RR "Build the optional DLSS Ray Reconstruction bridge" OFF)
+
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL" CACHE STRING "" FORCE)
 
 if(NOT WIN32)
@@ -28,6 +30,11 @@ target_compile_definitions(streamline_bridge PRIVATE
     NOMINMAX
     _CRT_SECURE_NO_WARNINGS
 )
+if(STREAMLINE_ENABLE_RR)
+    target_compile_definitions(streamline_bridge PRIVATE STREAMLINE_ENABLE_RR=1)
+else()
+    target_compile_definitions(streamline_bridge PRIVATE STREAMLINE_ENABLE_RR=0)
+endif()
 target_include_directories(streamline_bridge PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${STREAMLINE_SOURCE_DIR}/include"

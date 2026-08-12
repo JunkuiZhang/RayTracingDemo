@@ -3,7 +3,7 @@
 use std::{ffi::c_void, ptr::NonNull};
 
 pub const SDK_VERSION: &str = "2.12.0";
-pub const ABI_VERSION: u32 = 3;
+pub const ABI_VERSION: u32 = 4;
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_INVALID_ARGUMENT: u32 = 1;
 pub const STATUS_SDK_ERROR: u32 = 2;
@@ -20,7 +20,7 @@ pub struct InitDesc {
     pub development: u32,
     pub enable_dlss: u32,
     pub application_id: u32,
-    pub reserved: u32,
+    pub enable_dlss_rr: u32,
     pub plugin_path: *const u16,
     pub log_path: *const u16,
     pub project_id: *const i8,
@@ -35,9 +35,11 @@ pub struct Support {
     pub dlss_supported: u32,
     pub reflex_supported: u32,
     pub pcl_supported: u32,
+    pub rr_supported: u32,
     pub dlss_result: u32,
     pub reflex_result: u32,
     pub pcl_result: u32,
+    pub rr_result: u32,
     pub adapter_luid: u64,
     pub sdk_version: [u8; 32],
 }
@@ -89,6 +91,54 @@ pub struct DlssOptions {
     pub color_buffers_hdr: u32,
     pub use_auto_exposure: u32,
     pub alpha_upscaling_enabled: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RrOptions {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub mode: u32,
+    pub output_width: u32,
+    pub output_height: u32,
+    pub sharpness: f32,
+    pub pre_exposure: f32,
+    pub exposure_scale: f32,
+    pub color_buffers_hdr: u32,
+    pub indicator_invert_axis_x: u32,
+    pub indicator_invert_axis_y: u32,
+    pub normal_roughness_mode: u32,
+    pub world_to_camera_view: [f32; 16],
+    pub camera_view_to_world: [f32; 16],
+    pub alpha_upscaling_enabled: u32,
+    pub dlaa_preset: u32,
+    pub quality_preset: u32,
+    pub balanced_preset: u32,
+    pub performance_preset: u32,
+    pub ultra_performance_preset: u32,
+    pub ultra_quality_preset: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RrOptimalSettings {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub optimal_render_width: u32,
+    pub optimal_render_height: u32,
+    pub render_width_min: u32,
+    pub render_height_min: u32,
+    pub render_width_max: u32,
+    pub render_height_max: u32,
+    pub optimal_sharpness: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RrState {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub estimated_vram_usage_bytes: u64,
 }
 
 #[repr(C)]
@@ -166,12 +216,31 @@ unsafe extern "C" {
         viewport: *const Viewport,
         options: *const DlssOptions,
     ) -> u32;
+    pub fn streamline_bridge_rr_get_optimal_settings(
+        bridge: *mut RawBridge,
+        options: *const RrOptions,
+        out: *mut RrOptimalSettings,
+    ) -> u32;
+    pub fn streamline_bridge_rr_set_options(
+        bridge: *mut RawBridge,
+        viewport: *const Viewport,
+        options: *const RrOptions,
+    ) -> u32;
+    pub fn streamline_bridge_rr_get_state(
+        bridge: *mut RawBridge,
+        viewport: *const Viewport,
+        out: *mut RrState,
+    ) -> u32;
     pub fn streamline_bridge_allocate_resources(
         bridge: *mut RawBridge,
         viewport: *const Viewport,
         command_list: *mut c_void,
     ) -> u32;
     pub fn streamline_bridge_free_resources(
+        bridge: *mut RawBridge,
+        viewport: *const Viewport,
+    ) -> u32;
+    pub fn streamline_bridge_rr_free_resources(
         bridge: *mut RawBridge,
         viewport: *const Viewport,
     ) -> u32;
@@ -195,6 +264,12 @@ unsafe extern "C" {
         command_list: *mut c_void,
     ) -> u32;
     pub fn streamline_bridge_evaluate_dlss(
+        bridge: *mut RawBridge,
+        token: *const FrameToken,
+        viewport: *const Viewport,
+        command_list: *mut c_void,
+    ) -> u32;
+    pub fn streamline_bridge_evaluate_rr(
         bridge: *mut RawBridge,
         token: *const FrameToken,
         viewport: *const Viewport,
@@ -288,11 +363,14 @@ mod tests {
     #[test]
     fn abi_struct_layout_is_fixed_width() {
         assert_eq!(size_of::<InitDesc>(), 56);
-        assert_eq!(size_of::<Support>(), 72);
+        assert_eq!(size_of::<Support>(), 80);
         assert_eq!(size_of::<OptimalSettings>(), 36);
         assert_eq!(size_of::<FrameToken>(), 24);
         assert_eq!(size_of::<Viewport>(), 16);
         assert_eq!(size_of::<DlssOptions>(), 44);
+        assert_eq!(size_of::<RrOptions>(), 204);
+        assert_eq!(size_of::<RrOptimalSettings>(), 36);
+        assert_eq!(size_of::<RrState>(), 16);
         assert_eq!(size_of::<Constants>(), 364);
         assert_eq!(size_of::<ResourceTag>(), 48);
         assert_eq!(size_of::<ReflexState>(), 20);
@@ -300,7 +378,7 @@ mod tests {
 
     #[test]
     fn invalid_bridge_statuses_are_stable() {
-        assert_eq!(ABI_VERSION, 3);
+        assert_eq!(ABI_VERSION, 4);
         assert_eq!(STATUS_OK, 0);
         assert_eq!(STATUS_INVALID_ARGUMENT, 1);
         assert_eq!(size_of::<RawBridge>(), 0);

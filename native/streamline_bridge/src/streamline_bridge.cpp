@@ -12,15 +12,21 @@
 
 #include <sl.h>
 #include <sl_dlss.h>
+#if STREAMLINE_ENABLE_RR
+#include <sl_dlss_d.h>
+#endif
 #include <sl_pcl.h>
 #include <sl_reflex.h>
 
 static_assert(sizeof(StreamlineBridgeInitDesc) == 56, "Streamline init ABI changed");
-static_assert(sizeof(StreamlineBridgeSupport) == 72, "Streamline support ABI changed");
+static_assert(sizeof(StreamlineBridgeSupport) == 80, "Streamline support ABI changed");
 static_assert(sizeof(StreamlineBridgeOptimalSettings) == 36, "Streamline optimal ABI changed");
 static_assert(sizeof(StreamlineBridgeFrameToken) == 24, "Streamline token ABI changed");
 static_assert(sizeof(StreamlineBridgeViewport) == 16, "Streamline viewport ABI changed");
 static_assert(sizeof(StreamlineBridgeDlssOptions) == 44, "Streamline options ABI changed");
+static_assert(sizeof(StreamlineBridgeRrOptions) == 204, "Streamline RR options ABI changed");
+static_assert(sizeof(StreamlineBridgeRrOptimalSettings) == 36, "Streamline RR optimal ABI changed");
+static_assert(sizeof(StreamlineBridgeRrState) == 16, "Streamline RR state ABI changed");
 static_assert(sizeof(StreamlineBridgeConstants) == 364, "Streamline constants ABI changed");
 static_assert(sizeof(StreamlineBridgeResourceTag) == 48, "Streamline resource tag ABI changed");
 static_assert(sizeof(StreamlineBridgeReflexState) == 20, "Streamline Reflex ABI changed");
@@ -29,7 +35,7 @@ struct StreamlineBridge {
     bool initialized = false;
     bool device_set = false;
     uint64_t adapter_luid = 0;
-    std::array<uint32_t, 3> support_results{};
+    std::array<uint32_t, 4> support_results{};
     std::string last_error;
 };
 
@@ -117,6 +123,37 @@ sl::Boolean bool_value(uint32_t value) noexcept {
     return value != 0 ? sl::eTrue : sl::eFalse;
 }
 
+#if STREAMLINE_ENABLE_RR
+sl::DLSSDOptions make_rr_options(const StreamlineBridgeRrOptions& input) noexcept {
+    sl::DLSSDOptions options{};
+    options.mode = dlss_mode(input.mode);
+    options.outputWidth = input.output_width;
+    options.outputHeight = input.output_height;
+    options.sharpness = input.sharpness;
+    options.preExposure = input.pre_exposure;
+    options.exposureScale = input.exposure_scale;
+    options.colorBuffersHDR = bool_value(input.color_buffers_hdr);
+    options.indicatorInvertAxisX = bool_value(input.indicator_invert_axis_x);
+    options.indicatorInvertAxisY = bool_value(input.indicator_invert_axis_y);
+    options.normalRoughnessMode = static_cast<sl::DLSSDNormalRoughnessMode>(input.normal_roughness_mode);
+    copy_matrix(options.worldToCameraView, input.world_to_camera_view);
+    copy_matrix(options.cameraViewToWorld, input.camera_view_to_world);
+    options.alphaUpscalingEnabled = bool_value(input.alpha_upscaling_enabled);
+    options.dlaaPreset = static_cast<sl::DLSSDPreset>(input.dlaa_preset);
+    options.qualityPreset = static_cast<sl::DLSSDPreset>(input.quality_preset);
+    options.balancedPreset = static_cast<sl::DLSSDPreset>(input.balanced_preset);
+    options.performancePreset = static_cast<sl::DLSSDPreset>(input.performance_preset);
+    options.ultraPerformancePreset = static_cast<sl::DLSSDPreset>(input.ultra_performance_preset);
+    options.ultraQualityPreset = static_cast<sl::DLSSDPreset>(input.ultra_quality_preset);
+    return options;
+}
+
+bool valid_rr_options(const StreamlineBridgeRrOptions& input) noexcept {
+    return valid_dlss_mode(input.mode) && input.output_width != 0 && input.output_height != 0 &&
+           input.normal_roughness_mode <= 1;
+}
+#endif
+
 } // namespace
 
 StreamlineBridgeStatus streamline_bridge_create(
@@ -144,7 +181,14 @@ StreamlineBridgeStatus streamline_bridge_create(
             sl::kFeatureReflex,
             sl::kFeaturePCL,
             sl::kFeatureDLSS,
+#if STREAMLINE_ENABLE_RR
+            sl::kFeatureDLSS_RR,
+#endif
         };
+#if !STREAMLINE_ENABLE_RR
+        if (desc->enable_dlss_rr != 0)
+            return set_error(bridge.get(), "DLSS RR bridge 未编译；请启用 streamline-rr");
+#endif
         sl::Preferences preferences{};
         preferences.showConsole = desc->development != 0;
         preferences.flags = sl::PreferenceFlags::eDisableCLStateTracking |
@@ -154,7 +198,11 @@ StreamlineBridgeStatus streamline_bridge_create(
         preferences.featuresToLoad = features;
         preferences.numFeaturesToLoad = desc->enable_dlss != 0
             ? static_cast<uint32_t>(std::size(features))
-            : static_cast<uint32_t>(std::size(features) - 1);
+            : static_cast<uint32_t>(std::size(features) - 1
+#if STREAMLINE_ENABLE_RR
+                - (desc->enable_dlss_rr == 0 ? 1 : 0)
+#endif
+            );
         preferences.applicationId = desc->application_id;
         if (!has_application_id && has_project_identity) {
             preferences.engine = sl::EngineType::eCustom;
@@ -193,10 +241,22 @@ StreamlineBridgeStatus streamline_bridge_set_d3d_device(
         sl::AdapterInfo adapter{};
         adapter.deviceLUID = const_cast<uint8_t*>(adapter_luid);
         adapter.deviceLUIDSizeInBytes = static_cast<uint32_t>(adapter_luid_size);
-        for (size_t i = 0; i < bridge->support_results.size(); ++i) {
-            constexpr sl::Feature features[] = {sl::kFeatureDLSS, sl::kFeatureReflex, sl::kFeaturePCL};
+        constexpr sl::Feature features[] = {
+            sl::kFeatureDLSS,
+            sl::kFeatureReflex,
+            sl::kFeaturePCL,
+#if STREAMLINE_ENABLE_RR
+            sl::kFeatureDLSS_RR,
+#endif
+        };
+        for (size_t i = 0; i < 3; ++i) {
             bridge->support_results[i] = static_cast<uint32_t>(slIsFeatureSupported(features[i], adapter));
         }
+#if STREAMLINE_ENABLE_RR
+        bridge->support_results[3] = static_cast<uint32_t>(slIsFeatureSupported(features[3], adapter));
+#else
+        bridge->support_results[3] = static_cast<uint32_t>(sl::Result::eErrorFeatureNotSupported);
+#endif
         bridge->device_set = true;
         return STREAMLINE_BRIDGE_STATUS_OK;
     } catch (...) {
@@ -218,9 +278,11 @@ StreamlineBridgeStatus streamline_bridge_query_support(
     out_support->dlss_result = bridge->support_results[0];
     out_support->reflex_result = bridge->support_results[1];
     out_support->pcl_result = bridge->support_results[2];
+    out_support->rr_result = bridge->support_results[3];
     out_support->dlss_supported = out_support->dlss_result == 0;
     out_support->reflex_supported = out_support->reflex_result == 0;
     out_support->pcl_supported = out_support->pcl_result == 0;
+    out_support->rr_supported = out_support->rr_result == 0;
     out_support->adapter_luid = bridge->adapter_luid;
     std::strncpy(out_support->sdk_version, "2.12.0", sizeof(out_support->sdk_version) - 1);
     return STREAMLINE_BRIDGE_STATUS_OK;
@@ -275,6 +337,81 @@ StreamlineBridgeStatus streamline_bridge_dlss_set_options(
     }
 }
 
+#if STREAMLINE_ENABLE_RR
+StreamlineBridgeStatus streamline_bridge_rr_get_optimal_settings(
+    StreamlineBridge* bridge,
+    const StreamlineBridgeRrOptions* input,
+    StreamlineBridgeRrOptimalSettings* out_settings) {
+    if (check_bridge(bridge) != STREAMLINE_BRIDGE_STATUS_OK || input == nullptr || out_settings == nullptr ||
+        !valid_header(input->struct_size, input->abi_version, sizeof(*input)) ||
+        !valid_header(out_settings->struct_size, out_settings->abi_version, sizeof(*out_settings)) ||
+        !valid_rr_options(*input))
+        return STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT;
+    try {
+        const sl::DLSSDOptions options = make_rr_options(*input);
+        sl::DLSSDOptimalSettings settings{};
+        const sl::Result result = slDLSSDGetOptimalSettings(options, settings);
+        if (result != sl::Result::eOk)
+            return set_error(bridge, "slDLSSDGetOptimalSettings failed", result);
+        *out_settings = {};
+        out_settings->struct_size = sizeof(*out_settings);
+        out_settings->abi_version = STREAMLINE_BRIDGE_ABI_VERSION;
+        out_settings->optimal_render_width = settings.optimalRenderWidth;
+        out_settings->optimal_render_height = settings.optimalRenderHeight;
+        out_settings->render_width_min = settings.renderWidthMin;
+        out_settings->render_height_min = settings.renderHeightMin;
+        out_settings->render_width_max = settings.renderWidthMax;
+        out_settings->render_height_max = settings.renderHeightMax;
+        out_settings->optimal_sharpness = settings.optimalSharpness;
+        return STREAMLINE_BRIDGE_STATUS_OK;
+    } catch (...) {
+        return STREAMLINE_BRIDGE_STATUS_EXCEPTION;
+    }
+}
+
+StreamlineBridgeStatus streamline_bridge_rr_set_options(
+    StreamlineBridge* bridge,
+    const StreamlineBridgeViewport* viewport,
+    const StreamlineBridgeRrOptions* input) {
+    if (check_bridge(bridge) != STREAMLINE_BRIDGE_STATUS_OK || input == nullptr || viewport == nullptr ||
+        !valid_header(input->struct_size, input->abi_version, sizeof(*input)) ||
+        !valid_header(viewport->struct_size, viewport->abi_version, sizeof(*viewport)) ||
+        !valid_rr_options(*input))
+        return STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT;
+    try {
+        const sl::Result result = slDLSSDSetOptions(
+            sl::ViewportHandle(viewport->id), make_rr_options(*input));
+        return result == sl::Result::eOk ? STREAMLINE_BRIDGE_STATUS_OK
+                                         : set_error(bridge, "slDLSSDSetOptions failed", result);
+    } catch (...) {
+        return STREAMLINE_BRIDGE_STATUS_EXCEPTION;
+    }
+}
+
+StreamlineBridgeStatus streamline_bridge_rr_get_state(
+    StreamlineBridge* bridge,
+    const StreamlineBridgeViewport* viewport,
+    StreamlineBridgeRrState* out_state) {
+    if (check_bridge(bridge) != STREAMLINE_BRIDGE_STATUS_OK || viewport == nullptr || out_state == nullptr ||
+        !valid_header(viewport->struct_size, viewport->abi_version, sizeof(*viewport)) ||
+        !valid_header(out_state->struct_size, out_state->abi_version, sizeof(*out_state)))
+        return STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT;
+    try {
+        sl::DLSSDState state{};
+        const sl::Result result = slDLSSDGetState(sl::ViewportHandle(viewport->id), state);
+        if (result != sl::Result::eOk)
+            return set_error(bridge, "slDLSSDGetState failed", result);
+        *out_state = {};
+        out_state->struct_size = sizeof(*out_state);
+        out_state->abi_version = STREAMLINE_BRIDGE_ABI_VERSION;
+        out_state->estimated_vram_usage_bytes = state.estimatedVRAMUsageInBytes;
+        return STREAMLINE_BRIDGE_STATUS_OK;
+    } catch (...) {
+        return STREAMLINE_BRIDGE_STATUS_EXCEPTION;
+    }
+}
+#endif
+
 StreamlineBridgeStatus streamline_bridge_allocate_resources(
     StreamlineBridge* bridge,
     const StreamlineBridgeViewport* viewport,
@@ -305,6 +442,27 @@ StreamlineBridgeStatus streamline_bridge_free_resources(
     } catch (...) {
         return STREAMLINE_BRIDGE_STATUS_EXCEPTION;
     }
+}
+
+StreamlineBridgeStatus streamline_bridge_rr_free_resources(
+    StreamlineBridge* bridge,
+    const StreamlineBridgeViewport* viewport) {
+#if STREAMLINE_ENABLE_RR
+    if (check_bridge(bridge) != STREAMLINE_BRIDGE_STATUS_OK || viewport == nullptr ||
+        !valid_header(viewport->struct_size, viewport->abi_version, sizeof(*viewport)))
+        return STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT;
+    try {
+        const sl::Result result = slFreeResources(sl::kFeatureDLSS_RR, sl::ViewportHandle(viewport->id));
+        return result == sl::Result::eOk ? STREAMLINE_BRIDGE_STATUS_OK
+                                         : set_error(bridge, "slFreeResources(DLSS RR) failed", result);
+    } catch (...) {
+        return STREAMLINE_BRIDGE_STATUS_EXCEPTION;
+    }
+#else
+    (void)bridge;
+    (void)viewport;
+    return STREAMLINE_BRIDGE_STATUS_UNSUPPORTED;
+#endif
 }
 
 StreamlineBridgeStatus streamline_bridge_get_frame_token(
@@ -425,6 +583,35 @@ StreamlineBridgeStatus streamline_bridge_evaluate_dlss(
     } catch (...) {
         return STREAMLINE_BRIDGE_STATUS_EXCEPTION;
     }
+}
+
+StreamlineBridgeStatus streamline_bridge_evaluate_rr(
+    StreamlineBridge* bridge,
+    const StreamlineBridgeFrameToken* token,
+    const StreamlineBridgeViewport* viewport,
+    void* command_list) {
+#if STREAMLINE_ENABLE_RR
+    const auto valid = check_token_and_viewport(bridge, token, viewport);
+    if (valid != STREAMLINE_BRIDGE_STATUS_OK || command_list == nullptr)
+        return valid == STREAMLINE_BRIDGE_STATUS_OK ? STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT : valid;
+    try {
+        sl::ViewportHandle handle(viewport->id);
+        const sl::BaseStructure* inputs[] = {&handle};
+        const sl::Result result = slEvaluateFeature(
+            sl::kFeatureDLSS_RR, *static_cast<sl::FrameToken*>(token->token), inputs, 1,
+            static_cast<sl::CommandBuffer*>(command_list));
+        return result == sl::Result::eOk ? STREAMLINE_BRIDGE_STATUS_OK
+                                         : set_error(bridge, "slEvaluateFeature(DLSS RR) failed", result);
+    } catch (...) {
+        return STREAMLINE_BRIDGE_STATUS_EXCEPTION;
+    }
+#else
+    (void)bridge;
+    (void)token;
+    (void)viewport;
+    (void)command_list;
+    return STREAMLINE_BRIDGE_STATUS_UNSUPPORTED;
+#endif
 }
 
 StreamlineBridgeStatus streamline_bridge_reflex_set_mode(StreamlineBridge* bridge, uint32_t mode) {

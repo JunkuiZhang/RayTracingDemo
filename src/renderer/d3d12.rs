@@ -201,7 +201,7 @@ impl StreamlineRuntime {
             development: u32::from(cfg!(debug_assertions)),
             enable_dlss: 1,
             application_id: application_id.unwrap_or(0),
-            reserved: 0,
+            enable_dlss_rr: 0,
             plugin_path: plugin_path.as_ptr(),
             log_path: std::ptr::null(),
             project_id: project_id.as_ptr(),
