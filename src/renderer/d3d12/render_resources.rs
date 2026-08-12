@@ -112,6 +112,10 @@ pub(super) struct RrGenerationResources {
     /// guide contract as Stage 10, but remain generation-owned for RR.
     pub(super) depth: TrackedResource,
     pub(super) motion: TrackedResource,
+    /// Dense motion of virtually reflected geometry. Supplying it directly
+    /// avoids asking RR to reconstruct reflection motion from a jittered
+    /// primary hit and one scalar hit distance.
+    pub(super) specular_motion: TrackedResource,
 }
 
 /// All resources whose descriptors or dimensions depend on the current render
@@ -414,6 +418,12 @@ impl RenderResourceGeneration {
                     DXGI_FORMAT_R16G16_FLOAT,
                     format!("代际 {id} DLSS RR dense pixel motion"),
                 )?,
+                specular_motion: create_uav_texture(
+                    device,
+                    render_extent,
+                    DXGI_FORMAT_R16G16_FLOAT,
+                    format!("代际 {id} DLSS RR dense specular motion"),
+                )?,
             })
         } else {
             None
@@ -680,6 +690,18 @@ impl RenderResourceGeneration {
                 dlss_motion,
             );
         }
+        #[cfg(feature = "streamline-rr")]
+        let dlss_specular_motion = self.rr.as_ref().map_or(motion, |rr| &rr.specular_motion);
+        #[cfg(not(feature = "streamline-rr"))]
+        let dlss_specular_motion = motion;
+        unsafe {
+            create_texture_uav(
+                device,
+                &self.shader_heap,
+                DXR_UAV_BASE + super::DLSS_SPECULAR_MOTION_UAV_REGISTER,
+                dlss_specular_motion,
+            );
+        }
         #[cfg(feature = "nrd")]
         let transmission_uavs = self.nrd.as_ref().map_or(
             [
@@ -737,6 +759,10 @@ impl RenderResourceGeneration {
         }
         debug_assert_eq!(
             super::TRANSMISSION_VIEW_PROXY_UAV_REGISTER + 1,
+            super::DLSS_SPECULAR_MOTION_UAV_REGISTER
+        );
+        debug_assert_eq!(
+            super::DLSS_SPECULAR_MOTION_UAV_REGISTER + 1,
             DXR_UAV_REGISTER_COUNT
         );
 
@@ -1031,8 +1057,11 @@ impl RenderResourceGeneration {
                 rejection,
                 &self.histories[0].length,
                 id,
-                hit_distance,
-                &self.nrd_validation,
+                reconstruction_specular_hit_distance,
+                // t13 is NRD validation on conventional paths and the
+                // explicit reflected-geometry guide on RR. InputMode keeps
+                // the two debug interpretations unambiguous.
+                &rr.specular_motion,
             ];
             unsafe {
                 populate_texture_table(

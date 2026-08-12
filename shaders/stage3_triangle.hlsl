@@ -88,6 +88,10 @@ RWTexture2D<float> TransmissionSpecularHitDistance : register(u27);
 RWTexture2D<float4> TransmissionPrimaryEmissive : register(u28);
 RWTexture2D<float4> TransmissionDiffuseAlbedo : register(u29);
 RWTexture2D<float4> TransmissionViewProxy : register(u30);
+// RR can consume reflected-geometry motion directly. This is preferable to
+// reconstructing it from a scalar hit distance because the latter inherits
+// subpixel variation from the primary ray origin.
+RWTexture2D<float2> DlssSpecularMotion : register(u31);
 
 cbuffer FrameConstants : register(b0)
 {
@@ -100,9 +104,8 @@ cbuffer FrameConstants : register(b0)
     float PreviousCameraYaw;
     float PreviousCameraPitch;
     // 0 = no Streamline guides, 1 = DLSS SR guides, 2 = DLSS RR guides.
-    // RR needs a distinct value because its specular hit-distance contract
-    // requires one unambiguous sampled lobe, while SR only consumes the dense
-    // primary depth/motion guides.
+    // RR needs a distinct value because it additionally writes an explicit
+    // reflected-geometry motion field, while SR consumes only primary guides.
     uint DlssGuideMode;
     uint NrdEnabled;
     uint ResetHistory;
@@ -225,39 +228,6 @@ float3 SampleCosineHemisphere(float3 normal, float2 sample)
     return normalize(tangent * disk.x + bitangent * disk.y + normal * z);
 }
 
-// RR uses specular hit distance to derive motion for virtually reflected
-// geometry.  Direct-light NEE cannot provide that guide: its sampled light
-// distance changes every frame and is often selected for the diffuse lobe.
-// Trace a geometry-only dominant-reflection ray instead.  This query never
-// contributes radiance, so it cannot bias the Monte Carlo estimator; it only
-// gives RR a dense, temporally coherent in-lobe distance on frames where the
-// probabilistic continuation selected diffuse.
-float TraceRrSpecularGuideHitDistance(
-    float3 primaryHitPosition,
-    float3 primaryNormal,
-    float3 incomingDirection)
-{
-    float3 guideDirection = normalize(reflect(incomingDirection, primaryNormal));
-    if (dot(primaryNormal, guideDirection) <= 0.0)
-        return 0.0;
-
-    RayDesc guideRay;
-    guideRay.Origin = primaryHitPosition + primaryNormal * 0.002;
-    guideRay.Direction = guideDirection;
-    guideRay.TMin = 0.001;
-    guideRay.TMax = 1000.0;
-
-    RayQuery<RAY_FLAG_CULL_BACK_FACING_TRIANGLES | RAY_FLAG_FORCE_OPAQUE> query;
-    query.TraceRayInline(Scene, RAY_FLAG_NONE, 0xFF, guideRay);
-    while (query.Proceed())
-    {
-    }
-
-    return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT
-        ? query.CommittedRayT()
-        : 0.0;
-}
-
 float Schlick(float cosine, float etaRatio)
 {
     float r0 = (1.0 - etaRatio) / (1.0 + etaRatio);
@@ -332,6 +302,122 @@ float3 PreviousWorldPosition(float3 localPosition, InstanceGpu instanceData)
         instanceData.previousObjectToWorldRow1,
         instanceData.previousObjectToWorldRow2);
     return mul(previousObjectToWorld, float4(localPosition, 1.0));
+}
+
+float3x3 Inverse3x3(float3x3 value)
+{
+    float a = value[0][0], b = value[0][1], c = value[0][2];
+    float d = value[1][0], e = value[1][1], f = value[1][2];
+    float g = value[2][0], h = value[2][1], i = value[2][2];
+    float determinant = a * (e * i - f * h)
+        - b * (d * i - f * g)
+        + c * (d * h - e * g);
+    if (abs(determinant) <= 1.0e-8)
+        return float3x3(1, 0, 0, 0, 1, 0, 0, 0, 1);
+    float reciprocal = rcp(determinant);
+    return float3x3(
+        e * i - f * h, c * h - b * i, b * f - c * e,
+        f * g - d * i, a * i - c * g, c * d - a * f,
+        d * h - e * g, b * g - a * h, a * e - b * d) * reciprocal;
+}
+
+float3 PreviousWorldNormal(float3 currentWorldNormal, InstanceGpu instanceData)
+{
+    // Recover the object-space shading normal from the current transform, then
+    // apply the previous inverse-transpose. This covers rigid and non-uniform
+    // instance animation without pretending the current normal is historical.
+    float3 localNormal = mul(currentWorldNormal, (float3x3)ObjectToWorld3x4());
+    float3x3 previousObjectToWorld = float3x3(
+        instanceData.previousObjectToWorldRow0.xyz,
+        instanceData.previousObjectToWorldRow1.xyz,
+        instanceData.previousObjectToWorldRow2.xyz);
+    float3 previousNormal = mul(localNormal, Inverse3x3(previousObjectToWorld));
+    float lengthSquared = dot(previousNormal, previousNormal);
+    return lengthSquared > 1.0e-10 && all(isfinite(previousNormal))
+        ? previousNormal * rsqrt(lengthSquared)
+        : currentWorldNormal;
+}
+
+struct RrSpecularGuide
+{
+    float hitDistance;
+    float2 motion;
+};
+
+float4 MakeMirrorPlane(float3 normal, float3 planePoint);
+float3 ReflectPointAcrossPlane(float4 plane, float3 position);
+
+// Trace a deterministic dominant-reflection ray solely for RR guidance. The
+// same committed triangle/barycentrics are transformed by current and previous
+// instance transforms, then unfolded across the corresponding primary tangent
+// planes. Projecting those virtual points yields explicit reflected-geometry
+// motion. The query never contributes radiance, so it cannot bias the path
+// estimator, and a static camera/scene produces zero motion even while sampling
+// jitter moves the primary ray within the pixel.
+RrSpecularGuide TraceRrSpecularGuide(
+    float3 primaryHitPosition,
+    float3 previousPrimaryHitPosition,
+    float3 primaryNormal,
+    float3 previousPrimaryNormal,
+    float3 incomingDirection,
+    float2 fallbackMotion,
+    uint2 renderSize)
+{
+    RrSpecularGuide guide;
+    guide.hitDistance = 0.0;
+    guide.motion = fallbackMotion;
+    float3 guideDirection = normalize(reflect(incomingDirection, primaryNormal));
+    if (dot(primaryNormal, guideDirection) <= 0.0)
+        return guide;
+
+    RayDesc guideRay;
+    guideRay.Origin = primaryHitPosition + primaryNormal * 0.002;
+    guideRay.Direction = guideDirection;
+    guideRay.TMin = 0.001;
+    guideRay.TMax = 1000.0;
+
+    RayQuery<RAY_FLAG_CULL_BACK_FACING_TRIANGLES | RAY_FLAG_FORCE_OPAQUE> query;
+    query.TraceRayInline(Scene, RAY_FLAG_NONE, 0xFF, guideRay);
+    while (query.Proceed())
+    {
+    }
+    if (query.CommittedStatus() != COMMITTED_TRIANGLE_HIT)
+        return guide;
+
+    uint instanceId = query.CommittedInstanceID();
+    InstanceGpu guideInstance = Instances[instanceId];
+    uint primitive = query.CommittedPrimitiveIndex();
+    uint3 triangleIndices = uint3(
+        Indices[guideInstance.indexOffset + primitive * 3u],
+        Indices[guideInstance.indexOffset + primitive * 3u + 1u],
+        Indices[guideInstance.indexOffset + primitive * 3u + 2u]);
+    float2 committedBarycentrics = query.CommittedTriangleBarycentrics();
+    float3 barycentrics = float3(
+        1.0 - committedBarycentrics.x - committedBarycentrics.y,
+        committedBarycentrics.x,
+        committedBarycentrics.y);
+    float3 localGuideHit =
+        Vertices[guideInstance.vertexOffset + triangleIndices.x].position * barycentrics.x
+        + Vertices[guideInstance.vertexOffset + triangleIndices.y].position * barycentrics.y
+        + Vertices[guideInstance.vertexOffset + triangleIndices.z].position * barycentrics.z;
+    float3 currentGuideHit = mul(
+        query.CommittedObjectToWorld3x4(),
+        float4(localGuideHit, 1.0));
+    float3 previousGuideHit = PreviousWorldPosition(localGuideHit, guideInstance);
+
+    float3 currentVirtualHit = ReflectPointAcrossPlane(
+        MakeMirrorPlane(primaryNormal, primaryHitPosition),
+        currentGuideHit);
+    float3 previousVirtualHit = ReflectPointAcrossPlane(
+        MakeMirrorPlane(previousPrimaryNormal, previousPrimaryHitPosition),
+        previousGuideHit);
+    float2 currentUv = ProjectToCurrentUv(currentVirtualHit, renderSize);
+    float2 previousUv = ProjectToPreviousUv(previousVirtualHit, renderSize);
+    float2 reflectedMotion = (previousUv - currentUv) * float2(renderSize);
+    if (all(isfinite(reflectedMotion)))
+        guide.motion = reflectedMotion;
+    guide.hitDistance = query.CommittedRayT();
+    return guide;
 }
 
 float4 SampleMaterialTexture(uint textureAndSampler, float2 uv)
@@ -427,7 +513,7 @@ BrdfEvaluation EvaluateBrdf(
     return value;
 }
 
-float ComputeSpecularProbability(float3 baseColor, float metallic, bool useReconstructionLobe)
+float ComputeSpecularProbability(float3 baseColor, float metallic, bool useNrdProbabilisticLobe)
 {
     float3 f0 = lerp(0.04.xxx, baseColor, metallic);
     float specularEnergy = max(max(f0.x, f0.y), f0.z);
@@ -436,7 +522,7 @@ float ComputeSpecularProbability(float3 baseColor, float metallic, bool useRecon
         return specularEnergy > 1.0e-6 ? 1.0 : 0.0;
     if (specularEnergy <= 1.0e-6)
         return 0.0;
-    float minimumProbability = useReconstructionLobe ? 0.25 : 0.05;
+    float minimumProbability = useNrdProbabilisticLobe ? 0.25 : 0.05;
     return clamp(
         specularEnergy / (specularEnergy + diffuseEnergy),
         minimumProbability,
@@ -742,6 +828,8 @@ void RayGen()
     {
         DlssDepth[pixel] = 1.0;
         DlssMotion[pixel] = 0;
+        if (DlssGuideMode == 2u)
+            DlssSpecularMotion[pixel] = 0;
     }
     ReconstructionNoisyHdr[pixel] = 0;
     ReconstructionDiffuseAlbedo[pixel] = 0;
@@ -924,6 +1012,8 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
             DlssMotion[pixel] = ResetHistory != 0u
                 ? 0
                 : (previousUv - currentUv) * float2(size);
+            if (DlssGuideMode == 2u)
+                DlssSpecularMotion[pixel] = DlssMotion[pixel];
         }
 
         float3 cameraForward;
@@ -1045,11 +1135,11 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     // A PSR hit is the primary surface from NRD's point of view, even though it
     // appears at a later physical bounce. Apply the same lobe stratification
     // and in-lobe hit-distance rules there rather than at the hidden mirror.
-    // NRD and RR use one explicitly selected primary lobe so radiance remains
-    // paired with the sampled path. RR no longer reuses that stochastic path
-    // as its reflection guide: the geometry-only query below supplies a dense
-    // dominant-reflection distance without changing this energy estimator.
-    bool useReconstructionLobe = (NrdEnabled != 0u || DlssGuideMode == 2u)
+    // NRD requires a single explicitly selected lobe because REBLUR consumes
+    // split signals and reconstructs missing hit distances. RR consumes one
+    // complete noisy HDR signal, so it retains the lower-variance mixture
+    // estimator and receives reflection tracking through a separate guide.
+    bool useNrdProbabilisticLobe = NrdEnabled != 0u
         && (payload.depth == 0u || isPsrSurface);
     if (kind == 0u)
     {
@@ -1109,7 +1199,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
                 float specularProbability = ComputeSpecularProbability(
                     baseColor.xyz,
                     metallic,
-                    useReconstructionLobe);
+                    useNrdProbabilisticLobe);
                 float diffuseBsdfPdf = (1.0 - specularProbability) * brdf.diffusePdf;
                 float specularBsdfPdf = specularProbability * brdf.specularPdf;
                 float bsdfPdf = diffuseBsdfPdf + specularBsdfPdf;
@@ -1118,10 +1208,10 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
                 float lightSquared = lightPdf * lightPdf;
                 float bsdfSquared = bsdfPdf * bsdfPdf;
                 float misWeight = lightSquared / max(lightSquared + bsdfSquared, 1.0e-7);
-                float diffuseMisWeight = useReconstructionLobe
+                float diffuseMisWeight = useNrdProbabilisticLobe
                     ? lightSquared / max(lightSquared + diffuseBsdfPdf * diffuseBsdfPdf, 1.0e-7)
                     : misWeight;
-                float specularMisWeight = useReconstructionLobe
+                float specularMisWeight = useNrdProbabilisticLobe
                     ? lightSquared / max(lightSquared + specularBsdfPdf * specularBsdfPdf, 1.0e-7)
                     : misWeight;
                 float3 lightRadiance = Materials[3].emissiveFactor;
@@ -1141,7 +1231,8 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
                 // old direct-light distance because they do not expose it to
                 // a reflection tracker.
                 if (any(specularSampleRadiance > 0.0)
-                    && !useReconstructionLobe)
+                    && NrdEnabled == 0u
+                    && DlssGuideMode != 2u)
                     specularHitDistance = lightDistance;
             }
         }
@@ -1339,8 +1430,8 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         float specularProbability = ComputeSpecularProbability(
             baseColor.xyz,
             metallic,
-            useReconstructionLobe);
-        float lobeSample = useReconstructionLobe
+            useNrdProbabilisticLobe);
+        float lobeSample = useNrdProbabilisticLobe
             ? SampleStratifiedLobe(DispatchRaysIndex().xy, payload.seed)
             : RandomFloat(payload.seed);
         sampledSpecular = specularProbability >= 1.0
@@ -1359,7 +1450,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
                 baseColor.xyz,
                 metallic,
                 roughness);
-            if (useReconstructionLobe)
+            if (useNrdProbabilisticLobe)
             {
                 samplePdf = specularProbability * brdf.specularPdf;
                 specularBounceWeight = brdf.specular * NoL / max(samplePdf, 1.0e-6);
@@ -1384,7 +1475,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
                 baseColor.xyz,
                 metallic,
                 roughness);
-            if (useReconstructionLobe)
+            if (useNrdProbabilisticLobe)
             {
                 samplePdf = (1.0 - specularProbability) * brdf.diffusePdf;
                 diffuseBounceWeight = brdf.diffuse * NoL / max(samplePdf, 1.0e-6);
@@ -1464,26 +1555,31 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     {
         payload.rawDiffuse = primaryUsesPsr ? child.rawDiffuse : localRawDiffuse;
         payload.rawSpecular = primaryUsesPsr ? child.rawSpecular : localRawSpecular;
-        // SVGF keeps the low-variance mixture estimator and therefore shares
-        // the continuation hitT across both non-zero lobe estimates. NRD and
-        // RR use a Bayer-stratified probabilistic lobe estimator: the skipped
-        // lobe is zero, so the exported hitT belongs to the signal that was
-        // actually sampled instead of fabricating moving reflection geometry.
+        // SVGF and RR keep the low-variance mixture estimator and therefore
+        // share the continuation hitT across both non-zero lobe estimates. NRD
+        // uses a Bayer-stratified probabilistic lobe estimator: the skipped
+        // lobe is zero, so only the selected in-lobe hitT is exported.
         if (any(diffuseBounceWeight > 0.0))
             diffuseHitDistance = child.hitDistance;
         if (any(specularBounceWeight > 0.0))
             specularHitDistance = child.hitDistance;
-        // RR consumes one dense specular guide rather than NRD's explicit
-        // probabilistic-skip contract.  Always use a stable in-lobe geometry
-        // query for ordinary rough surfaces, including frames whose radiance
-        // continuation sampled diffuse.  Perfect mirrors and transmission
-        // keep their actual continuation hit distance.
-        if (DlssGuideMode == 2u && kind == 0u)
+        // Trace reflection tracking independently from the noisy radiance
+        // sample. Explicit reflected-geometry motion avoids the residual
+        // subpixel wobble produced when RR derives it from scalar hitT.
+        if (DlssGuideMode == 2u && (kind == 0u || kind == 1u))
         {
-            specularHitDistance = TraceRrSpecularGuideHitDistance(
+            RrSpecularGuide rrGuide = TraceRrSpecularGuide(
                 hitPosition,
+                previousHitPosition,
                 normal,
-                WorldRayDirection());
+                PreviousWorldNormal(normal, instanceData),
+                WorldRayDirection(),
+                DlssMotion[DispatchRaysIndex().xy],
+                DispatchRaysDimensions().xy);
+            specularHitDistance = rrGuide.hitDistance;
+            DlssSpecularMotion[DispatchRaysIndex().xy] = ResetHistory != 0u
+                ? 0
+                : rrGuide.motion;
         }
         ReconstructionNoisyHdr[DispatchRaysIndex().xy] = float4(
             FiniteNonNegative(payload.rawDiffuse + payload.rawSpecular),
@@ -1606,6 +1702,8 @@ void LegacyClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttri
             DlssMotion[pixel] = ResetHistory != 0u
                 ? 0
                 : (previousUv - currentUv) * float2(size);
+            if (DlssGuideMode == 2u)
+                DlssSpecularMotion[pixel] = DlssMotion[pixel];
         }
     }
 

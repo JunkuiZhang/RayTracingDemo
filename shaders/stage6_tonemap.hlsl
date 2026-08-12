@@ -147,7 +147,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
                 ? Albedo.Load(int3(pixel, 0))
                 : LoadBilinear(Albedo, pixel, size, renderSize)).xyz;
         }
-        if (InputMode == 2u)
+        if (InputMode >= 2u)
         {
             // The DLSS input pass has already composed diffuse + specular.
             color = ToneMap(diffuse);
@@ -243,6 +243,15 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
             ? (nativeSize
                 ? NrdValidation.Load(int3(pixel, 0))
                 : LoadBilinear(NrdValidation, pixel, size, renderSize)).xyz
+            : 0.0.xxx;
+    }
+    else if (DebugMode == 12u)
+    {
+        float2 specularMotion = (nativeSize
+            ? NrdValidation.Load(int3(pixel, 0))
+            : LoadBilinear(NrdValidation, pixel, size, renderSize)).xy;
+        color = InputMode == 3u
+            ? float3(saturate(abs(specularMotion) * 0.05), 0.0)
             : 0.0.xxx;
     }
     else

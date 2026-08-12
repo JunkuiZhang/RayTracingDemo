@@ -1068,12 +1068,13 @@ const SHADER_DESCRIPTOR_COUNT: usize = 363;
 const SHADER_DESCRIPTOR_COUNT: usize = 386;
 #[cfg(feature = "streamline-rr")]
 const SHADER_DESCRIPTOR_COUNT: usize = 403;
-const DXR_UAV_REGISTER_COUNT: usize = 31;
+const DXR_UAV_REGISTER_COUNT: usize = 32;
 const RECONSTRUCTION_DIFFUSE_HIT_DISTANCE_UAV_REGISTER: usize = 15;
 const RECONSTRUCTION_SPECULAR_HIT_DISTANCE_UAV_REGISTER: usize = 16;
 const RECONSTRUCTION_PRIMARY_EMISSIVE_UAV_REGISTER: usize = 17;
 const DLSS_DEPTH_UAV_REGISTER: usize = 18;
 const DLSS_MOTION_UAV_REGISTER: usize = 19;
+const DLSS_SPECULAR_MOTION_UAV_REGISTER: usize = 31;
 const TRANSMISSION_RAW_DIFFUSE_UAV_REGISTER: usize = 20;
 const TRANSMISSION_VIEW_PROXY_UAV_REGISTER: usize = 30;
 #[cfg(feature = "streamline")]
@@ -1108,6 +1109,7 @@ const RR_INPUT_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage11
 const TONEMAP_INPUT_SVGF_SPLIT: u32 = 0;
 const TONEMAP_INPUT_NRD_SPLIT: u32 = 1;
 const TONEMAP_INPUT_COMPOSED_HDR: u32 = 2;
+const TONEMAP_INPUT_RR_HDR: u32 = 3;
 const DLSS_GUIDE_MODE_DISABLED: u32 = 0;
 const DLSS_GUIDE_MODE_SR: u32 = 1;
 const DLSS_GUIDE_MODE_RR: u32 = 2;
@@ -1129,7 +1131,9 @@ fn dlss_guide_mode(dlss_sr_active: bool, rr_active: bool) -> u32 {
 }
 
 fn tonemap_input_mode(denoiser: DenoiserBackend, dlss_active: bool) -> u32 {
-    if dlss_active {
+    if denoiser == DenoiserBackend::DlssRayReconstruction {
+        TONEMAP_INPUT_RR_HDR
+    } else if dlss_active {
         TONEMAP_INPUT_COMPOSED_HDR
     } else if denoiser == DenoiserBackend::NrdReblur {
         TONEMAP_INPUT_NRD_SPLIT
@@ -2002,7 +2006,11 @@ impl Dx12Renderer {
             let rr_path = self.denoiser == DenoiserBackend::DlssRayReconstruction;
             let dlss_active =
                 !rr_path && self.upscaler.uses_streamline() && self.debug_view == DebugView::Final;
-            let rr_active = rr_path && self.debug_view == DebugView::Final;
+            // RR guide views must inspect the exact frame contract consumed by
+            // the plugin. Keep RR evaluation and its projection jitter active
+            // for non-final debug views instead of silently falling back to an
+            // unrelated native path.
+            let rr_active = rr_path;
             #[cfg(feature = "streamline")]
             let dlss_frame_input = if dlss_active || rr_active {
                 Some(DlssFrameInput::from_cameras(
@@ -2616,12 +2624,6 @@ impl Dx12Renderer {
                             &mut self.transition_batch,
                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                         );
-                    generation
-                        .reconstruction_specular_hit_distance
-                        .collect_transition(
-                            &mut self.transition_batch,
-                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                        );
                     rr.normal_roughness.collect_transition(
                         &mut self.transition_batch,
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -2631,6 +2633,10 @@ impl Dx12Renderer {
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     );
                     rr.motion.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                    rr.specular_motion.collect_transition(
                         &mut self.transition_batch,
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     );
@@ -2661,12 +2667,10 @@ impl Dx12Renderer {
                         streamline_resource_tag(&rr.normal_roughness, 14, 0, render_extent),
                         streamline_resource_tag(&rr.motion, 1, 0, render_extent),
                         streamline_resource_tag(&rr.depth, 0, 1, render_extent),
-                        streamline_resource_tag(
-                            &generation.reconstruction_specular_hit_distance,
-                            42,
-                            0,
-                            render_extent,
-                        ),
+                        // Explicit reflected-geometry motion is the preferred
+                        // RR contract. Do not submit specular hit distance at
+                        // the same time: the two guides are alternatives.
+                        streamline_resource_tag(&rr.specular_motion, 10, 0, render_extent),
                     ]
                 };
                 self.submit_transition_batch(&mut command_recording_stats);
@@ -4568,6 +4572,8 @@ impl Dx12Renderer {
                 .collect_transition(&mut self.transition_batch, state);
             rr.motion
                 .collect_transition(&mut self.transition_batch, state);
+            rr.specular_motion
+                .collect_transition(&mut self.transition_batch, state);
         }
         generation
             .gbuffer_id
@@ -5538,9 +5544,13 @@ mod tests {
         assert_eq!(tonemap_input_mode(DenoiserBackend::NrdReblur, false), 1);
         assert_eq!(tonemap_input_mode(DenoiserBackend::Svgf, true), 2);
         assert_eq!(tonemap_input_mode(DenoiserBackend::NrdReblur, true), 2);
+        assert_eq!(
+            tonemap_input_mode(DenoiserBackend::DlssRayReconstruction, true),
+            TONEMAP_INPUT_RR_HDR
+        );
 
         let shader = include_str!("../../shaders/stage6_tonemap.hlsl");
-        assert!(shader.contains("if (InputMode == 2u)"));
+        assert!(shader.contains("if (InputMode >= 2u)"));
         assert!(shader.contains("color = ToneMap(diffuse);"));
 
         let resources = include_str!("d3d12/render_resources.rs");
@@ -5621,6 +5631,10 @@ mod tests {
             ),
             ("RWTexture2D<float> DlssDepth", DLSS_DEPTH_UAV_REGISTER),
             ("RWTexture2D<float2> DlssMotion", DLSS_MOTION_UAV_REGISTER),
+            (
+                "RWTexture2D<float2> DlssSpecularMotion",
+                DLSS_SPECULAR_MOTION_UAV_REGISTER,
+            ),
         ] {
             assert!(
                 shader.contains(&format!("{declaration} : register(u{register});")),
@@ -5682,24 +5696,35 @@ mod tests {
     }
 
     #[test]
-    fn reconstruction_lobes_export_matching_hit_distances() {
+    fn nrd_lobes_and_rr_motion_use_separate_reconstruction_contracts() {
         let bridge = include_str!("../../native/nrd_bridge/src/nrd_bridge.cpp");
         assert!(bridge.contains(
             "hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3"
         ));
         let shader = include_str!("../../shaders/stage3_triangle.hlsl");
-        assert!(shader.contains("minimumProbability = useReconstructionLobe ? 0.25 : 0.05"));
-        assert!(shader.contains("NrdEnabled != 0u || DlssGuideMode == 2u"));
+        assert!(shader.contains("minimumProbability = useNrdProbabilisticLobe ? 0.25 : 0.05"));
+        assert!(shader.contains("bool useNrdProbabilisticLobe = NrdEnabled != 0u"));
         assert!(shader.contains("(payload.depth == 0u || isPsrSurface)"));
         assert!(shader.contains("WritePsrSurfaceGuides"));
         assert!(shader.contains("child.psrActive == 2u"));
         assert!(shader.contains("psrMirrorIsStatic"));
         assert!(shader.contains("if (any(diffuseBounceWeight > 0.0))"));
         assert!(shader.contains("if (any(specularBounceWeight > 0.0))"));
-        assert!(shader.contains("&& !useReconstructionLobe"));
-        assert!(shader.contains("TraceRrSpecularGuideHitDistance"));
+        assert!(shader.contains("&& DlssGuideMode != 2u"));
+        assert!(shader.contains("RrSpecularGuide TraceRrSpecularGuide"));
         assert!(shader.contains("RayQuery<RAY_FLAG_CULL_BACK_FACING_TRIANGLES"));
-        assert!(shader.contains("if (DlssGuideMode == 2u && kind == 0u)"));
+        assert!(shader.contains("if (DlssGuideMode == 2u && (kind == 0u || kind == 1u))"));
+        assert!(shader.contains("CommittedTriangleBarycentrics"));
+        assert!(shader.contains("DlssSpecularMotion[DispatchRaysIndex().xy]"));
+
+        let renderer = include_str!("d3d12.rs");
+        assert!(renderer.contains("streamline_resource_tag(&rr.specular_motion, 10"));
+        assert!(!renderer.contains(
+            "streamline_resource_tag(\n                            &generation.reconstruction_specular_hit_distance"
+        ));
+        let resources = include_str!("d3d12/render_resources.rs");
+        assert!(resources.contains("&rr.specular_motion"));
+        assert!(resources.contains("reconstruction_specular_hit_distance"));
 
         let prep = include_str!("../../shaders/stage9_nrd_prep.hlsl");
         assert!(prep.contains("float materialId = clamp(round(baseColorKind.w), 0.0, 3.0)"));
