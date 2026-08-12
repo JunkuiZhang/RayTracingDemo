@@ -16,10 +16,11 @@ pub enum DebugView {
     ObjectMaterialId = 9,
     SpecularHitDistance = 10,
     NrdValidation = 11,
+    SpecularMotion = 12,
 }
 
 impl DebugView {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Final,
         Self::Raw,
         Self::Albedo,
@@ -32,6 +33,7 @@ impl DebugView {
         Self::ObjectMaterialId,
         Self::SpecularHitDistance,
         Self::NrdValidation,
+        Self::SpecularMotion,
     ];
 
     pub const fn from_index(index: u32) -> Option<Self> {
@@ -48,6 +50,7 @@ impl DebugView {
             9 => Some(Self::ObjectMaterialId),
             10 => Some(Self::SpecularHitDistance),
             11 => Some(Self::NrdValidation),
+            12 => Some(Self::SpecularMotion),
             _ => None,
         }
     }
@@ -66,6 +69,7 @@ impl DebugView {
             "object-material-id" => Some(Self::ObjectMaterialId),
             "specular-hit-distance" => Some(Self::SpecularHitDistance),
             "nrd-validation" => Some(Self::NrdValidation),
+            "specular-motion" => Some(Self::SpecularMotion),
             _ => None,
         }
     }
@@ -92,6 +96,7 @@ impl DebugView {
             Self::ObjectMaterialId => "object-material-id",
             Self::SpecularHitDistance => "specular-hit-distance",
             Self::NrdValidation => "nrd-validation",
+            Self::SpecularMotion => "specular-motion",
         }
     }
 
@@ -109,6 +114,7 @@ impl DebugView {
             Self::ObjectMaterialId => "物体/材质 ID",
             Self::SpecularHitDistance => "镜面命中距离",
             Self::NrdValidation => "NRD guide validation",
+            Self::SpecularMotion => "RR 镜面运动矢量",
         }
     }
 
@@ -132,7 +138,7 @@ mod tests {
             assert_eq!(DebugView::from_name(view.name()), Some(view));
             assert!(!view.title().is_empty());
         }
-        assert_eq!(DebugView::from_index(12), None);
+        assert_eq!(DebugView::from_index(13), None);
         assert_eq!(DebugView::from_name("unknown"), None);
     }
 
