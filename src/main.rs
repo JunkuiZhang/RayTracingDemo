@@ -240,14 +240,6 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                 _ => return Err(format!("未知参数：{argument}")),
             }
         }
-        if upscaler_requested && config.upscaler != upscaler::UpscalerMode::Native {
-            if dynamic_requested {
-                return Err("非 Native upscaler 不能与 --dynamic-resolution 同时使用".to_string());
-            }
-            if render_scale_requested {
-                return Err("非 Native upscaler 的内部尺寸由 Streamline optimal settings 决定，不能与 --render-scale 同时使用".to_string());
-            }
-        }
         if config.denoiser == reconstruction::DenoiserBackend::DlssRayReconstruction {
             if !upscaler_requested {
                 config.upscaler = upscaler::UpscalerMode::DlssQuality;
@@ -261,6 +253,18 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                     "--denoiser dlss-rr 只支持 dlss-quality、dlss-balanced 或 dlss-performance；RR 已融合降噪与超分，不能与 native/DLAA 或 DLSS SR 串联"
                         .to_string(),
                 );
+            }
+        }
+        // Validate the resolved mode, not only an explicitly requested one.
+        // RR implicitly selects Quality, so checking before this point would
+        // accidentally let dynamic resolution/render scale bypass the fixed
+        // optimal-extent contract used by the first RR increment.
+        if config.upscaler != upscaler::UpscalerMode::Native {
+            if dynamic_requested {
+                return Err("非 Native upscaler 不能与 --dynamic-resolution 同时使用".to_string());
+            }
+            if render_scale_requested {
+                return Err("非 Native upscaler 的内部尺寸由 Streamline optimal settings 决定，不能与 --render-scale 同时使用".to_string());
             }
         }
         if config.capture_output.is_none() && config.capture_after_spp.is_some() {
@@ -795,6 +799,27 @@ mod tests {
             "svgf".to_string(),
         ]);
         assert!(matches!(result, Err(message) if message.contains("不能与")));
+    }
+
+    #[test]
+    fn implicit_rr_quality_obeys_fixed_extent_conflicts() {
+        for conflicting_option in ["--dynamic-resolution", "--render-scale"] {
+            let mut arguments = vec!["--denoiser".to_string(), "dlss-rr".to_string()];
+            arguments.push(conflicting_option.to_string());
+            if conflicting_option == "--render-scale" {
+                arguments.push("0.67".to_string());
+            }
+            let error = match parse_arguments(arguments) {
+                Err(error) => error,
+                Ok(_) => {
+                    panic!("implicit RR Quality must not bypass fixed optimal-extent validation")
+                }
+            };
+            assert!(
+                error.contains("不能与"),
+                "unexpected conflict diagnostic: {error}"
+            );
+        }
     }
 
     #[test]

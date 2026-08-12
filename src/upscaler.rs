@@ -51,6 +51,19 @@ impl UpscalerMode {
         }
     }
 
+    /// RR is already a fused denoiser/upscaler, and Streamline v2.12 only
+    /// supports its three super-resolution quality modes in this renderer.
+    /// Keeping this cycle separate prevents F4 from creating an RR generation
+    /// without an RR viewport by accidentally entering Native or DLAA.
+    pub const fn next_ray_reconstruction_mode(self) -> Option<Self> {
+        match self {
+            Self::DlssQuality => Some(Self::DlssBalanced),
+            Self::DlssBalanced => Some(Self::DlssPerformance),
+            Self::DlssPerformance => Some(Self::DlssQuality),
+            Self::Native | Self::Dlaa => None,
+        }
+    }
+
     /// Return a stable mode number for the later Streamline adapter.
     pub const fn dlss_mode(self) -> Option<u32> {
         match self {
@@ -379,6 +392,23 @@ mod tests {
             mode = mode.next_mode();
             assert_eq!(mode, next);
         }
+    }
+
+    #[test]
+    fn ray_reconstruction_cycle_never_enters_native_or_dlaa() {
+        let mut mode = UpscalerMode::DlssQuality;
+        for expected in [
+            UpscalerMode::DlssBalanced,
+            UpscalerMode::DlssPerformance,
+            UpscalerMode::DlssQuality,
+        ] {
+            mode = mode
+                .next_ray_reconstruction_mode()
+                .expect("every valid RR mode must have a successor");
+            assert_eq!(mode, expected);
+        }
+        assert_eq!(UpscalerMode::Native.next_ray_reconstruction_mode(), None);
+        assert_eq!(UpscalerMode::Dlaa.next_ray_reconstruction_mode(), None);
     }
 
     #[test]

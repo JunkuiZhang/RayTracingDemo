@@ -3359,7 +3359,16 @@ impl Dx12Renderer {
         #[cfg(feature = "streamline")]
         {
             let old = self.upscaler;
-            let next = old.next_mode();
+            let next = if self.denoiser == DenoiserBackend::DlssRayReconstruction {
+                old.next_ray_reconstruction_mode().ok_or_else(|| {
+                    WindowsError::new(
+                        windows::core::HRESULT(0x80070057_u32 as i32),
+                        format!("RR 当前处于不受支持的 upscaler 模式：{old}"),
+                    )
+                })?
+            } else {
+                old.next_mode()
+            };
             let output_extent = self.active_generation.output_extent;
             let new_streamline_viewport = if next.uses_streamline() {
                 let runtime = self.streamline.as_ref().ok_or_else(|| {
