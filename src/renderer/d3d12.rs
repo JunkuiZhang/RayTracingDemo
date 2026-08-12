@@ -436,12 +436,14 @@ impl StreamlineRuntime {
             world_to_camera_view: glam::Mat4::IDENTITY.to_cols_array(),
             camera_view_to_world: glam::Mat4::IDENTITY.to_cols_array(),
             alpha_upscaling_enabled: 0,
-            dlaa_preset: 0,
-            quality_preset: 0,
-            balanced_preset: 0,
-            performance_preset: 0,
-            ultra_performance_preset: 0,
-            ultra_quality_preset: 0,
+            // Apply one validated model to every performance mode. eDefault
+            // may change after an OTA and is not a stable validation baseline.
+            dlaa_preset: DLSS_RR_RENDER_PRESET,
+            quality_preset: DLSS_RR_RENDER_PRESET,
+            balanced_preset: DLSS_RR_RENDER_PRESET,
+            performance_preset: DLSS_RR_RENDER_PRESET,
+            ultra_performance_preset: DLSS_RR_RENDER_PRESET,
+            ultra_quality_preset: DLSS_RR_RENDER_PRESET,
         })
     }
 
@@ -1109,6 +1111,11 @@ const TONEMAP_INPUT_COMPOSED_HDR: u32 = 2;
 const DLSS_GUIDE_MODE_DISABLED: u32 = 0;
 const DLSS_GUIDE_MODE_SR: u32 = 1;
 const DLSS_GUIDE_MODE_RR: u32 = 2;
+// Streamline 2.12's latest transformer. A bounded 121..128 static-frame A/B
+// against eDefault and preset D selected E for substantially lower low-frequency
+// RR variation. Pinning it also keeps image quality reproducible across OTA.
+#[cfg(feature = "streamline-rr")]
+const DLSS_RR_RENDER_PRESET: u32 = 5; // DLSSDPreset::ePresetE
 
 fn dlss_guide_mode(dlss_sr_active: bool, rr_active: bool) -> u32 {
     debug_assert!(!(dlss_sr_active && rr_active));
@@ -5471,6 +5478,9 @@ mod tests {
         assert_eq!(dlss.exposure_scale, rr.exposure_scale);
         assert_eq!(dlss.color_buffers_hdr, rr.color_buffers_hdr);
         assert_eq!(dlss.alpha_upscaling_enabled, rr.alpha_upscaling_enabled);
+        assert_eq!(rr.quality_preset, DLSS_RR_RENDER_PRESET);
+        assert_eq!(rr.balanced_preset, DLSS_RR_RENDER_PRESET);
+        assert_eq!(rr.performance_preset, DLSS_RR_RENDER_PRESET);
     }
 
     #[cfg(feature = "streamline-rr")]
@@ -5686,6 +5696,10 @@ mod tests {
         assert!(shader.contains("psrMirrorIsStatic"));
         assert!(shader.contains("if (any(diffuseBounceWeight > 0.0))"));
         assert!(shader.contains("if (any(specularBounceWeight > 0.0))"));
+        assert!(shader.contains("&& !useReconstructionLobe"));
+        assert!(shader.contains("TraceRrSpecularGuideHitDistance"));
+        assert!(shader.contains("RayQuery<RAY_FLAG_CULL_BACK_FACING_TRIANGLES"));
+        assert!(shader.contains("if (DlssGuideMode == 2u && kind == 0u)"));
 
         let prep = include_str!("../../shaders/stage9_nrd_prep.hlsl");
         assert!(prep.contains("float materialId = clamp(round(baseColorKind.w), 0.0, 3.0)"));
