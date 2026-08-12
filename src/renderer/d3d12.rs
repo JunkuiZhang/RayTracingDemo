@@ -66,6 +66,8 @@ use self::{
     texture::TextureSet,
 };
 use raytracing::{AccelerationStructures, RaytracingPipeline, SceneGeometry};
+#[cfg(feature = "nrd")]
+use render_resources::NrdDenoiserResources;
 
 struct RetiredRenderResourceGeneration {
     retire_fence: u64,
@@ -686,17 +688,19 @@ mod texture;
 
 const FRAME_COUNT: usize = 3;
 #[cfg(not(any(feature = "streamline", feature = "nrd")))]
-const SHADER_DESCRIPTOR_COUNT: usize = 321;
+const SHADER_DESCRIPTOR_COUNT: usize = 314;
 #[cfg(all(feature = "nrd", not(feature = "streamline")))]
-const SHADER_DESCRIPTOR_COUNT: usize = 323;
+const SHADER_DESCRIPTOR_COUNT: usize = 363;
 #[cfg(feature = "streamline")]
-const SHADER_DESCRIPTOR_COUNT: usize = 346;
-const DXR_UAV_REGISTER_COUNT: usize = 20;
+const SHADER_DESCRIPTOR_COUNT: usize = 386;
+const DXR_UAV_REGISTER_COUNT: usize = 31;
 const RECONSTRUCTION_DIFFUSE_HIT_DISTANCE_UAV_REGISTER: usize = 15;
 const RECONSTRUCTION_SPECULAR_HIT_DISTANCE_UAV_REGISTER: usize = 16;
 const RECONSTRUCTION_PRIMARY_EMISSIVE_UAV_REGISTER: usize = 17;
 const DLSS_DEPTH_UAV_REGISTER: usize = 18;
 const DLSS_MOTION_UAV_REGISTER: usize = 19;
+const TRANSMISSION_RAW_DIFFUSE_UAV_REGISTER: usize = 20;
+const TRANSMISSION_VIEW_PROXY_UAV_REGISTER: usize = 30;
 #[cfg(feature = "streamline")]
 const PCL_SIMULATION_START: u32 = 0;
 #[cfg(feature = "streamline")]
@@ -726,18 +730,20 @@ const DLSS_COMPOSE_SHADER: &[u8] =
 
 const DXR_TABLE_BASE: usize = 0;
 #[cfg(feature = "nrd")]
-const NRD_PREP_TABLE_BASE: usize = 298;
+const NRD_PREP_TABLE_BASE: usize = 314;
 #[cfg(feature = "nrd")]
-const NRD_COMPOSE_TABLE_BASE: usize = 316;
-const TEMPORAL_TABLE_BASES: [usize; 2] = [152, 180];
-const ATROUS_HISTORY_TABLE_BASES: [usize; 2] = [208, 218];
-const ATROUS_PING_TO_PONG_BASES: [usize; 2] = [228, 238];
-const ATROUS_PONG_TO_PING_BASES: [usize; 2] = [248, 258];
-const TONEMAP_TABLE_BASES: [usize; 2] = [268, 283];
+const NRD_TRANSMISSION_PREP_TABLE_BASE: usize = 332;
+#[cfg(feature = "nrd")]
+const NRD_COMPOSE_TABLE_BASE: usize = 350;
+const TEMPORAL_TABLE_BASES: [usize; 2] = [168, 196];
+const ATROUS_HISTORY_TABLE_BASES: [usize; 2] = [224, 234];
+const ATROUS_PING_TO_PONG_BASES: [usize; 2] = [244, 254];
+const ATROUS_PONG_TO_PING_BASES: [usize; 2] = [264, 274];
+const TONEMAP_TABLE_BASES: [usize; 2] = [284, 299];
 #[cfg(feature = "streamline")]
-const DLSS_COMPOSE_TABLE_BASES: [usize; 2] = [323, 327];
+const DLSS_COMPOSE_TABLE_BASES: [usize; 2] = [363, 367];
 #[cfg(feature = "streamline")]
-const DLSS_TONEMAP_TABLE_BASE: usize = 331;
+const DLSS_TONEMAP_TABLE_BASE: usize = 371;
 
 #[cfg(feature = "nrd")]
 fn bridge_resource(resource: &TrackedResource) -> reconstruction::NrdBridgeResource {
@@ -746,6 +752,47 @@ fn bridge_resource(resource: &TrackedResource) -> reconstruction::NrdBridgeResou
         state: resource.state().0 as u32,
         format: resource.format().0 as u32,
     }
+}
+
+#[cfg(feature = "nrd")]
+fn bridge_resources_for_layer(
+    layer: &NrdDenoiserResources,
+    validation_output: reconstruction::NrdBridgeResource,
+) -> reconstruction::NrdBridgeResources {
+    reconstruction::NrdBridgeResources {
+        motion: bridge_resource(&layer.motion),
+        normal_roughness: bridge_resource(&layer.normal_roughness),
+        view_z: bridge_resource(&layer.view_z),
+        diffuse_radiance_hit_distance: bridge_resource(&layer.diffuse_input),
+        specular_radiance_hit_distance: bridge_resource(&layer.specular_input),
+        diffuse_output: bridge_resource(&layer.diffuse_output),
+        specular_output: bridge_resource(&layer.specular_output),
+        validation_output,
+    }
+}
+
+#[cfg(feature = "nrd")]
+fn apply_bridge_resource_states(
+    layer: &mut NrdDenoiserResources,
+    resources: &reconstruction::NrdBridgeResources,
+) -> Result<()> {
+    set_bridge_resource_state(&mut layer.motion, resources.motion.state)?;
+    set_bridge_resource_state(
+        &mut layer.normal_roughness,
+        resources.normal_roughness.state,
+    )?;
+    set_bridge_resource_state(&mut layer.view_z, resources.view_z.state)?;
+    set_bridge_resource_state(
+        &mut layer.diffuse_input,
+        resources.diffuse_radiance_hit_distance.state,
+    )?;
+    set_bridge_resource_state(
+        &mut layer.specular_input,
+        resources.specular_radiance_hit_distance.state,
+    )?;
+    set_bridge_resource_state(&mut layer.diffuse_output, resources.diffuse_output.state)?;
+    set_bridge_resource_state(&mut layer.specular_output, resources.specular_output.state)?;
+    Ok(())
 }
 
 #[cfg(feature = "nrd")]
@@ -1184,7 +1231,7 @@ impl Dx12Renderer {
             let nrd_compose_pipeline = ComputePipeline::new(
                 &device,
                 NRD_COMPOSE_SHADER,
-                5,
+                11,
                 2,
                 1,
                 "阶段 9 NRD REBLUR 输出合成",
@@ -3800,6 +3847,24 @@ impl Dx12Renderer {
         generation
             .reconstruction_primary_emissive
             .collect_transition(&mut self.transition_batch, state);
+        #[cfg(feature = "nrd")]
+        if let Some(nrd) = generation.nrd.as_mut() {
+            for resource in [
+                &mut nrd.transmission_raw_diffuse,
+                &mut nrd.transmission_raw_specular,
+                &mut nrd.transmission_base_color,
+                &mut nrd.transmission_normal_roughness,
+                &mut nrd.transmission_view_z,
+                &mut nrd.transmission_motion,
+                &mut nrd.transmission_diffuse_hit_distance,
+                &mut nrd.transmission_specular_hit_distance,
+                &mut nrd.transmission_primary_emissive,
+                &mut nrd.transmission_diffuse_albedo,
+                &mut nrd.transmission_view_proxy,
+            ] {
+                resource.collect_transition(&mut self.transition_batch, state);
+            }
+        }
         generation
             .nrd_validation
             .collect_transition(&mut self.transition_batch, state);
@@ -3822,21 +3887,23 @@ impl Dx12Renderer {
                     "NRD generation resources 未初始化",
                 )
             })?;
-            for resource in [
-                &mut nrd.diffuse_input,
-                &mut nrd.specular_input,
-                &mut nrd.normal_roughness,
-                &mut nrd.motion,
-                &mut nrd.view_z,
-                &mut nrd.diffuse_factor,
-                &mut nrd.specular_factor,
-                &mut nrd.diffuse_output,
-                &mut nrd.specular_output,
-            ] {
-                resource.collect_transition(
-                    &mut self.transition_batch,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                );
+            for layer in [&mut nrd.primary, &mut nrd.transmission] {
+                for resource in [
+                    &mut layer.diffuse_input,
+                    &mut layer.specular_input,
+                    &mut layer.normal_roughness,
+                    &mut layer.motion,
+                    &mut layer.view_z,
+                    &mut layer.diffuse_factor,
+                    &mut layer.specular_factor,
+                    &mut layer.diffuse_output,
+                    &mut layer.specular_output,
+                ] {
+                    resource.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    );
+                }
             }
         }
         self.submit_transition_batch(command_recording_stats);
@@ -3859,6 +3926,20 @@ impl Dx12Renderer {
             self.command_list
                 .Dispatch(render_groups_x, render_groups_y, 1);
         }
+        self.nrd_prep_pipeline.set_arguments(
+            &self.command_list,
+            self.active_generation
+                .shader_heap
+                .gpu_handle(NRD_TRANSMISSION_PREP_TABLE_BASE),
+            &self
+                .reconstruction_frame_state
+                .camera_position
+                .map(f32::to_bits),
+        );
+        unsafe {
+            self.command_list
+                .Dispatch(render_groups_x, render_groups_y, 1);
+        }
         self.gpu_profiler
             .end(&self.command_list, frame_index, GpuPass::NrdPrep);
         self.gpu_profiler.end_event(&self.command_list);
@@ -3871,24 +3952,26 @@ impl Dx12Renderer {
                     "NRD generation resources 未初始化",
                 )
             })?;
-            for resource in [
-                &mut nrd.diffuse_input,
-                &mut nrd.specular_input,
-                &mut nrd.normal_roughness,
-                &mut nrd.motion,
-                &mut nrd.view_z,
-            ] {
-                resource.collect_transition(
-                    &mut self.transition_batch,
-                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
-                        | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                );
-            }
-            for resource in [&mut nrd.diffuse_factor, &mut nrd.specular_factor] {
-                resource.collect_transition(
-                    &mut self.transition_batch,
-                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                );
+            for layer in [&mut nrd.primary, &mut nrd.transmission] {
+                for resource in [
+                    &mut layer.diffuse_input,
+                    &mut layer.specular_input,
+                    &mut layer.normal_roughness,
+                    &mut layer.motion,
+                    &mut layer.view_z,
+                ] {
+                    resource.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+                            | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                    );
+                }
+                for resource in [&mut layer.diffuse_factor, &mut layer.specular_factor] {
+                    resource.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                }
             }
         }
         if self.debug_view == DebugView::NrdValidation {
@@ -3901,7 +3984,7 @@ impl Dx12Renderer {
 
         let frame_state = self.reconstruction_frame_state;
         let enable_validation = self.debug_view == DebugView::NrdValidation;
-        let mut bridge_resources = {
+        let (mut primary_bridge_resources, mut transmission_bridge_resources) = {
             let generation = &self.active_generation;
             let nrd = generation.nrd.as_ref().ok_or_else(|| {
                 WindowsError::new(
@@ -3909,20 +3992,18 @@ impl Dx12Renderer {
                     "NRD generation resources 未初始化",
                 )
             })?;
-            reconstruction::NrdBridgeResources {
-                motion: bridge_resource(&nrd.motion),
-                normal_roughness: bridge_resource(&nrd.normal_roughness),
-                view_z: bridge_resource(&nrd.view_z),
-                diffuse_radiance_hit_distance: bridge_resource(&nrd.diffuse_input),
-                specular_radiance_hit_distance: bridge_resource(&nrd.specular_input),
-                diffuse_output: bridge_resource(&nrd.diffuse_output),
-                specular_output: bridge_resource(&nrd.specular_output),
-                validation_output: if enable_validation {
-                    bridge_resource(&generation.nrd_validation)
-                } else {
-                    reconstruction::NrdBridgeResource::default()
-                },
-            }
+            let validation = if enable_validation {
+                bridge_resource(&generation.nrd_validation)
+            } else {
+                reconstruction::NrdBridgeResource::default()
+            };
+            (
+                bridge_resources_for_layer(&nrd.primary, validation),
+                bridge_resources_for_layer(
+                    &nrd.transmission,
+                    reconstruction::NrdBridgeResource::default(),
+                ),
+            )
         };
         self.gpu_profiler
             .begin(&self.command_list, frame_index, GpuPass::NrdDenoise);
@@ -3936,17 +4017,32 @@ impl Dx12Renderer {
                     "NRD generation resources 未初始化",
                 )
             })?;
-            let denoise_result = unsafe {
-                nrd.backend.denoise(
+            let primary_result = unsafe {
+                nrd.primary.backend.denoise(
                     &frame_state,
-                    &mut bridge_resources,
+                    &mut primary_bridge_resources,
                     &self.command_list,
                     enable_validation,
                 )
             };
-            if let Err(error) = denoise_result {
+            if let Err(error) = primary_result {
                 eprintln!(
-                    "nrd_dispatch_failed status=error frame={} error={error}",
+                    "nrd_dispatch_failed layer=primary status=error frame={} error={error}",
+                    frame_state.frame_index
+                );
+                return Err(error);
+            }
+            let transmission_result = unsafe {
+                nrd.transmission.backend.denoise(
+                    &frame_state,
+                    &mut transmission_bridge_resources,
+                    &self.command_list,
+                    false,
+                )
+            };
+            if let Err(error) = transmission_result {
+                eprintln!(
+                    "nrd_dispatch_failed layer=transmission status=error frame={} error={error}",
                     frame_state.frame_index
                 );
                 return Err(error);
@@ -3964,32 +4060,12 @@ impl Dx12Renderer {
                     "NRD generation resources 未初始化",
                 )
             })?;
-            set_bridge_resource_state(&mut nrd.motion, bridge_resources.motion.state)?;
-            set_bridge_resource_state(
-                &mut nrd.normal_roughness,
-                bridge_resources.normal_roughness.state,
-            )?;
-            set_bridge_resource_state(&mut nrd.view_z, bridge_resources.view_z.state)?;
-            set_bridge_resource_state(
-                &mut nrd.diffuse_input,
-                bridge_resources.diffuse_radiance_hit_distance.state,
-            )?;
-            set_bridge_resource_state(
-                &mut nrd.specular_input,
-                bridge_resources.specular_radiance_hit_distance.state,
-            )?;
-            set_bridge_resource_state(
-                &mut nrd.diffuse_output,
-                bridge_resources.diffuse_output.state,
-            )?;
-            set_bridge_resource_state(
-                &mut nrd.specular_output,
-                bridge_resources.specular_output.state,
-            )?;
+            apply_bridge_resource_states(&mut nrd.primary, &primary_bridge_resources)?;
+            apply_bridge_resource_states(&mut nrd.transmission, &transmission_bridge_resources)?;
             if enable_validation {
                 set_bridge_resource_state(
                     &mut generation.nrd_validation,
-                    bridge_resources.validation_output.state,
+                    primary_bridge_resources.validation_output.state,
                 )?;
             }
         }
@@ -4010,11 +4086,13 @@ impl Dx12Renderer {
                     "NRD generation resources 未初始化",
                 )
             })?;
-            for resource in [&mut nrd.diffuse_output, &mut nrd.specular_output] {
-                resource.collect_transition(
-                    &mut self.transition_batch,
-                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                );
+            for layer in [&mut nrd.primary, &mut nrd.transmission] {
+                for resource in [&mut layer.diffuse_output, &mut layer.specular_output] {
+                    resource.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                }
             }
         }
         self.active_generation
@@ -4184,7 +4262,7 @@ impl Dx12Renderer {
         let nrd_compose = ComputePipeline::new(
             &self.device,
             &shaders.nrd_compose,
-            5,
+            11,
             2,
             1,
             "阶段 9 NRD REBLUR 输出合成",
@@ -4614,7 +4692,11 @@ mod tests {
         #[cfg(feature = "nrd")]
         {
             ranges.push((NRD_PREP_TABLE_BASE, NRD_PREP_TABLE_BASE + 18));
-            ranges.push((NRD_COMPOSE_TABLE_BASE, NRD_COMPOSE_TABLE_BASE + 7));
+            ranges.push((
+                NRD_TRANSMISSION_PREP_TABLE_BASE,
+                NRD_TRANSMISSION_PREP_TABLE_BASE + 18,
+            ));
+            ranges.push((NRD_COMPOSE_TABLE_BASE, NRD_COMPOSE_TABLE_BASE + 13));
         }
         ranges.sort_unstable();
 
@@ -4653,6 +4735,28 @@ mod tests {
             3,
             "DLSS guide clear and both first-hit paths must remain uniformly guarded"
         );
+        for (offset, declaration) in [
+            "RWTexture2D<float4> TransmissionRawDiffuse",
+            "RWTexture2D<float4> TransmissionRawSpecular",
+            "RWTexture2D<float4> TransmissionBaseColor",
+            "RWTexture2D<float4> TransmissionNormalRoughness",
+            "RWTexture2D<float> TransmissionViewZ",
+            "RWTexture2D<float4> TransmissionMotion",
+            "RWTexture2D<float> TransmissionDiffuseHitDistance",
+            "RWTexture2D<float> TransmissionSpecularHitDistance",
+            "RWTexture2D<float4> TransmissionPrimaryEmissive",
+            "RWTexture2D<float4> TransmissionDiffuseAlbedo",
+            "RWTexture2D<float4> TransmissionViewProxy",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let register = TRANSMISSION_RAW_DIFFUSE_UAV_REGISTER + offset;
+            assert!(
+                shader.contains(&format!("{declaration} : register(u{register});")),
+                "transmission-layer UAV differs from the descriptor contract: {declaration}"
+            );
+        }
         assert!(shader.contains("uint NrdEnabled;"));
         assert!(shader.contains("SampleOwenSobol2D"));
         assert!(shader.contains("SampleGgxVndfDirection"));
@@ -4660,6 +4764,24 @@ mod tests {
         assert!(shader.contains("payload.depth > 0u && payload.firstKind != 0u ? 4u : 1u"));
         assert_eq!(shader.matches("6u + payload.depth * 8u").count(), 2);
         assert!(!shader.contains("SampleGgxDirection"));
+    }
+
+    #[test]
+    fn nrd_glass_layers_are_denoised_before_fresnel_composition() {
+        let shader = include_str!("../../shaders/stage3_triangle.hlsl");
+        assert!(shader.contains("payload.psrActive == 3u"));
+        assert!(
+            shader.contains("refractionChild.psrThroughput = baseColor.xyz * refractionWeight")
+        );
+        assert!(shader.contains("payload.radiance - layeredTransmission"));
+        assert!(shader.contains("TransmissionBaseColor[pixel] = float4(0, 0, 0, -1)"));
+
+        let compose = include_str!("../../shaders/stage9_nrd_compose.hlsl");
+        assert!(compose.contains("TransmissionDiffuseRadianceHitDistance"));
+        assert!(compose.contains("TransmissionSpecularRadianceHitDistance"));
+        assert!(compose.contains("TransmissionBaseColor.Load(pixel).w >= -0.5"));
+        assert!(compose.contains("restoredTransmissionDiffuse"));
+        assert!(compose.contains("restoredTransmissionSpecular"));
     }
 
     #[test]
