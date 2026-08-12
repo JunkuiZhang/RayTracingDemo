@@ -19,7 +19,7 @@ use super::{
 };
 
 #[cfg(feature = "streamline")]
-use super::{DLSS_COMPOSE_TABLE_BASES, DLSS_TONEMAP_TABLE_BASE};
+use super::{DLSS_COMPOSE_TABLE_BASES, DLSS_TONEMAP_TABLE_BASE, create_null_texture_srv};
 #[cfg(feature = "nrd")]
 use super::{NRD_COMPOSE_TABLE_BASE, NRD_PREP_TABLE_BASE};
 
@@ -908,7 +908,10 @@ impl RenderResourceGeneration {
                 };
                 let dlss_tonemap_srvs = [
                     &dlss.output_hdr,
-                    &dlss.output_hdr,
+                    // t1 is unused in composed-HDR mode. It is overwritten by
+                    // a typed null SRV below so an accidental shader read is
+                    // energy-neutral rather than a second copy of the output.
+                    raw_specular,
                     raw_diffuse,
                     raw_specular,
                     albedo,
@@ -929,7 +932,13 @@ impl RenderResourceGeneration {
                         DLSS_TONEMAP_TABLE_BASE,
                         &dlss_tonemap_srvs,
                         &[display_output],
-                    )
+                    );
+                    create_null_texture_srv(
+                        device,
+                        &self.shader_heap,
+                        DLSS_TONEMAP_TABLE_BASE + 1,
+                        DXGI_FORMAT_R16G16B16A16_FLOAT,
+                    );
                 };
             }
         }

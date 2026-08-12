@@ -728,6 +728,20 @@ const NRD_COMPOSE_SHADER: &[u8] =
 const DLSS_COMPOSE_SHADER: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/stage10_dlss_input.dxil"));
 
+const TONEMAP_INPUT_SVGF_SPLIT: u32 = 0;
+const TONEMAP_INPUT_NRD_SPLIT: u32 = 1;
+const TONEMAP_INPUT_COMPOSED_HDR: u32 = 2;
+
+fn tonemap_input_mode(denoiser: DenoiserBackend, dlss_active: bool) -> u32 {
+    if dlss_active {
+        TONEMAP_INPUT_COMPOSED_HDR
+    } else if denoiser == DenoiserBackend::NrdReblur {
+        TONEMAP_INPUT_NRD_SPLIT
+    } else {
+        TONEMAP_INPUT_SVGF_SPLIT
+    }
+}
+
 const DXR_TABLE_BASE: usize = 0;
 #[cfg(feature = "nrd")]
 const NRD_PREP_TABLE_BASE: usize = 314;
@@ -2122,7 +2136,7 @@ impl Dx12Renderer {
                 &[
                     self.debug_view.hlsl_value(),
                     1.0_f32.to_bits(),
-                    u32::from(self.denoiser == DenoiserBackend::NrdReblur || dlss_active),
+                    tonemap_input_mode(self.denoiser, dlss_active),
                 ],
             );
             self.command_list
@@ -4359,6 +4373,33 @@ unsafe fn create_texture_srv(
     }
 }
 
+#[cfg(feature = "streamline")]
+unsafe fn create_null_texture_srv(
+    device: &ID3D12Device,
+    heap: &DescriptorHeap,
+    index: usize,
+    format: DXGI_FORMAT,
+) {
+    let description = D3D12_SHADER_RESOURCE_VIEW_DESC {
+        Format: format,
+        ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
+        Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+        Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+            Texture2D: D3D12_TEX2D_SRV {
+                MostDetailedMip: 0,
+                MipLevels: 1,
+                PlaneSlice: 0,
+                ResourceMinLODClamp: 0.0,
+            },
+        },
+    };
+    unsafe {
+        // A typed null SRV is the neutral descriptor for an unused texture:
+        // any accidental read returns zero instead of duplicating HDR energy.
+        device.CreateShaderResourceView(None, Some(&description), heap.cpu_handle(index));
+    }
+}
+
 unsafe fn create_texture_uav(
     device: &ID3D12Device,
     heap: &DescriptorHeap,
@@ -4666,6 +4707,23 @@ mod tests {
     #[test]
     fn camera_constants_match_the_sixteen_dword_root_constant_contract() {
         assert_eq!(size_of::<CameraConstants>(), 16 * size_of::<u32>());
+    }
+
+    #[test]
+    fn tonemap_distinguishes_split_signals_from_composed_dlss_hdr() {
+        assert_eq!(tonemap_input_mode(DenoiserBackend::Svgf, false), 0);
+        assert_eq!(tonemap_input_mode(DenoiserBackend::NrdReblur, false), 1);
+        assert_eq!(tonemap_input_mode(DenoiserBackend::Svgf, true), 2);
+        assert_eq!(tonemap_input_mode(DenoiserBackend::NrdReblur, true), 2);
+
+        let shader = include_str!("../../shaders/stage6_tonemap.hlsl");
+        assert!(shader.contains("if (InputMode == 2u)"));
+        assert!(shader.contains("color = ToneMap(diffuse);"));
+
+        let resources = include_str!("d3d12/render_resources.rs");
+        assert!(resources.contains("DLSS_TONEMAP_TABLE_BASE + 1"));
+        assert!(resources.contains("DXGI_FORMAT_R16G16B16A16_FLOAT"));
+        assert!(!resources.contains("&dlss.output_hdr,\n                    &dlss.output_hdr,"));
     }
 
     #[test]

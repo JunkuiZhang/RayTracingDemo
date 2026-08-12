@@ -19,7 +19,10 @@ cbuffer ToneMapConstants : register(b0)
 {
     uint DebugMode;
     float Exposure;
-    uint DenoiserMode;
+    // 0 = SVGF split signal, 1 = NRD split radiance, 2 = already-composed HDR.
+    // DLSS consumes the split signal before this pass and therefore returns a
+    // single composed HDR texture that must never be added a second time.
+    uint InputMode;
 };
 
 float3 ToneMap(float3 hdr)
@@ -138,16 +141,24 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         float3 diffuse = (nativeSize
             ? FilteredDiffuse.Load(int3(pixel, 0))
             : LoadBilinear(FilteredDiffuse, pixel, size, renderSize)).xyz;
-        if (DenoiserMode == 0u)
+        if (InputMode == 0u)
         {
             diffuse *= (nativeSize
                 ? Albedo.Load(int3(pixel, 0))
                 : LoadBilinear(Albedo, pixel, size, renderSize)).xyz;
         }
-        float3 specular = (nativeSize
-            ? FilteredSpecular.Load(int3(pixel, 0))
-            : LoadBilinear(FilteredSpecular, pixel, size, renderSize)).xyz;
-        color = ToneMap(diffuse + specular);
+        if (InputMode == 2u)
+        {
+            // The DLSS input pass has already composed diffuse + specular.
+            color = ToneMap(diffuse);
+        }
+        else
+        {
+            float3 specular = (nativeSize
+                ? FilteredSpecular.Load(int3(pixel, 0))
+                : LoadBilinear(FilteredSpecular, pixel, size, renderSize)).xyz;
+            color = ToneMap(diffuse + specular);
+        }
     }
     else if (DebugMode == 1u)
     {
@@ -228,7 +239,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     }
     else if (DebugMode == 11u)
     {
-        color = DenoiserMode == 1u
+        color = InputMode == 1u
             ? (nativeSize
                 ? NrdValidation.Load(int3(pixel, 0))
                 : LoadBilinear(NrdValidation, pixel, size, renderSize)).xyz
