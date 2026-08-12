@@ -52,7 +52,9 @@ impl DenoiserBackend {
     }
 
     pub const fn nrd_compiled(self) -> bool {
-        matches!(self, Self::NrdReblur) && cfg!(feature = "nrd")
+        // This reports build capability, not the active path. RR keeps NRD
+        // inactive at runtime even when the optional NRD bridge is compiled.
+        cfg!(feature = "nrd")
     }
 
     pub fn requested_startup_error(self) -> Option<String> {
@@ -430,7 +432,10 @@ mod tests {
         assert!(ReconstructionPath::from_backend(DenoiserBackend::Svgf).is_svgf());
         assert!(ReconstructionPath::from_backend(DenoiserBackend::NrdReblur).is_nrd());
         assert!(ReconstructionPath::from_backend(DenoiserBackend::DlssRayReconstruction).is_rr());
-        assert!(!DenoiserBackend::DlssRayReconstruction.nrd_compiled());
+        assert_eq!(
+            DenoiserBackend::DlssRayReconstruction.nrd_compiled(),
+            cfg!(feature = "nrd")
+        );
     }
 
     #[test]
