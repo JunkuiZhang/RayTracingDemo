@@ -4727,6 +4727,15 @@ mod tests {
     }
 
     #[test]
+    fn svgf_does_not_clip_stable_sparse_history_to_one_frame() {
+        let shader = include_str!("../../shaders/stage6_temporal.hlsl");
+        assert!(shader.contains("bool movingHistory = motionMagnitude > 0.01"));
+        assert!(shader.contains("if (movingHistory)"));
+        assert!(shader.contains("previousDiffuse = clamp(previousDiffuse"));
+        assert!(shader.contains("creates a systematic dark bias"));
+    }
+
+    #[test]
     fn descriptor_tables_do_not_overlap_and_fit_the_heap() {
         let mut ranges = vec![(
             DXR_TABLE_BASE,

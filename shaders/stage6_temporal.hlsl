@@ -140,28 +140,33 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     if (valid)
     {
-        float3 diffuseMinimum;
-        float3 diffuseMaximum;
-        float3 specularMinimum;
-        float3 specularMaximum;
-        NeighborhoodBounds(
-            pixel,
-            size,
-            currentId,
-            diffuseMinimum,
-            diffuseMaximum,
-            specularMinimum,
-            specularMaximum);
-        float3 previousDiffuse = clamp(
-            PreviousDiffuse.Load(int3(previousPixel, 0)).xyz,
-            diffuseMinimum,
-            diffuseMaximum);
-        float3 previousSpecular = clamp(
-            PreviousSpecular.Load(int3(previousPixel, 0)).xyz,
-            specularMinimum,
-            specularMaximum);
-        uint2 previousLength = PreviousHistoryLength.Load(int3(previousPixel, 0));
         float motionMagnitude = length(Motion.Load(int3(pixel, 0)));
+        // Ignore only floating-point drift. Even subpixel object motion needs
+        // clipping to avoid carrying a long stationary history as a ghost.
+        bool movingHistory = motionMagnitude > 0.01;
+        float3 previousDiffuse = PreviousDiffuse.Load(int3(previousPixel, 0)).xyz;
+        float3 previousSpecular = PreviousSpecular.Load(int3(previousPixel, 0)).xyz;
+        if (movingHistory)
+        {
+            float3 diffuseMinimum;
+            float3 diffuseMaximum;
+            float3 specularMinimum;
+            float3 specularMaximum;
+            NeighborhoodBounds(
+                pixel,
+                size,
+                currentId,
+                diffuseMinimum,
+                diffuseMaximum,
+                specularMinimum,
+                specularMaximum);
+            // Clamp only while the reprojected footprint is moving. Applying
+            // a one-frame 3x3 min/max box to stable 1-SPP history repeatedly
+            // rejects sparse bright paths and creates a systematic dark bias.
+            previousDiffuse = clamp(previousDiffuse, diffuseMinimum, diffuseMaximum);
+            previousSpecular = clamp(previousSpecular, specularMinimum, specularMaximum);
+        }
+        uint2 previousLength = PreviousHistoryLength.Load(int3(previousPixel, 0));
         uint diffuseMaximumLength = motionMagnitude > 0.25 ? 16u : 64u;
         uint specularMaximumLength = uint(lerp(4.0, 20.0, currentNormalRoughness.w));
         if (motionMagnitude <= 0.25)
