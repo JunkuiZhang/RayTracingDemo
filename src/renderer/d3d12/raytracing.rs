@@ -1671,8 +1671,8 @@ mod tests {
             shader
                 .matches("RAY_FLAG_CULL_BACK_FACING_TRIANGLES")
                 .count(),
-            7,
-            "primary, split-glass, bounce and shadow rays in both shader paths must use the same culling rule"
+            8,
+            "primary, RR guide, split-glass, bounce and shadow rays in both shader paths must use the same culling rule"
         );
         assert!(!shader.contains("TraceRay(Scene, RAY_FLAG_NONE"));
         assert!(shader.contains("if (!sampledTransmission && dot(normal, direction) <= 0.0)"));

@@ -225,6 +225,39 @@ float3 SampleCosineHemisphere(float3 normal, float2 sample)
     return normalize(tangent * disk.x + bitangent * disk.y + normal * z);
 }
 
+// RR uses specular hit distance to derive motion for virtually reflected
+// geometry.  Direct-light NEE cannot provide that guide: its sampled light
+// distance changes every frame and is often selected for the diffuse lobe.
+// Trace a geometry-only dominant-reflection ray instead.  This query never
+// contributes radiance, so it cannot bias the Monte Carlo estimator; it only
+// gives RR a dense, temporally coherent in-lobe distance on frames where the
+// probabilistic continuation selected diffuse.
+float TraceRrSpecularGuideHitDistance(
+    float3 primaryHitPosition,
+    float3 primaryNormal,
+    float3 incomingDirection)
+{
+    float3 guideDirection = normalize(reflect(incomingDirection, primaryNormal));
+    if (dot(primaryNormal, guideDirection) <= 0.0)
+        return 0.0;
+
+    RayDesc guideRay;
+    guideRay.Origin = primaryHitPosition + primaryNormal * 0.002;
+    guideRay.Direction = guideDirection;
+    guideRay.TMin = 0.001;
+    guideRay.TMax = 1000.0;
+
+    RayQuery<RAY_FLAG_CULL_BACK_FACING_TRIANGLES | RAY_FLAG_FORCE_OPAQUE> query;
+    query.TraceRayInline(Scene, RAY_FLAG_NONE, 0xFF, guideRay);
+    while (query.Proceed())
+    {
+    }
+
+    return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT
+        ? query.CommittedRayT()
+        : 0.0;
+}
+
 float Schlick(float cosine, float etaRatio)
 {
     float r0 = (1.0 - etaRatio) / (1.0 + etaRatio);
@@ -1012,13 +1045,10 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     // A PSR hit is the primary surface from NRD's point of view, even though it
     // appears at a later physical bounce. Apply the same lobe stratification
     // and in-lobe hit-distance rules there rather than at the hidden mirror.
-    // Both NRD and RR need a single, explicitly selected primary lobe so the
-    // exported specular hit distance describes the ray that produced the
-    // specular signal. The ordinary SVGF/DLSS-SR mixture estimator evaluates
-    // both lobes along one continuation direction; exporting that shared hitT
-    // to RR makes a diffuse-sampled ray look like moving reflected geometry.
-    // Keep NRD-only PSR/transmission behavior behind NrdEnabled; mode 2 opts RR
-    // into only this estimator contract.
+    // NRD and RR use one explicitly selected primary lobe so radiance remains
+    // paired with the sampled path. RR no longer reuses that stochastic path
+    // as its reflection guide: the geometry-only query below supplies a dense
+    // dominant-reflection distance without changing this energy estimator.
     bool useReconstructionLobe = (NrdEnabled != 0u || DlssGuideMode == 2u)
         && (payload.depth == 0u || isPsrSurface);
     if (kind == 0u)
@@ -1104,7 +1134,14 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
                 directSpecular += specularSampleRadiance / float(lightSampleCount);
                 if (any(diffuseSampleRadiance > 0.0))
                     diffuseHitDistance = lightDistance;
-                if (any(specularSampleRadiance > 0.0))
+                // A sampled light is not necessarily inside the specular
+                // lobe.  Feeding its changing distance to NRD/RR breaks
+                // reflected-geometry reprojection.  Reconstruction paths use
+                // an indirect in-lobe distance below; legacy paths retain the
+                // old direct-light distance because they do not expose it to
+                // a reflection tracker.
+                if (any(specularSampleRadiance > 0.0)
+                    && !useReconstructionLobe)
                     specularHitDistance = lightDistance;
             }
         }
@@ -1436,6 +1473,18 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
             diffuseHitDistance = child.hitDistance;
         if (any(specularBounceWeight > 0.0))
             specularHitDistance = child.hitDistance;
+        // RR consumes one dense specular guide rather than NRD's explicit
+        // probabilistic-skip contract.  Always use a stable in-lobe geometry
+        // query for ordinary rough surfaces, including frames whose radiance
+        // continuation sampled diffuse.  Perfect mirrors and transmission
+        // keep their actual continuation hit distance.
+        if (DlssGuideMode == 2u && kind == 0u)
+        {
+            specularHitDistance = TraceRrSpecularGuideHitDistance(
+                hitPosition,
+                normal,
+                WorldRayDirection());
+        }
         ReconstructionNoisyHdr[DispatchRaysIndex().xy] = float4(
             FiniteNonNegative(payload.rawDiffuse + payload.rawSpecular),
             1.0);
