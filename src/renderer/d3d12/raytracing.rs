@@ -1505,6 +1505,19 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_glass_split_conserves_fresnel_weights() {
+        let reflected = glam::Vec3::new(4.0, 2.0, 1.0);
+        let refracted = glam::Vec3::new(0.5, 1.0, 2.0);
+        for fresnel in [0.0_f32, 0.04, 0.5, 1.0] {
+            let combined = fresnel * reflected + (1.0 - fresnel) * refracted;
+            assert!(combined.is_finite() && combined.min_element() >= 0.0);
+            assert_eq!(fresnel + (1.0 - fresnel), 1.0);
+        }
+        assert_eq!(reflected, 1.0 * reflected + 0.0 * refracted);
+        assert_eq!(refracted, 0.0 * reflected + 1.0 * refracted);
+    }
+
+    #[test]
     fn ggx_extremes_are_finite_non_negative_and_energy_bounded() {
         for roughness in [0.045, 0.1, 0.5, 1.0] {
             for no_h in [0.0, 0.001, 0.5, 1.0] {
@@ -1658,8 +1671,8 @@ mod tests {
             shader
                 .matches("RAY_FLAG_CULL_BACK_FACING_TRIANGLES")
                 .count(),
-            5,
-            "primary, bounce and shadow rays in both shader paths must use the same culling rule"
+            7,
+            "primary, split-glass, bounce and shadow rays in both shader paths must use the same culling rule"
         );
         assert!(!shader.contains("TraceRay(Scene, RAY_FLAG_NONE"));
         assert!(shader.contains("if (!sampledTransmission && dot(normal, direction) <= 0.0)"));

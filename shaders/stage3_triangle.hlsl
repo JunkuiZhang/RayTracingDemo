@@ -516,6 +516,41 @@ void WritePsrSurfaceGuides(
         1.0);
 }
 
+void InitializeDeterministicGlassChild(
+    Payload parent,
+    uint firstKind,
+    uint branchOffset,
+    out Payload child)
+{
+    child.radiance = 0;
+    child.seed = HashUint(parent.seed ^ (0x9E3779B9u + branchOffset));
+    child.depth = parent.depth + 1u;
+    child.lastPdf = 0;
+    child.firstKind = firstKind;
+    child.hitDistance = 0;
+    child.rawDiffuse = 0;
+    child.rawSpecular = 0;
+    child.psrActive = 0;
+    // Reflection and refraction must not replay identical secondary samples.
+    // A disjoint Sobol dimension range preserves temporal low discrepancy
+    // without introducing a second random-number implementation.
+    child.sampleDimensionOffset = parent.sampleDimensionOffset + branchOffset;
+    child.psrThroughput = 0;
+    child.psrMirrorPlane = 0;
+}
+
+float MinimumValidSpecularHitDistance(float first, float second)
+{
+    // This mirrors NRD_FrontEnd_SpecHitDistAveraging: for multiple specular
+    // paths, tracking uses the nearest non-zero in-lobe hit rather than a
+    // radiance/PDF-weighted distance that would move independently of geometry.
+    if (first <= 0.0)
+        return max(second, 0.0);
+    if (second <= 0.0)
+        return max(first, 0.0);
+    return min(first, second);
+}
+
 float3 SampleGgxVndfDirection(
     float3 normal,
     float3 viewDirection,
@@ -851,7 +886,8 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         {
             float2 lightRandom = SampleOwenSobol2D(
                 DispatchRaysIndex().xy,
-                2u + payload.depth * 8u + lightSampleIndex * 32u);
+                payload.sampleDimensionOffset
+                    + 2u + payload.depth * 8u + lightSampleIndex * 32u);
             float3 lightPoint = float3(
                 -0.25 + lightRandom.x * 0.5,
                 0.9966667,
@@ -936,6 +972,92 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     float samplePdf = 1.0;
     bool sampledSpecular = kind == 1u || kind == 2u;
     bool sampledTransmission = false;
+    // The first entry/exit pair of a camera-visible dielectric is a tiny part
+    // of the screen in the target scene, so tracing both Fresnel branches is a
+    // better quality/cost trade than feeding Bernoulli noise into REBLUR. The
+    // depth bound prevents exponential branching in nested glass geometry.
+    bool deterministicGlass = NrdEnabled != 0u
+        && kind == 2u
+        && (payload.depth == 0u
+            || isPsrSurface
+            || (payload.firstKind == 2u && payload.depth <= 1u));
+    if (deterministicGlass)
+    {
+        float etaRatio = frontFace
+            ? (1.0 / max(material.ior, 1.0001))
+            : max(material.ior, 1.0001);
+        float cosine = saturate(dot(-WorldRayDirection(), normal));
+        float fresnel = Schlick(cosine, etaRatio);
+        float3 reflectionDirection = normalize(reflect(WorldRayDirection(), normal));
+        float3 refractionDirection = refract(WorldRayDirection(), normal, etaRatio);
+        bool totalInternalReflection = length(refractionDirection) < 0.001;
+
+        uint firstPathKind = payload.depth == 0u ? 2u : payload.firstKind;
+        Payload reflectionChild;
+        InitializeDeterministicGlassChild(payload, firstPathKind, 0u, reflectionChild);
+        RayDesc reflectionRay;
+        reflectionRay.Origin = hitPosition + reflectionDirection * 0.002;
+        reflectionRay.Direction = reflectionDirection;
+        reflectionRay.TMin = 0.001;
+        reflectionRay.TMax = 1000.0;
+        TraceRay(
+            Scene,
+            RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+            0xFF,
+            0,
+            1,
+            0,
+            reflectionRay,
+            reflectionChild);
+
+        Payload refractionChild;
+        InitializeDeterministicGlassChild(payload, firstPathKind, 64u, refractionChild);
+        if (!totalInternalReflection)
+        {
+            refractionDirection = normalize(refractionDirection);
+            RayDesc refractionRay;
+            refractionRay.Origin = hitPosition + refractionDirection * 0.002;
+            refractionRay.Direction = refractionDirection;
+            refractionRay.TMin = 0.001;
+            refractionRay.TMax = 1000.0;
+            TraceRay(
+                Scene,
+                RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+                0xFF,
+                0,
+                1,
+                0,
+                refractionRay,
+                refractionChild);
+        }
+
+        float reflectionWeight = totalInternalReflection ? 1.0 : fresnel;
+        float refractionWeight = 1.0 - reflectionWeight;
+        float3 glassRadiance = baseColor.xyz * (
+            reflectionWeight * reflectionChild.radiance
+            + refractionWeight * refractionChild.radiance);
+        float glassHitDistance = totalInternalReflection
+            ? reflectionChild.hitDistance
+            : MinimumValidSpecularHitDistance(
+                reflectionChild.hitDistance,
+                refractionChild.hitDistance);
+        payload.seed = HashUint(reflectionChild.seed ^ refractionChild.seed);
+        payload.radiance = FiniteNonNegative(glassRadiance);
+        payload.rawDiffuse = 0;
+        payload.rawSpecular = isPsrSurface
+            ? payload.psrThroughput * payload.radiance
+            : payload.radiance;
+        if (isPsrSurface)
+            payload.psrActive = 2u;
+
+        uint2 glassPixel = DispatchRaysIndex().xy;
+        ReconstructionNoisyHdr[glassPixel] = float4(payload.rawSpecular, 1.0);
+        ReconstructionDiffuseHitDistance[glassPixel] = 0.0;
+        ReconstructionSpecularHitDistance[glassPixel] = glassHitDistance;
+        if (payload.depth == 0u)
+            GBufferHitDistance[glassPixel] = glassHitDistance;
+        return;
+    }
     if (kind == 1u)
     {
         direction = reflect(WorldRayDirection(), normal);
@@ -949,7 +1071,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         float3 refracted = refract(WorldRayDirection(), normal, etaRatio);
         float fresnelSample = SampleOwenSobol2D(
             DispatchRaysIndex().xy,
-            6u + payload.depth * 8u).x;
+            payload.sampleDimensionOffset + 6u + payload.depth * 8u).x;
         bool reflectRay = length(refracted) < 0.001
             || Schlick(cosine, etaRatio) > fresnelSample;
         direction = reflectRay ? reflect(WorldRayDirection(), normal) : refracted;
@@ -970,7 +1092,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
             || (specularProbability > 0.0 && lobeSample < specularProbability);
         float2 directionSample = SampleOwenSobol2D(
             DispatchRaysIndex().xy,
-            4u + payload.depth * 8u);
+            payload.sampleDimensionOffset + 4u + payload.depth * 8u);
         if (sampledSpecular)
         {
             direction = SampleGgxVndfDirection(normal, viewDirection, roughness, directionSample);
