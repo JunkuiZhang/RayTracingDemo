@@ -196,13 +196,18 @@ StreamlineBridgeStatus streamline_bridge_create(
                             sl::PreferenceFlags::eUseManualHooking |
                             sl::PreferenceFlags::eUseFrameBasedResourceTagging;
         preferences.featuresToLoad = features;
-        preferences.numFeaturesToLoad = desc->enable_dlss != 0
-            ? static_cast<uint32_t>(std::size(features))
-            : static_cast<uint32_t>(std::size(features) - 1
+        // Keep the optional RR plugin out of ordinary DLSS/SVGF launches.
+        // The feature array is ordered so truncating its tail still loads the
+        // common features needed by the existing Streamline path.
+        const size_t optional_rr =
 #if STREAMLINE_ENABLE_RR
-                - (desc->enable_dlss_rr == 0 ? 1 : 0)
+            desc->enable_dlss_rr == 0 ? 1u : 0u;
+#else
+            0u;
 #endif
-            );
+        preferences.numFeaturesToLoad = desc->enable_dlss != 0
+            ? static_cast<uint32_t>(std::size(features) - optional_rr)
+            : static_cast<uint32_t>(std::size(features) - 1 - optional_rr);
         preferences.applicationId = desc->application_id;
         if (!has_application_id && has_project_identity) {
             preferences.engine = sl::EngineType::eCustom;
