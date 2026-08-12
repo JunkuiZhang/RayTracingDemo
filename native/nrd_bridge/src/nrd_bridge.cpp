@@ -268,6 +268,14 @@ NrdBridgeStatus nrd_bridge_denoise(
         reblur_settings.maxFastAccumulatedFrameNum = 10;
         reblur_settings.maxStabilizedFrameNum = 60;
         reblur_settings.fireflySuppressorMinRelativeScale = 1.0f;
+        // R10G10B10A2 carries four coarse material classes. Keep rejection
+        // deliberately asymmetric: diffuse separates glass/emissive from the
+        // opaque group, while specular only hard-separates emissive. Strictly
+        // separating every two-bit class creates unsupported pixels along a
+        // subpixel PSR edge; normal, roughness and hitT remain the primary
+        // specular compatibility tests there.
+        reblur_settings.minMaterialForDiffuse = 1.0f;
+        reblur_settings.minMaterialForSpecular = 2.0f;
         // The NRD path tracer uses a Bayer-stratified probabilistic
         // diffuse/specular split at the primary hit. Skipped lobes export zero
         // hitT, so REBLUR must reconstruct a valid in-lobe distance before its

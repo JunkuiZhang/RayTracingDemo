@@ -4673,7 +4673,14 @@ mod tests {
         assert!(shader.contains("(payload.depth == 0u || isPsrSurface)"));
         assert!(shader.contains("WritePsrSurfaceGuides"));
         assert!(shader.contains("child.psrActive == 2u"));
+        assert!(shader.contains("psrMirrorIsStatic"));
         assert!(shader.contains("only the selected in-lobe hitT is exported"));
+
+        let prep = include_str!("../../shaders/stage9_nrd_prep.hlsl");
+        assert!(prep.contains("float materialId = clamp(round(baseColorKind.w), 0.0, 3.0)"));
+        assert!(prep.contains("roughness,\n        materialId)"));
+        assert!(bridge.contains("reblur_settings.minMaterialForDiffuse = 1.0f"));
+        assert!(bridge.contains("reblur_settings.minMaterialForSpecular = 2.0f"));
     }
 
     #[test]

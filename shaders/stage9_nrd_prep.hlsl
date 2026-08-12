@@ -50,7 +50,13 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     float3 normal = normalize(normalRoughness.xyz * 2.0 - 1.0);
     float roughness = saturate(normalRoughness.w);
     float viewZ = ViewZ.Load(pixel);
-    float3 baseColor = max(BaseColor.Load(pixel).xyz, 0.0.xxx);
+    float4 baseColorKind = BaseColor.Load(pixel);
+    float3 baseColor = max(baseColorKind.xyz, 0.0.xxx);
+    // A2 stores four stable reconstruction classes: opaque, mirror, glass and
+    // emissive. PSR overwrites GBufferAlbedo with the replacement surface, so
+    // mirror pixels inherit the reflected material class instead of bleeding
+    // history across the virtual boundary.
+    float materialId = clamp(round(baseColorKind.w), 0.0, 3.0);
     float4 diffuseGuideMetallic = DiffuseGuideMetallic.Load(pixel);
     float3 diffuseAlbedo = max(diffuseGuideMetallic.xyz, 0.0.xxx);
     float metallic = saturate(diffuseGuideMetallic.w);
@@ -79,7 +85,10 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         specular,
         REBLUR_FrontEnd_GetNormHitDist(specularHit, safeViewZ, HIT_DISTANCE_PARAMETERS, roughness),
         true);
-    PackedNormalRoughness[pixel.xy] = NRD_FrontEnd_PackNormalAndRoughness(normal, roughness, 0.0);
+    PackedNormalRoughness[pixel.xy] = NRD_FrontEnd_PackNormalAndRoughness(
+        normal,
+        roughness,
+        materialId);
     NrdMotion[pixel.xy] = Motion.Load(pixel);
     NrdViewZ[pixel.xy] = safeViewZ;
     DiffuseFactor[pixel.xy] = float4(diffFactor, 1.0);

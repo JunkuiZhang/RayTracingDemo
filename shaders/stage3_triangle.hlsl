@@ -1172,7 +1172,15 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     child.psrThroughput = 0;
     child.psrMirrorPlane = 0;
 
-    if (NrdEnabled != 0u && kind == 1u && payload.depth == 0u && payload.psrActive == 0u)
+    // The compact payload carries only the current reflection plane. Until a
+    // previous-frame plane is added, moving mirrors must use the conventional
+    // specular path so PSR never fabricates a plausible but wrong motion vector.
+    bool psrMirrorIsStatic = length(previousHitPosition - hitPosition) <= 1.0e-5;
+    if (NrdEnabled != 0u
+        && kind == 1u
+        && payload.depth == 0u
+        && payload.psrActive == 0u
+        && psrMirrorIsStatic)
     {
         child.psrActive = 1u;
         child.psrThroughput = baseColor.xyz;
