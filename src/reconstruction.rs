@@ -39,6 +39,7 @@ pub enum DenoiserBackend {
     #[default]
     Svgf,
     NrdReblur,
+    DlssRayReconstruction,
 }
 
 impl DenoiserBackend {
@@ -46,25 +47,66 @@ impl DenoiserBackend {
         match self {
             Self::Svgf => "svgf",
             Self::NrdReblur => "nrd-reblur",
+            Self::DlssRayReconstruction => "dlss-rr",
         }
     }
 
     pub const fn nrd_compiled(self) -> bool {
-        cfg!(feature = "nrd")
+        matches!(self, Self::NrdReblur) && cfg!(feature = "nrd")
     }
 
     pub fn requested_startup_error(self) -> Option<String> {
         match self {
             Self::Svgf => None,
-            Self::NrdReblur if !cfg!(feature = "nrd") => Some(
+            Self::NrdReblur => (!cfg!(feature = "nrd")).then(|| {
                 "--denoiser nrd-reblur 需要使用 `cargo run --features nrd --` 重新构建；当前构建未包含 NRD"
-                    .to_string(),
-            ),
-            Self::NrdReblur if cfg!(feature = "nrd") => None,
-            Self::NrdReblur => Some(
-                "--denoiser nrd-reblur 当前仅完成可选构建契约，NRD 后端尚未接入；请等待阶段 9C/9D"
-                    .to_string(),
-            ),
+                    .to_string()
+            }),
+            Self::DlssRayReconstruction => (!cfg!(feature = "streamline-rr")).then(|| {
+                "--denoiser dlss-rr 需要使用 `cargo run --features streamline-rr --` 重新构建；当前构建未包含 DLSS Ray Reconstruction"
+                    .to_string()
+            }),
+        }
+    }
+}
+
+/// The reconstruction path is a strategy, not a post-process toggle. RR is a
+/// fused noisy-HDR denoiser/upscaler and therefore cannot share the SVGF/NRD
+/// intermediate path or be chained into DLSS SR.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReconstructionPath {
+    #[default]
+    Svgf,
+    NrdReblur,
+    DlssRayReconstruction,
+}
+
+impl ReconstructionPath {
+    pub const fn from_backend(backend: DenoiserBackend) -> Self {
+        match backend {
+            DenoiserBackend::Svgf => Self::Svgf,
+            DenoiserBackend::NrdReblur => Self::NrdReblur,
+            DenoiserBackend::DlssRayReconstruction => Self::DlssRayReconstruction,
+        }
+    }
+
+    pub const fn is_svgf(self) -> bool {
+        matches!(self, Self::Svgf)
+    }
+
+    pub const fn is_nrd(self) -> bool {
+        matches!(self, Self::NrdReblur)
+    }
+
+    pub const fn is_rr(self) -> bool {
+        matches!(self, Self::DlssRayReconstruction)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Svgf => "svgf",
+            Self::NrdReblur => "nrd-reblur",
+            Self::DlssRayReconstruction => "dlss-rr",
         }
     }
 }
@@ -369,6 +411,7 @@ mod tests {
         assert_eq!(DenoiserBackend::default(), DenoiserBackend::Svgf);
         assert_eq!(DenoiserBackend::Svgf.as_str(), "svgf");
         assert_eq!(DenoiserBackend::NrdReblur.as_str(), "nrd-reblur");
+        assert_eq!(DenoiserBackend::DlssRayReconstruction.as_str(), "dlss-rr");
         assert_eq!(DenoiserBackend::Svgf.nrd_compiled(), cfg!(feature = "nrd"));
     }
 
@@ -380,6 +423,14 @@ mod tests {
             .expect("feature-off NRD request must fail");
         assert!(error.contains("--features nrd"));
         assert!(error.contains("未包含 NRD"));
+    }
+
+    #[test]
+    fn reconstruction_strategy_keeps_rr_fused_and_nrd_independent() {
+        assert!(ReconstructionPath::from_backend(DenoiserBackend::Svgf).is_svgf());
+        assert!(ReconstructionPath::from_backend(DenoiserBackend::NrdReblur).is_nrd());
+        assert!(ReconstructionPath::from_backend(DenoiserBackend::DlssRayReconstruction).is_rr());
+        assert!(!DenoiserBackend::DlssRayReconstruction.nrd_compiled());
     }
 
     #[test]

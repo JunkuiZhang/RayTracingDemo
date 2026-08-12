@@ -25,9 +25,11 @@ pub enum GpuPass {
     NrdCompose = 12,
     DlssCompose = 13,
     DlssEvaluate = 14,
+    RrInputAdapter = 15,
+    RrEvaluate = 16,
 }
 
-pub const PASS_COUNT: usize = 15;
+pub const PASS_COUNT: usize = 17;
 pub const TIMING_WINDOW_CAPACITY: usize = 240;
 const TIMESTAMPS_PER_FRAME: usize = PASS_COUNT * 2;
 const BENCHMARK_HISTOGRAM_RESOLUTION_MS: f64 = 0.01;
@@ -51,6 +53,8 @@ pub struct GpuTimingSample {
     pub nrd_compose_ms: f64,
     pub dlss_compose_ms: f64,
     pub dlss_evaluate_ms: f64,
+    pub rr_input_adapter_ms: f64,
+    pub rr_evaluate_ms: f64,
     pub total_ms: f64,
     pub valid: bool,
 }
@@ -73,6 +77,8 @@ impl GpuTimingSample {
             GpuPass::NrdCompose => self.nrd_compose_ms,
             GpuPass::DlssCompose => self.dlss_compose_ms,
             GpuPass::DlssEvaluate => self.dlss_evaluate_ms,
+            GpuPass::RrInputAdapter => self.rr_input_adapter_ms,
+            GpuPass::RrEvaluate => self.rr_evaluate_ms,
         }
     }
 }
@@ -409,6 +415,8 @@ impl GpuProfiler {
             GpuPass::NrdCompose => b"Stage9 NRD Compose\0",
             GpuPass::DlssCompose => b"Stage10 DLSS HDR Compose\0",
             GpuPass::DlssEvaluate => b"Stage10 DLSS Evaluate\0",
+            GpuPass::RrInputAdapter => b"Stage11 DLSS RR Input Adapter\0",
+            GpuPass::RrEvaluate => b"Stage11 DLSS Ray Reconstruction\0",
             GpuPass::Total => b"Stage8 Total\0",
         };
         self.pix.begin(command_list, label);
@@ -539,6 +547,8 @@ impl GpuProfiler {
             nrd_compose_ms: values[GpuPass::NrdCompose as usize],
             dlss_compose_ms: values[GpuPass::DlssCompose as usize],
             dlss_evaluate_ms: values[GpuPass::DlssEvaluate as usize],
+            rr_input_adapter_ms: values[GpuPass::RrInputAdapter as usize],
+            rr_evaluate_ms: values[GpuPass::RrEvaluate as usize],
             total_ms: values[GpuPass::Total as usize],
             valid: true,
         };
@@ -668,6 +678,8 @@ mod tests {
             nrd_compose_ms: 8.0,
             dlss_compose_ms: 9.0,
             dlss_evaluate_ms: 10.0,
+            rr_input_adapter_ms: 11.0,
+            rr_evaluate_ms: 12.0,
             total_ms: 30.0,
             valid: true,
         };

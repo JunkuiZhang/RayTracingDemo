@@ -219,6 +219,7 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                 "--upscaler" => {
                     let value = arguments.next().ok_or("--upscaler 缺少模式")?;
                     config.upscaler = parse_upscaler_mode(&value)?;
+                    config.requested_upscaler = Some(config.upscaler);
                 }
                 "--reflex-mode" => {
                     let value = arguments.next().ok_or("--reflex-mode 缺少模式")?;
@@ -245,6 +246,21 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
             }
             if render_scale_requested {
                 return Err("非 Native upscaler 的内部尺寸由 Streamline optimal settings 决定，不能与 --render-scale 同时使用".to_string());
+            }
+        }
+        if config.denoiser == reconstruction::DenoiserBackend::DlssRayReconstruction {
+            if !upscaler_requested {
+                config.upscaler = upscaler::UpscalerMode::DlssQuality;
+            } else if !matches!(
+                config.upscaler,
+                upscaler::UpscalerMode::DlssQuality
+                    | upscaler::UpscalerMode::DlssBalanced
+                    | upscaler::UpscalerMode::DlssPerformance
+            ) {
+                return Err(
+                    "--denoiser dlss-rr 只支持 dlss-quality、dlss-balanced 或 dlss-performance；RR 已融合降噪与超分，不能与 native/DLAA 或 DLSS SR 串联"
+                        .to_string(),
+                );
             }
         }
         if config.capture_output.is_none() && config.capture_after_spp.is_some() {
@@ -410,8 +426,9 @@ fn parse_denoiser_backend(value: &str) -> Result<reconstruction::DenoiserBackend
     match value {
         "svgf" => Ok(reconstruction::DenoiserBackend::Svgf),
         "nrd-reblur" => Ok(reconstruction::DenoiserBackend::NrdReblur),
+        "dlss-rr" => Ok(reconstruction::DenoiserBackend::DlssRayReconstruction),
         _ => Err(format!(
-            "无效的降噪后端：{value}（仅支持 svgf 或 nrd-reblur）"
+            "无效的降噪后端：{value}（仅支持 svgf、nrd-reblur 或 dlss-rr）"
         )),
     }
 }
@@ -463,7 +480,7 @@ fn print_help() {
          --target-gpu-ms <毫秒>   动态目标，有限数值 4.0..50.0，默认 14.5\n  \
          --command-recording-mode <模式> 命令记录：baseline 或 optimized，默认 optimized\n  \
          --acceleration-structure-mode <模式> AS 策略：baseline 或 optimized，默认 baseline\n  \
-         --denoiser <后端>       重建后端：svgf 或 nrd-reblur，默认 svgf\n  \
+         --denoiser <后端>       重建后端：svgf、nrd-reblur 或 dlss-rr，默认 svgf；RR 未指定时使用 dlss-quality\n  \
          --upscaler <模式>       上采样：native、dlaa、dlss-quality、dlss-balanced、dlss-performance，默认 native\n  \
          --reflex-mode <模式>    Reflex：off、on 或 on-boost，默认 on；feature-off 时 unavailable\n  \
          --streamline-application-id <ID> 可选的 NVIDIA 分配 NGX application ID；默认使用内置 Project ID\n  \\
@@ -733,6 +750,39 @@ mod tests {
                 ..
             }))
         ));
+        let command = parse_arguments(["--denoiser".to_string(), "dlss-rr".to_string()]);
+        assert!(matches!(
+            command,
+            Ok(Command::Realtime(RealtimeConfig {
+                denoiser: crate::reconstruction::DenoiserBackend::DlssRayReconstruction,
+                upscaler: crate::upscaler::UpscalerMode::DlssQuality,
+                requested_upscaler: None,
+                ..
+            }))
+        ));
+        let command = parse_arguments([
+            "--denoiser".to_string(),
+            "dlss-rr".to_string(),
+            "--upscaler".to_string(),
+            "dlss-balanced".to_string(),
+        ]);
+        assert!(matches!(
+            command,
+            Ok(Command::Realtime(RealtimeConfig {
+                upscaler: crate::upscaler::UpscalerMode::DlssBalanced,
+                requested_upscaler: Some(crate::upscaler::UpscalerMode::DlssBalanced),
+                ..
+            }))
+        ));
+        assert!(
+            parse_arguments([
+                "--denoiser".to_string(),
+                "dlss-rr".to_string(),
+                "--upscaler".to_string(),
+                "native".to_string(),
+            ])
+            .is_err()
+        );
         assert!(parse_denoiser_backend("invalid").is_err());
         assert!(parse_arguments(["--denoiser".to_string()]).is_err());
     }

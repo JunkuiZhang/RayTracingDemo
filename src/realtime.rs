@@ -25,6 +25,10 @@ pub struct RealtimeConfig {
     pub acceleration_structure_mode: AccelerationStructureMode,
     pub denoiser: DenoiserBackend,
     pub upscaler: UpscalerMode,
+    /// `None` means the RR compatibility rule selected the default quality
+    /// mode; keeping the request separate makes benchmark JSON distinguish
+    /// an implicit resolved mode from an explicit CLI request.
+    pub requested_upscaler: Option<UpscalerMode>,
     pub reflex_mode: ReflexMode,
     /// Optional NVIDIA-assigned NGX identity. `None` uses this custom engine's
     /// stable Project ID and package-derived engine version instead.

@@ -42,6 +42,7 @@ use crate::{
     reconstruction::{
         CameraPose, DenoiserBackend, NRD_COMMIT_PREFIX, NRD_VERSION,
         RECONSTRUCTION_CONTRACT_VERSION, ReconstructionFrameInput, ReconstructionFrameState,
+        ReconstructionPath,
     },
     resolution::{
         DynamicResolutionConfig, DynamicResolutionController, DynamicResolutionDirection, Extent2D,
@@ -838,7 +839,10 @@ fn set_bridge_resource_state(resource: &mut TrackedResource, state: u32) -> Resu
     Ok(())
 }
 
-fn active_gpu_passes(denoiser: DenoiserBackend, dlss_active: bool) -> [bool; profiler::PASS_COUNT] {
+fn active_gpu_passes(
+    path: ReconstructionPath,
+    dlss_sr_active: bool,
+) -> [bool; profiler::PASS_COUNT] {
     let mut active = [false; profiler::PASS_COUNT];
     for pass in [
         GpuPass::Total,
@@ -848,8 +852,8 @@ fn active_gpu_passes(denoiser: DenoiserBackend, dlss_active: bool) -> [bool; pro
     ] {
         active[pass as usize] = true;
     }
-    match denoiser {
-        DenoiserBackend::Svgf => {
+    match path {
+        ReconstructionPath::Svgf => {
             for pass in [
                 GpuPass::Temporal,
                 GpuPass::Atrous,
@@ -861,13 +865,17 @@ fn active_gpu_passes(denoiser: DenoiserBackend, dlss_active: bool) -> [bool; pro
                 active[pass as usize] = true;
             }
         }
-        DenoiserBackend::NrdReblur => {
+        ReconstructionPath::NrdReblur => {
             for pass in [GpuPass::NrdPrep, GpuPass::NrdDenoise, GpuPass::NrdCompose] {
                 active[pass as usize] = true;
             }
         }
+        ReconstructionPath::DlssRayReconstruction => {
+            active[GpuPass::RrInputAdapter as usize] = true;
+            active[GpuPass::RrEvaluate as usize] = true;
+        }
     }
-    if dlss_active {
+    if dlss_sr_active {
         active[GpuPass::DlssCompose as usize] = true;
         active[GpuPass::DlssEvaluate as usize] = true;
     }
@@ -1343,7 +1351,9 @@ impl Dx12Renderer {
                     render_extent,
                     id: 1,
                     with_nrd: config.denoiser == DenoiserBackend::NrdReblur,
-                    with_dlss: !config.upscaler.is_native(),
+                    with_dlss_sr: !config.upscaler.is_native()
+                        && config.denoiser != DenoiserBackend::DlssRayReconstruction,
+                    with_dlss_rr: config.denoiser == DenoiserBackend::DlssRayReconstruction,
                 },
             )
             .map_err(|error| dx_error("创建初始渲染资源代际", error))?;
@@ -2180,7 +2190,7 @@ impl Dx12Renderer {
             self.gpu_profiler.resolve_frame(
                 &self.command_list,
                 frame_index,
-                active_gpu_passes(self.denoiser, dlss_active),
+                active_gpu_passes(ReconstructionPath::from_backend(self.denoiser), dlss_active),
             );
             self.command_list.Close()?;
             self.gpu_profiler.record_command_recording(
@@ -2222,7 +2232,8 @@ impl Dx12Renderer {
             self.frames[frame_index].fence_value = fence_value;
             self.frames[frame_index].timing_valid = !self.reset_history;
             self.frames[frame_index].timing_generation_id = self.active_generation.id;
-            self.frames[frame_index].timing_passes = active_gpu_passes(self.denoiser, dlss_active);
+            self.frames[frame_index].timing_passes =
+                active_gpu_passes(ReconstructionPath::from_backend(self.denoiser), dlss_active);
             self.active_generation.last_used_fence = fence_value;
             if self.benchmark_measurement_active {
                 self.benchmark_render_min.width =
@@ -2562,7 +2573,9 @@ impl Dx12Renderer {
                     render_extent: new_render_extent,
                     id: generation_id,
                     with_nrd: self.denoiser == DenoiserBackend::NrdReblur,
-                    with_dlss: !self.upscaler.is_native(),
+                    with_dlss_sr: !self.upscaler.is_native()
+                        && self.denoiser != DenoiserBackend::DlssRayReconstruction,
+                    with_dlss_rr: self.denoiser == DenoiserBackend::DlssRayReconstruction,
                 },
             )?;
             self.next_generation_id = self.next_generation_id.saturating_add(1);
@@ -2728,7 +2741,9 @@ impl Dx12Renderer {
                 render_extent: new_render_extent,
                 id: generation_id,
                 with_nrd: self.denoiser == DenoiserBackend::NrdReblur,
-                with_dlss: !self.upscaler.is_native(),
+                with_dlss_sr: !self.upscaler.is_native()
+                    && self.denoiser != DenoiserBackend::DlssRayReconstruction,
+                with_dlss_rr: self.denoiser == DenoiserBackend::DlssRayReconstruction,
             },
         )
         .map_err(|error| {
@@ -2844,7 +2859,9 @@ impl Dx12Renderer {
                     render_extent: new_render_extent,
                     id: generation_id,
                     with_nrd: self.denoiser == DenoiserBackend::NrdReblur,
-                    with_dlss: next.uses_streamline(),
+                    with_dlss_sr: next.uses_streamline()
+                        && self.denoiser != DenoiserBackend::DlssRayReconstruction,
+                    with_dlss_rr: self.denoiser == DenoiserBackend::DlssRayReconstruction,
                 },
             )
             .map_err(|error| {
@@ -2914,6 +2931,9 @@ impl Dx12Renderer {
             let next = match self.denoiser {
                 DenoiserBackend::Svgf => DenoiserBackend::NrdReblur,
                 DenoiserBackend::NrdReblur => DenoiserBackend::Svgf,
+                // F3 exits the fused RR path but deliberately keeps the
+                // resolved DLSS quality mode for the following SR path.
+                DenoiserBackend::DlssRayReconstruction => DenoiserBackend::Svgf,
             };
             let generation_id = self.next_generation_id;
             let new_generation = RenderResourceGeneration::new(
@@ -2926,7 +2946,9 @@ impl Dx12Renderer {
                     render_extent: self.active_generation.render_extent,
                     id: generation_id,
                     with_nrd: next == DenoiserBackend::NrdReblur,
-                    with_dlss: !self.upscaler.is_native(),
+                    with_dlss_sr: !self.upscaler.is_native()
+                        && next != DenoiserBackend::DlssRayReconstruction,
+                    with_dlss_rr: next == DenoiserBackend::DlssRayReconstruction,
                 },
             )
             .map_err(|error| {

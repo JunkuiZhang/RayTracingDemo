@@ -148,7 +148,8 @@ pub(super) struct RenderGenerationDesc {
     pub(super) render_extent: Extent2D,
     pub(super) id: u64,
     pub(super) with_nrd: bool,
-    pub(super) with_dlss: bool,
+    pub(super) with_dlss_sr: bool,
+    pub(super) with_dlss_rr: bool,
 }
 
 impl RenderResourceGeneration {
@@ -164,7 +165,8 @@ impl RenderResourceGeneration {
             render_extent,
             id,
             with_nrd,
-            with_dlss,
+            with_dlss_sr,
+            with_dlss_rr,
         } = description;
         let shader_heap = DescriptorHeap::new(
             device,
@@ -326,7 +328,7 @@ impl RenderResourceGeneration {
             format!("代际 {id} Reconstruction primary emissive"),
         )?;
         #[cfg(feature = "streamline")]
-        let dlss = if with_dlss {
+        let dlss = if with_dlss_sr {
             Some(DlssGenerationResources {
                 input_hdr: create_uav_texture(
                     device,
@@ -365,8 +367,10 @@ impl RenderResourceGeneration {
         } else {
             None
         };
+        #[cfg(feature = "streamline")]
+        let _ = with_dlss_rr;
         #[cfg(not(feature = "streamline"))]
-        let _ = with_dlss;
+        let _ = (with_dlss_sr, with_dlss_rr);
         #[cfg(feature = "nrd")]
         let nrd = if with_nrd {
             Some(NrdGenerationResources {
