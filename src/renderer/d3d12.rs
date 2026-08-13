@@ -6343,6 +6343,11 @@ mod tests {
         assert_eq!(value["pix_events_available"], true);
         assert_eq!(value["passes"]["atrous_0"]["p50_ms"], 1.25);
         assert_eq!(value["passes"]["tone_map"]["valid_samples"], 240);
+        assert_eq!(
+            value["passes"]["rr_primary_visibility"]["valid_samples"],
+            240
+        );
+        assert_eq!(value["passes"]["rr_boundary_resolve"]["p95_ms"], 2.5);
         assert_eq!(value["memory"]["usage_bytes"], 512);
         assert_eq!(value["memory"]["usage_ratio"], 0.5);
         assert_eq!(value["acceleration_structures"]["mode"], "baseline");
@@ -6360,6 +6365,42 @@ mod tests {
             value["acceleration_structures"]["retained_update_scratch_bytes"],
             65_536
         );
+    }
+
+    #[cfg(feature = "streamline-rr")]
+    #[test]
+    fn rr_boundary_cpu_reference_enforces_reset_motion_and_history_limits() {
+        fn history_limit(motion_pixels: f32) -> Option<f32> {
+            if !motion_pixels.is_finite() || motion_pixels > 2.0 {
+                return None;
+            }
+            Some(if motion_pixels > 0.5 { 4.0 } else { 32.0 })
+        }
+
+        assert_eq!(history_limit(0.0), Some(32.0));
+        assert_eq!(history_limit(0.5), Some(32.0));
+        assert_eq!(history_limit(0.5001), Some(4.0));
+        assert_eq!(history_limit(2.0), Some(4.0));
+        assert_eq!(history_limit(2.0001), None);
+        assert_eq!(history_limit(f32::NAN), None);
+        assert_eq!(history_limit(f32::INFINITY), None);
+
+        let shader = include_str!("../../shaders/stage11_rr_boundary_resolve.hlsl");
+        for required in [
+            "ResetHistory != 0u",
+            "!all(isfinite(motion))",
+            "samplePosition.x < 0",
+            "previousId != currentId",
+            "dot(currentNormal, previousNormal) < NORMAL_DOT_THRESHOLD",
+            "previousMeta.z - currentMeta.w",
+            "MAX_HISTORY_COUNT",
+            "MOTION_REJECT_PIXELS",
+        ] {
+            assert!(
+                shader.contains(required),
+                "missing boundary guard: {required}"
+            );
+        }
     }
 
     #[test]
