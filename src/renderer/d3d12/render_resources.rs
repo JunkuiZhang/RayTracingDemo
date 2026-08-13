@@ -21,7 +21,7 @@ use super::{
     STABLE_RADIANCE_UAV_REGISTER, STABLE_DIFFUSE_ALBEDO_UAV_REGISTER,
     STABLE_SPECULAR_ALBEDO_UAV_REGISTER, TEMPORAL_TABLE_BASES, TONEMAP_TABLE_BASES,
     create_null_structured_uav, create_null_texture_array_uav, create_structured_srv,
-    create_structured_uav, create_texture_srv, create_texture_uav,
+    create_structured_uav, create_texture_uav,
     descriptor::DescriptorHeap,
     populate_texture_table,
     raytracing::{AccelerationStructures, SceneGeometry},
@@ -31,6 +31,8 @@ use super::{
 
 #[cfg(feature = "streamline")]
 use super::{DLSS_COMPOSE_TABLE_BASES, DLSS_TONEMAP_TABLE_BASE, create_null_texture_srv};
+#[cfg(any(feature = "nrd", feature = "streamline-rr"))]
+use super::create_texture_srv;
 #[cfg(feature = "nrd")]
 use super::{
     NRD_COMPOSE_TABLE_BASE, NRD_PREP_TABLE_BASE, NRD_STABLE_COMPOSE_TABLE_BASES,
@@ -1678,7 +1680,11 @@ impl RenderResourceGeneration {
                 };
 
                 let rr_tonemap_srvs = [
-                    &rr.boundary_history[current_index],
+                    if self.stable_planes.is_some() {
+                        &rr.output_hdr
+                    } else {
+                        &rr.boundary_history[current_index]
+                    },
                     // RR reconstructs the stochastic HDR lobes; directly
                     // visible emission is stabilized independently and added
                     // exactly once by ToneMap's RR-only composite path.

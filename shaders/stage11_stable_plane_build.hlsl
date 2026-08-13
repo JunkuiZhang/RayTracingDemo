@@ -47,7 +47,7 @@ struct BuildBranchState
 
 float3 StablePrimaryRayDirection(uint2 pixel, uint2 extent)
 {
-    float2 sampleOffset = float2(0.5, 0.5);
+    float2 sampleOffset = StablePrimarySampleOffset(pixel, FrameIndex, DlssGuideMode);
     float2 uv = (float2(pixel) + sampleOffset + CameraJitterPx) / float2(extent);
     float2 screen = uv * 2.0 - 1.0;
     screen.x *= float(extent.x) / float(extent.y);

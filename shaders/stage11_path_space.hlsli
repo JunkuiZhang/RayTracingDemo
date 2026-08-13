@@ -80,6 +80,61 @@ float3 UnpackStableHdr(uint packed)
     return float3(mantissa) * exp2(float(exponent) - 9.0);
 }
 
+uint StableHashUint(uint value)
+{
+    value ^= value >> 16u;
+    value *= 0x7FEB352Du;
+    value ^= value >> 15u;
+    value *= 0x846CA68Bu;
+    value ^= value >> 16u;
+    return value;
+}
+
+uint StableSobolDimensionOne(uint sampleIndex)
+{
+    uint value = 0u;
+    uint direction = 0x80000000u;
+    while (sampleIndex != 0u)
+    {
+        if ((sampleIndex & 1u) != 0u)
+            value ^= direction;
+        sampleIndex >>= 1u;
+        direction ^= direction >> 1u;
+    }
+    return value;
+}
+
+uint StableOwenScramble(uint value, uint seed)
+{
+    value = reversebits(value);
+    value ^= value * 0x3D20ADEAu;
+    value += seed;
+    value *= (seed >> 16u) | 1u;
+    value ^= value * 0x05526C56u;
+    value ^= value * 0x53A22864u;
+    return reversebits(value);
+}
+
+float StableUintToUnitFloat(uint value)
+{
+    return (float(value >> 8u) + 0.5) / 16777216.0;
+}
+
+float2 StablePrimarySampleOffset(uint2 pixel, uint frameIndex, uint guideMode)
+{
+    if (guideMode != 0u)
+        return float2(0.5, 0.5);
+    uint sampleIndex = frameIndex + 1u;
+    uint pixelSeed = StableHashUint(pixel.x ^ StableHashUint(pixel.y + 0x9E3779B9u));
+    uint dimensionSeed = StableHashUint(pixelSeed);
+    uint x = StableOwenScramble(
+        reversebits(sampleIndex), StableHashUint(dimensionSeed ^ 0x68BC21EBu));
+    uint y = StableOwenScramble(
+        StableSobolDimensionOne(sampleIndex),
+        StableHashUint(dimensionSeed ^ 0x02E5BE93u));
+    return float2(StableUintToUnitFloat(x), StableUintToUnitFloat(y));
+}
+
 bool IsPersistentStableBranch(uint branchId)
 {
     return branchId != STABLE_BRANCH_JUST_STARTED

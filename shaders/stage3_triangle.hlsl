@@ -557,6 +557,8 @@ float3 FiniteNonNegative(float3 value)
 
 void WriteStablePlaneGuides(
     Payload payload,
+    float3 hitPosition,
+    float3 previousHitPosition,
     float3 normal,
     float3 baseColor,
     float metallic,
@@ -571,8 +573,9 @@ void WriteStablePlaneGuides(
     float sceneLength = restart.data1.w + RayTCurrent();
     float3 primaryDirection = DecodeStableDirection(restart.data3.zw);
     float3 virtualPosition = CameraPosition + primaryDirection * sceneLength;
+    float3 previousVirtualPosition = virtualPosition + previousHitPosition - hitPosition;
     float2 currentUv = ProjectToCurrentUv(virtualPosition, extent);
-    float2 previousUv = ProjectToPreviousUv(virtualPosition, extent);
+    float2 previousUv = ProjectToPreviousUv(previousVirtualPosition, extent);
 
     float3 cameraForward;
     float3 cameraRight;
@@ -589,7 +592,7 @@ void WriteStablePlaneGuides(
         previousCameraUp);
     float viewZ = dot(virtualPosition - CameraPosition, cameraForward);
     float previousViewZ = dot(
-        virtualPosition - PreviousCameraPosition,
+        previousVirtualPosition - PreviousCameraPosition,
         previousCameraForward);
     float3 motion = ResetHistory != 0u
         ? 0.0.xxx
@@ -1115,6 +1118,8 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     if (PathSpacePass == 1u && payload.depth == 0u)
         WriteStablePlaneGuides(
             payload,
+            hitPosition,
+            previousHitPosition,
             normal,
             baseColor.xyz,
             metallic,

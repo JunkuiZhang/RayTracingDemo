@@ -1334,6 +1334,7 @@ fn active_gpu_passes(
     path: ReconstructionPath,
     dlss_sr_active: bool,
     rr_active: bool,
+    rr_boundary_active: bool,
 ) -> [bool; profiler::PASS_COUNT] {
     let mut active = [false; profiler::PASS_COUNT];
     for pass in [
@@ -1365,8 +1366,8 @@ fn active_gpu_passes(
         ReconstructionPath::DlssRayReconstruction => {
             active[GpuPass::RrInputAdapter as usize] = rr_active;
             active[GpuPass::RrEvaluate as usize] = rr_active;
-            active[GpuPass::RrPrimaryVisibility as usize] = rr_active;
-            active[GpuPass::RrBoundaryResolve as usize] = rr_active;
+            active[GpuPass::RrPrimaryVisibility as usize] = rr_boundary_active;
+            active[GpuPass::RrBoundaryResolve as usize] = rr_boundary_active;
         }
     }
     if dlss_sr_active {
@@ -2459,16 +2460,23 @@ impl Dx12Renderer {
                 0,
             );
             command_list4.SetPipelineState1(&self.raytracing_pipeline.state_object);
-            let dispatch = D3D12_DISPATCH_RAYS_DESC {
-                RayGenerationShaderRecord: self.raytracing_pipeline.raygen,
-                MissShaderTable: self.raytracing_pipeline.miss,
-                HitGroupTable: self.raytracing_pipeline.hit_group,
-                CallableShaderTable: D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE::default(),
-                Width: render_extent.width,
-                Height: render_extent.height,
-                Depth: 1,
-            };
-            command_list4.DispatchRays(&dispatch);
+            let stable_consumer_active = self.path_space_mode == PathSpaceMode::StablePlanes
+                && matches!(
+                    self.denoiser,
+                    DenoiserBackend::NrdReblur | DenoiserBackend::DlssRayReconstruction
+                );
+            if !stable_consumer_active {
+                let dispatch = D3D12_DISPATCH_RAYS_DESC {
+                    RayGenerationShaderRecord: self.raytracing_pipeline.raygen,
+                    MissShaderTable: self.raytracing_pipeline.miss,
+                    HitGroupTable: self.raytracing_pipeline.hit_group,
+                    CallableShaderTable: D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE::default(),
+                    Width: render_extent.width,
+                    Height: render_extent.height,
+                    Depth: 1,
+                };
+                command_list4.DispatchRays(&dispatch);
+            }
             self.gpu_profiler
                 .end(&self.command_list, frame_index, GpuPass::PathTrace);
             self.gpu_profiler.end_event(&self.command_list);
@@ -2480,7 +2488,7 @@ impl Dx12Renderer {
             let output_groups_x = output_extent.width.div_ceil(8);
             let output_groups_y = output_extent.height.div_ceil(8);
             #[cfg(feature = "streamline-rr")]
-            if rr_path {
+            if rr_path && self.path_space_mode == PathSpaceMode::Legacy {
                 {
                     let rr = self
                         .active_generation
@@ -3197,7 +3205,7 @@ impl Dx12Renderer {
             }
 
             #[cfg(feature = "streamline-rr")]
-            if rr_active {
+            if rr_active && self.path_space_mode == PathSpaceMode::Legacy {
                 {
                     let rr = self
                         .active_generation
@@ -3363,6 +3371,7 @@ impl Dx12Renderer {
                     ReconstructionPath::from_backend(self.denoiser),
                     dlss_active,
                     rr_active,
+                    rr_active && self.path_space_mode == PathSpaceMode::Legacy,
                 ),
             );
             self.command_list.Close()?;
@@ -3409,6 +3418,7 @@ impl Dx12Renderer {
                 ReconstructionPath::from_backend(self.denoiser),
                 dlss_active,
                 rr_active,
+                rr_active && self.path_space_mode == PathSpaceMode::Legacy,
             );
             self.active_generation.last_used_fence = fence_value;
             if self.benchmark_measurement_active {
