@@ -809,7 +809,41 @@ if ($needsMatrix) {
     )
     foreach ($baseline in $baselineCases) {
         $baselineRoot = Join-Path $runRoot $baseline.label
-        $record = Invoke-Stage10SingleCase $baseline.stage10_case $baseline.exe $baseline.nrd $baselineRoot $stage10Root
+        try {
+            $record = Invoke-Stage10SingleCase $baseline.stage10_case $baseline.exe $baseline.nrd $baselineRoot $stage10Root
+        } catch {
+            # A runner exception is evidence of an inconclusive baseline, not
+            # permission to omit it. Keep the failure in the same summary so a
+            # partial matrix can never be mistaken for a complete PASS.
+            $message = $_.Exception.Message
+            New-Item -ItemType Directory -Path $baselineRoot -Force | Out-Null
+            $errorPath = Join-Path $baselineRoot "$($baseline.label).runner-error.txt"
+            Set-Content -LiteralPath $errorPath -Value $message -Encoding UTF8
+            $record = [pscustomobject]@{
+                label = "stage10-$($baseline.stage10_case)"
+                command = "stage10 case $($baseline.stage10_case)"
+                arguments = @()
+                args_path = $null
+                stdout_path = $null
+                stderr_path = $errorPath
+                exit_path = $null
+                exit_code = -1
+                timed_out = $false
+                timeout_seconds = $TimeoutSeconds
+                elapsed_seconds = 0.0
+                stdout_raw = ""
+                stderr_raw = $message
+                stdout_line_count = 0
+                parseable_json_lines = 0
+                stdout_non_json_lines = 0
+                stdout_exact_one_json = $false
+                json = $null
+                json_error = $message
+                stage10_summary_path = $null
+                stage10_summary = $null
+                gate_failures = @("Stage 10 runner exception: $message")
+            }
+        }
         $baselineRecords.Add($record)
         $processRecords.Add($record)
         foreach ($failure in @($record.gate_failures)) { $allFailures.Add("$($baseline.label): $failure") }
