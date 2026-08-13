@@ -23,6 +23,25 @@ use super::{DLSS_COMPOSE_TABLE_BASES, DLSS_TONEMAP_TABLE_BASE, create_null_textu
 #[cfg(feature = "nrd")]
 use super::{NRD_COMPOSE_TABLE_BASE, NRD_PREP_TABLE_BASE};
 
+unsafe fn create_acceleration_structure_srv(
+    device: &ID3D12Device,
+    heap: &DescriptorHeap,
+    index: usize,
+    gpu_address: u64,
+) {
+    let description = D3D12_SHADER_RESOURCE_VIEW_DESC {
+        Format: DXGI_FORMAT_UNKNOWN,
+        ViewDimension: D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE,
+        Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+        Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+            RaytracingAccelerationStructure: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_SRV {
+                Location: gpu_address,
+            },
+        },
+    };
+    unsafe { device.CreateShaderResourceView(None, Some(&description), heap.cpu_handle(index)) };
+}
+
 pub(super) struct DenoiseHistory {
     pub(super) diffuse: TrackedResource,
     pub(super) specular: TrackedResource,
@@ -240,17 +259,12 @@ impl RenderResourceGeneration {
                 64,
             );
             textures.write_srvs(device, &shader_heap);
-            let tlas_view = D3D12_SHADER_RESOURCE_VIEW_DESC {
-                Format: DXGI_FORMAT_UNKNOWN,
-                ViewDimension: D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE,
-                Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
-                Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
-                    RaytracingAccelerationStructure: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_SRV {
-                        Location: acceleration_structures.tlas.GetGPUVirtualAddress(),
-                    },
-                },
-            };
-            device.CreateShaderResourceView(None, Some(&tlas_view), shader_heap.cpu_handle(0));
+            create_acceleration_structure_srv(
+                device,
+                &shader_heap,
+                0,
+                acceleration_structures.tlas.GetGPUVirtualAddress(),
+            );
         }
 
         let display_output = create_uav_texture(
@@ -692,7 +706,9 @@ impl RenderResourceGeneration {
             rejection_mask,
             last_used_fence: 0,
         };
-        unsafe { generation.write_shader_views(device, textures, acceleration_structures) };
+        unsafe {
+            generation.write_shader_views(device, textures, scene_geometry, acceleration_structures)
+        };
         Ok(generation)
     }
 
@@ -700,8 +716,11 @@ impl RenderResourceGeneration {
         &mut self,
         device: &ID3D12Device,
         textures: &TextureSet,
+        scene_geometry: &SceneGeometry,
         acceleration_structures: &AccelerationStructures,
     ) {
+        #[cfg(not(feature = "streamline-rr"))]
+        let _ = scene_geometry;
         #[cfg(not(feature = "streamline-rr"))]
         let _ = acceleration_structures;
         unsafe { textures.write_srvs(device, &self.shader_heap) };
@@ -1153,23 +1172,30 @@ impl RenderResourceGeneration {
                         + (frame_index * 2 + history_index)
                             * super::RR_PRIMARY_VISIBILITY_TABLE_STRIDE;
                     unsafe {
-                        device.CopyDescriptorsSimple(
-                            1,
-                            self.shader_heap.cpu_handle(base),
-                            self.shader_heap.cpu_handle(0),
-                            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                        // Shader-visible heaps are CPU-write-only descriptor
+                        // destinations in D3D12. Recreate these immutable views
+                        // instead of illegally using the heap as a copy source.
+                        create_acceleration_structure_srv(
+                            device,
+                            &self.shader_heap,
+                            base,
+                            acceleration_structures.tlas.GetGPUVirtualAddress(),
                         );
-                        device.CopyDescriptorsSimple(
-                            1,
-                            self.shader_heap.cpu_handle(base + 1),
-                            self.shader_heap.cpu_handle(1),
-                            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                        create_structured_srv(
+                            device,
+                            &self.shader_heap,
+                            base + 1,
+                            scene_geometry.vertex_buffer(),
+                            scene_geometry.vertex_count(),
+                            48,
                         );
-                        device.CopyDescriptorsSimple(
-                            1,
-                            self.shader_heap.cpu_handle(base + 2),
-                            self.shader_heap.cpu_handle(2),
-                            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                        create_structured_srv(
+                            device,
+                            &self.shader_heap,
+                            base + 2,
+                            scene_geometry.index_buffer(),
+                            scene_geometry.index_count(),
+                            4,
                         );
                         create_structured_srv(
                             device,
