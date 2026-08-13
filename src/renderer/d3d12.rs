@@ -1067,7 +1067,7 @@ const SHADER_DESCRIPTOR_COUNT: usize = 363;
 #[cfg(all(feature = "streamline", not(feature = "streamline-rr")))]
 const SHADER_DESCRIPTOR_COUNT: usize = 386;
 #[cfg(feature = "streamline-rr")]
-const SHADER_DESCRIPTOR_COUNT: usize = 490;
+const SHADER_DESCRIPTOR_COUNT: usize = 496;
 const DXR_UAV_REGISTER_COUNT: usize = 32;
 const RECONSTRUCTION_DIFFUSE_HIT_DISTANCE_UAV_REGISTER: usize = 15;
 const RECONSTRUCTION_SPECULAR_HIT_DISTANCE_UAV_REGISTER: usize = 16;
@@ -1180,9 +1180,9 @@ const RR_TONEMAP_TABLE_BASES: [usize; 2] = [400, 415];
 #[cfg(feature = "streamline-rr")]
 const RR_PRIMARY_VISIBILITY_TABLE_BASE: usize = 430;
 #[cfg(feature = "streamline-rr")]
-const RR_PRIMARY_VISIBILITY_TABLE_STRIDE: usize = 7;
+const RR_PRIMARY_VISIBILITY_TABLE_STRIDE: usize = 8;
 #[cfg(feature = "streamline-rr")]
-const RR_BOUNDARY_TABLE_BASES: [usize; 2] = [472, 481];
+const RR_BOUNDARY_TABLE_BASES: [usize; 2] = [478, 487];
 
 #[cfg(feature = "nrd")]
 fn bridge_resource(resource: &TrackedResource) -> reconstruction::NrdBridgeResource {
@@ -1709,10 +1709,10 @@ impl Dx12Renderer {
             let rr_primary_visibility_pipeline = ComputePipeline::new(
                 &device,
                 RR_PRIMARY_VISIBILITY_SHADER,
-                4,
+                5,
                 3,
                 16,
-                "阶段 11 RR stable primary visibility",
+                "阶段 11 RR stable physical and virtual visibility",
             )
             .map_err(|error| dx_error("创建 DLSS RR primary visibility 管线", error))?;
             #[cfg(feature = "streamline-rr")]
@@ -5329,10 +5329,10 @@ impl Dx12Renderer {
         let rr_primary_visibility = ComputePipeline::new(
             &self.device,
             &shaders.rr_primary_visibility,
-            4,
+            5,
             3,
             16,
-            "阶段 11 RR stable primary visibility",
+            "阶段 11 RR stable physical and virtual visibility",
         )?;
         #[cfg(feature = "streamline-rr")]
         let rr_boundary_resolve = ComputePipeline::new(
@@ -5901,6 +5901,12 @@ mod tests {
         assert!(shader.contains("instanceData.stableSurfaceId"));
         assert!(shader.contains("PrimaryMotion[pixel] = ResetHistory != 0u"));
         assert!(shader.contains("query.CommittedWorldToObject3x4()"));
+        assert!(shader.contains("StructuredBuffer<Material> Materials : register(t4)"));
+        assert!(shader.contains("bool pureLegacyMirror"));
+        assert!(shader.contains("reflectedQuery.TraceRayInline"));
+        assert!(shader.contains("VIRTUAL_SURFACE_BIT"));
+        assert!(shader.contains("ReflectPointAcrossPlane"));
+        assert!(shader.contains("virtualPreviousUv - virtualCurrentUv"));
         assert_eq!(shader.matches("JitterPadding").count(), 1);
         assert_eq!(shader.matches("FrameIndex").count(), 1);
         assert!(!shader.contains("CameraJitterPx"));

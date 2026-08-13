@@ -387,6 +387,12 @@ impl SceneAsset {
         if stable_ids.windows(2).any(|ids| ids[0] == ids[1]) {
             return Err("场景实例 stable_id 重复".to_string());
         }
+        // Stage 11 uses the high bit to distinguish a physical instance ID
+        // from the same instance seen in unfolded mirror space. Keep the all
+        // ones value free as the invalid sentinel as well.
+        if stable_ids.iter().any(|&id| id >= 0x7fff_ffff) {
+            return Err("场景实例 stable_id 必须小于 0x7fffffff".to_string());
+        }
         for (instance_index, instance) in self.instances.iter().enumerate() {
             if instance.primitive_index >= self.primitives.len() {
                 return Err(format!(
@@ -465,6 +471,16 @@ mod tests {
         assert!(
             area_light.double_sided,
             "the sampled area light must also remain primary-ray visible"
+        );
+    }
+
+    #[test]
+    fn stable_surface_ids_reserve_virtual_mirror_namespace() {
+        let mut scene = SceneAsset::cornell_box();
+        scene.instances[0].stable_id = 0x7fff_ffff;
+        assert_eq!(
+            scene.validate().unwrap_err(),
+            "场景实例 stable_id 必须小于 0x7fffffff"
         );
     }
 

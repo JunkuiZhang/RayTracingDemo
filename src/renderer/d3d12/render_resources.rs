@@ -145,6 +145,8 @@ pub(super) struct RrGenerationResources {
     /// primary hit and one scalar hit distance.
     pub(super) specular_motion: TrackedResource,
     /// Output-resolution visibility written by the unjittered RR-only pass.
+    /// Pure planar mirrors replace the physical guide with unfolded virtual
+    /// hit geometry so reflected disocclusions have a stable boundary too.
     /// Two phases match the existing history ping/pong and are owned by the
     /// generation so a resize cannot alias an in-flight visibility frame.
     pub(super) primary_surface_id: [TrackedResource; 2],
@@ -1205,19 +1207,27 @@ impl RenderResourceGeneration {
                             instance_count,
                             64,
                         );
-                        create_texture_uav(
+                        create_structured_srv(
                             device,
                             &self.shader_heap,
                             base + 4,
-                            &rr.primary_surface_id[history_index],
+                            scene_geometry.material_buffer(),
+                            scene_geometry.material_count(),
+                            64,
                         );
                         create_texture_uav(
                             device,
                             &self.shader_heap,
                             base + 5,
+                            &rr.primary_surface_id[history_index],
+                        );
+                        create_texture_uav(
+                            device,
+                            &self.shader_heap,
+                            base + 6,
                             &rr.primary_surface_meta[history_index],
                         );
-                        create_texture_uav(device, &self.shader_heap, base + 6, &rr.primary_motion);
+                        create_texture_uav(device, &self.shader_heap, base + 7, &rr.primary_motion);
                     }
                 }
             }
