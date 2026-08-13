@@ -39,6 +39,10 @@ pub fn run(config: RealtimeConfig) -> Result<(), Box<dyn Error>> {
     event_loop
         .run_app(&mut application)
         .map_err(|error| io::Error::other(format!("运行 winit 事件循环：{error}")))?;
+    // Drop Streamline before emitting the benchmark record. Its production
+    // plugin verifier writes shutdown diagnostics through the C runtime; the
+    // bridge restores stdout only after that shutdown has completed.
+    application.renderer = None;
     if let Some(report) = application.benchmark_result {
         println!("{report}");
     }
