@@ -162,6 +162,7 @@ fn emit_build_provenance() {
             name.strip_prefix("CARGO_FEATURE_")
                 .map(|feature| feature.to_ascii_lowercase().replace('_', "-"))
         })
+        .filter(|feature| feature != "default")
         .collect::<Vec<_>>();
     features.sort_unstable();
 
@@ -176,6 +177,9 @@ fn emit_build_provenance() {
         features.join(",")
     );
     println!("cargo:rerun-if-changed=.git/HEAD");
+    if let Some(symbolic_ref) = git_value(&["symbolic-ref", "--quiet", "HEAD"]) {
+        println!("cargo:rerun-if-changed=.git/{symbolic_ref}");
+    }
 }
 
 fn validate_streamline_sdk(output_directory: &Path, rr_enabled: bool) {

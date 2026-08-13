@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstring>
+#include <io.h>
 #include <memory>
 #include <new>
 #include <string>
@@ -42,6 +44,34 @@ struct StreamlineBridge {
 namespace {
 
 constexpr uint32_t kExpectedVersion = STREAMLINE_BRIDGE_ABI_VERSION;
+
+class ScopedStdoutToStderr {
+public:
+    ScopedStdoutToStderr() noexcept {
+        std::fflush(stdout);
+        saved_handle_ = GetStdHandle(STD_OUTPUT_HANDLE);
+        const HANDLE stderr_handle = GetStdHandle(STD_ERROR_HANDLE);
+        saved_fd_ = _dup(_fileno(stdout));
+        if (saved_fd_ >= 0)
+            _dup2(_fileno(stderr), _fileno(stdout));
+        if (stderr_handle != nullptr && stderr_handle != INVALID_HANDLE_VALUE)
+            SetStdHandle(STD_OUTPUT_HANDLE, stderr_handle);
+    }
+
+    ~ScopedStdoutToStderr() noexcept {
+        std::fflush(stdout);
+        if (saved_fd_ >= 0) {
+            _dup2(saved_fd_, _fileno(stdout));
+            _close(saved_fd_);
+        }
+        if (saved_handle_ != nullptr && saved_handle_ != INVALID_HANDLE_VALUE)
+            SetStdHandle(STD_OUTPUT_HANDLE, saved_handle_);
+    }
+
+private:
+    int saved_fd_ = -1;
+    HANDLE saved_handle_ = INVALID_HANDLE_VALUE;
+};
 
 StreamlineBridgeStatus set_error(StreamlineBridge* bridge, const char* message, sl::Result result) noexcept {
     if (bridge != nullptr) {
@@ -741,6 +771,11 @@ StreamlineBridgeStatus streamline_bridge_shutdown(StreamlineBridge* bridge) {
     StreamlineBridgeStatus status = STREAMLINE_BRIDGE_STATUS_OK;
     try {
         if (bridge->initialized) {
+            // NVIDIA's signature verifier writes informational messages to
+            // stdout during shutdown even when Streamline logging is off.
+            // Keep those diagnostics, but route them to stderr so benchmark
+            // stdout remains one machine-readable JSON record.
+            ScopedStdoutToStderr redirect;
             const sl::Result result = slShutdown();
             if (result != sl::Result::eOk)
                 status = set_error(bridge, "slShutdown failed", result);
