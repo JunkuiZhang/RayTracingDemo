@@ -106,7 +106,7 @@ function Get-EnvironmentSnapshot {
             $smi = @(& nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits 2>&1 |
                 ForEach-Object { [string]$_ } |
                 Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-            if ($smi.Count -gt 0 -and $smi[0] -notmatch "not recognized|failed|error") {
+            if (@($smi).Count -gt 0 -and $smi[0] -notmatch "not recognized|failed|error") {
                 $driverVersion = $smi[0].Trim()
                 $driverSource = "nvidia-smi"
             } else {
@@ -307,9 +307,9 @@ function Get-ExactJsonLine([string]$RawText) {
     }
     [pscustomobject]@{
         exact = $exact
-        line_count = $lines.Count
-        parseable_json_lines = $parseable.Count
-        non_json_line_count = $lines.Count - $parseable.Count
+        line_count = @($lines).Count
+        parseable_json_lines = @($parseable).Count
+        non_json_line_count = @($lines).Count - @($parseable).Count
         json = $json
         error = $error
     }
@@ -587,7 +587,7 @@ function Get-Stage10Summary([object]$Result) {
     if ($raw.EndsWith("`r`n")) { $raw = $raw.Substring(0, $raw.Length - 2) }
     elseif ($raw.EndsWith("`n")) { $raw = $raw.Substring(0, $raw.Length - 1) }
     $lines = @($raw -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    if ($lines.Count -ne 1) {
+    if (@($lines).Count -ne 1) {
         return [pscustomobject]@{ summary = $null; path = $null; error = "Stage 10 runner stdout must contain one summary path" }
     }
     $summaryPath = $lines[0].Trim()
@@ -851,7 +851,7 @@ if ($needsMatrix) {
     $releaseExtents = @($rrRecords | Where-Object { $_.label -in @("rr_quality", "rr_balanced", "rr_performance") -and $null -ne $_.json } |
         ForEach-Object { "$(Get-JsonPathValue $_.json 'upscaler.dlss_optimal.optimal_render_width')x$(Get-JsonPathValue $_.json 'upscaler.dlss_optimal.optimal_render_height')" } |
         Sort-Object -Unique)
-    if ($releaseExtents.Count -lt 2) {
+    if (@($releaseExtents).Count -lt 2) {
         $allFailures.Add("RR Quality/Balanced/Performance must expose at least two distinct optimal extents; observed=$($releaseExtents -join ',')")
     }
 }
