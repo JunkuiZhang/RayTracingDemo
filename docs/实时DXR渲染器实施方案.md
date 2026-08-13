@@ -898,7 +898,7 @@ H1–I3 最新状态（2026-08-09）：median/环境来源修复和五条 Debug 
 
 执行细则：[`阶段11RayReconstruction与FrameGeneration执行方案.md`](阶段11RayReconstruction与FrameGeneration执行方案.md)。阶段 11 分成两个顺序增量：先以 11A–11F 接入融合的 DLSS Ray Reconstruction 并与 SVGF/NRD 对照；只有 RR、基础帧率、Reflex 计数和生命周期通过后，才以 11G–11H 改造 swap chain/Present 接入 Frame Generation。第一轮 Luna 仅实现 11A–11D，禁止同时改 FG。
 
-当前状态（2026-08-12）：阶段 10 的 RTX 4060 Laptop Release 自动短矩阵和近期 HDR/历史能量修复已满足阶段 11 的工程入口；Debug/人工 DLSS 画质与外部 Reflex 工具证据仍作为阶段 10 债务保留但不阻塞 RR。阶段 11 尚未实现，当前处于已冻结输入契约、feature/ABI 边界、提交拆分和验收门槛的计划状态。
+当前状态（2026-08-13）：11A–11D 的最小真实 RR 路径已实现，并经过输入消毒、viewport 生命周期、显式镜面 motion、稳定 transformer preset、primary coverage 和直接可见灯层等多轮 review 修复。RTX 4060 Laptop 上 RR 已能真实 evaluate，灯边缘已稳定；剩余已定位的画质问题是低分辨率全局 jitter 让少量不透明墙角像素在不同 primary surface 之间切换，从而造成红灰、绿灰接缝抽动。下一工作包不改 RR 输入契约，而是按 [`阶段11RR不透明边界稳定执行方案.md`](阶段11RR不透明边界稳定执行方案.md) 增加输出分辨率、无 jitter 的轻量 primary visibility 与仅边界时域解析。Frame Generation 仍未开始，阶段 11 不标记完成。
 
 工作内容：
 
