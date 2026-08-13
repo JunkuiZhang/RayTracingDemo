@@ -162,7 +162,11 @@ pub fn create() -> SceneAsset {
     add_box(
         &mut add,
         "metal box",
-        [-0.6333333, -1.0, 0.93333334],
+        // Sink the opaque box slightly into the floor so its hidden bottom
+        // face is not exactly coplanar with the floor. The visible side faces
+        // still meet the floor without a floating gap, while DXR no longer
+        // has two coincident triangles at the contact footprint.
+        [-0.6333333, -1.005, 0.93333334],
         [-0.06666667, 0.1, 1.5333333],
         (-10.0_f32).to_radians(),
         4,
