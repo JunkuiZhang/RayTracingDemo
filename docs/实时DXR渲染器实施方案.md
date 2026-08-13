@@ -898,7 +898,7 @@ H1–I3 最新状态（2026-08-09）：median/环境来源修复和五条 Debug 
 
 执行细则：[`阶段11RayReconstruction与FrameGeneration执行方案.md`](阶段11RayReconstruction与FrameGeneration执行方案.md)。阶段 11 分成两个顺序增量：先以 11A–11F 接入融合的 DLSS Ray Reconstruction 并与 SVGF/NRD 对照；只有 RR、基础帧率、Reflex 计数和生命周期通过后，才以 11G–11H 改造 swap chain/Present 接入 Frame Generation。第一轮 Luna 仅实现 11A–11D，禁止同时改 FG。
 
-当前状态（2026-08-13）：11A–11D 的最小真实 RR 路径已实现，并经过输入消毒、viewport 生命周期、显式镜面 motion、稳定 transformer preset、primary coverage 和直接可见灯层等多轮 review 修复。RTX 4060 Laptop 上 RR 已能真实 evaluate，灯边缘已稳定；剩余已定位的画质问题是低分辨率全局 jitter 让少量不透明墙角像素在不同 primary surface 之间切换，从而造成红灰、绿灰接缝抽动。下一工作包不改 RR 输入契约，而是按 [`阶段11RR不透明边界稳定执行方案.md`](阶段11RR不透明边界稳定执行方案.md) 增加输出分辨率、无 jitter 的轻量 primary visibility 与仅边界时域解析。Frame Generation 仍未开始，阶段 11 不标记完成。
+当前状态（2026-08-13）：11A–11D 的真实 RR 路径、后续输入/lifecycle review 和不透明边界稳定工作包已经实现。RTX 4060 Laptop 的 RR Quality 121/122 SPP 固定 capture 中，右侧红灰接缝 mean max-channel diff 从 `0.6453` 降至 `0.205523`，diff > 2 的像素从 `723` 降至 `0`，Total p95 为 `5.08 ms`；用户已经确认当前静止画面观感良好。详细证据见 [`阶段11RR不透明边界稳定验收记录.md`](阶段11RR不透明边界稳定验收记录.md)。下一步先按 [`阶段11RR收口与FrameGeneration分段执行方案.md`](阶段11RR收口与FrameGeneration分段执行方案.md) 完成不改画质算法的 11F-R 有界收口 runner，再分 SDK/ABI、proxy swap chain、FG 输入和统计四个独立提交进入 11G。Frame Generation 尚未实现，阶段 11 仍不标记完成，也不能提前进入阶段 12。
 
 工作内容：
 
