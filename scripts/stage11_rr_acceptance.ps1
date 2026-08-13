@@ -296,22 +296,20 @@ function Get-ExactJsonLine([string]$RawText) {
     $json = $null
     $error = $null
     $exact = $false
-    if ($lines.Count -ne 1) {
-        $error = "stdout must contain exactly one JSON line; line_count=$($lines.Count)"
-    } elseif ([string]::IsNullOrWhiteSpace($lines[0])) {
-        $error = "stdout JSON line is empty"
+    if ($parseable.Count -ne 1) {
+        $error = "stdout must contain exactly one JSON line; parseable_json_lines=$($parseable.Count)"
     } else {
-        try {
-            $json = $lines[0] | ConvertFrom-Json -Depth 50
-            $exact = $true
-        } catch {
-            $error = "stdout JSON parse failed: $($_.Exception.Message)"
-        }
+        # Streamline's signed-DLL verifier can write informational lines to
+        # stdout. Preserve those raw lines, but accept only one parseable JSON
+        # record; a second JSON line remains a hard evidence error.
+        $json = $parseable[0]
+        $exact = $true
     }
     [pscustomobject]@{
         exact = $exact
         line_count = $lines.Count
         parseable_json_lines = $parseable.Count
+        non_json_line_count = $lines.Count - $parseable.Count
         json = $json
         error = $error
     }
@@ -383,6 +381,7 @@ function Invoke-RecordedProcess(
             exact = $false
             line_count = $parsed.line_count
             parseable_json_lines = $parsed.parseable_json_lines
+            non_json_line_count = $parsed.non_json_line_count
             json = $null
             error = "process timed out after $Timeout seconds"
         }
@@ -391,6 +390,7 @@ function Invoke-RecordedProcess(
             exact = $false
             line_count = $parsed.line_count
             parseable_json_lines = $parsed.parseable_json_lines
+            non_json_line_count = $parsed.non_json_line_count
             json = $null
             error = $launchError
         }
@@ -401,6 +401,7 @@ function Invoke-RecordedProcess(
             exact = $false
             line_count = $parsed.line_count
             parseable_json_lines = $parsed.parseable_json_lines
+            non_json_line_count = $parsed.non_json_line_count
             json = $null
             error = $null
         }
@@ -421,6 +422,7 @@ function Invoke-RecordedProcess(
         stderr_raw = $stderr
         stdout_line_count = $parsed.line_count
         parseable_json_lines = $parsed.parseable_json_lines
+        stdout_non_json_lines = $parsed.non_json_line_count
         stdout_exact_one_json = $parsed.exact
         json = $parsed.json
         json_error = $parsed.error
@@ -437,6 +439,7 @@ function Invoke-RecordedProcess(
         elapsed_seconds = $elapsed
         stdout_line_count = $parsed.line_count
         parseable_json_lines = $parsed.parseable_json_lines
+        stdout_non_json_lines = $parsed.non_json_line_count
         stdout_exact_one_json = $parsed.exact
         json_error = $parsed.error
     } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $exitPath -Encoding UTF8
@@ -854,6 +857,7 @@ $summary = [ordered]@{
             stderr_raw = $_.stderr_raw
             stdout_line_count = $_.stdout_line_count
             parseable_json_lines = $_.parseable_json_lines
+            stdout_non_json_lines = $_.stdout_non_json_lines
             stdout_exact_one_json = $_.stdout_exact_one_json
             json_error = $_.json_error
         }
