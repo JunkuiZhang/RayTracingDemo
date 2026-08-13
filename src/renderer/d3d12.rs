@@ -6011,6 +6011,23 @@ mod tests {
     }
 
     #[test]
+    fn tonemap_debug_views_sample_each_resource_at_its_own_extent() {
+        let shader = include_str!("../../shaders/stage6_tonemap.hlsl");
+        assert!(shader.contains("LoadForOutput(Texture2D<float4>"));
+        assert!(shader.contains("LoadForOutput(Texture2D<float2>"));
+        assert!(shader.contains("LoadForOutput(Texture2D<float>"));
+        for resource in ["RejectionMask", "HistoryLength", "Id"] {
+            assert!(
+                shader.contains(&format!("{resource}.GetDimensions(sourceSize.x")),
+                "{resource} debug view still inherits another texture's extent"
+            );
+        }
+        assert!(shader.contains("LoadForOutput(NormalRoughness, pixel, size)"));
+        assert!(shader.contains("LoadForOutput(Depth, pixel, size)"));
+        assert!(shader.contains("LoadForOutput(Motion, pixel, size)"));
+    }
+
+    #[test]
     fn dlss_guide_mode_preserves_rr_path_semantics() {
         assert_eq!(dlss_guide_mode(false, false), DLSS_GUIDE_MODE_DISABLED);
         assert_eq!(dlss_guide_mode(true, false), DLSS_GUIDE_MODE_SR);

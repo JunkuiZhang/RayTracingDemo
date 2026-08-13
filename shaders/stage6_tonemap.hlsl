@@ -124,6 +124,43 @@ uint2 DiscreteSourcePixel(uint2 outputPixel, uint2 outputSize, uint2 renderSize)
     return min(numerator / (2u * outputSize), renderSize - 1u);
 }
 
+// RR mixes output-resolution reconstruction resources with render-resolution
+// guides in the same descriptor table. Debug views must therefore query the
+// extent of the texture they display instead of inheriting t0's extent.
+float4 LoadForOutput(Texture2D<float4> source, uint2 outputPixel, uint2 outputSize)
+{
+    uint2 sourceSize;
+    source.GetDimensions(sourceSize.x, sourceSize.y);
+    return all(sourceSize == outputSize)
+        ? source.Load(int3(outputPixel, 0))
+        : LoadBilinear(source, outputPixel, outputSize, sourceSize);
+}
+
+float2 LoadForOutput(Texture2D<float2> source, uint2 outputPixel, uint2 outputSize)
+{
+    uint2 sourceSize;
+    source.GetDimensions(sourceSize.x, sourceSize.y);
+    return all(sourceSize == outputSize)
+        ? source.Load(int3(outputPixel, 0))
+        : LoadBilinear(source, outputPixel, outputSize, sourceSize);
+}
+
+float LoadForOutput(Texture2D<float> source, uint2 outputPixel, uint2 outputSize)
+{
+    uint2 sourceSize;
+    source.GetDimensions(sourceSize.x, sourceSize.y);
+    return all(sourceSize == outputSize)
+        ? source.Load(int3(outputPixel, 0))
+        : LoadBilinear(source, outputPixel, outputSize, sourceSize);
+}
+
+uint2 DiscretePixelForExtent(uint2 outputPixel, uint2 outputSize, uint2 sourceSize)
+{
+    return all(sourceSize == outputSize)
+        ? outputPixel
+        : DiscreteSourcePixel(outputPixel, outputSize, sourceSize);
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
@@ -173,69 +210,55 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     }
     else if (DebugMode == 1u)
     {
-        float3 diffuse = (nativeSize
-            ? RawDiffuse.Load(int3(pixel, 0))
-            : LoadBilinear(RawDiffuse, pixel, size, renderSize)).xyz;
-        float3 specular = (nativeSize
-            ? RawSpecular.Load(int3(pixel, 0))
-            : LoadBilinear(RawSpecular, pixel, size, renderSize)).xyz;
+        float3 diffuse = LoadForOutput(RawDiffuse, pixel, size).xyz;
+        float3 specular = LoadForOutput(RawSpecular, pixel, size).xyz;
         color = ToneMap(diffuse + specular);
     }
     else if (DebugMode == 2u)
     {
-        color = (nativeSize
-            ? Albedo.Load(int3(pixel, 0))
-            : LoadBilinear(Albedo, pixel, size, renderSize)).xyz;
+        color = LoadForOutput(Albedo, pixel, size).xyz;
     }
     else if (DebugMode == 3u)
     {
-        color = (nativeSize
-            ? NormalRoughness.Load(int3(pixel, 0))
-            : LoadBilinear(NormalRoughness, pixel, size, renderSize)).xyz;
+        color = LoadForOutput(NormalRoughness, pixel, size).xyz;
     }
     else if (DebugMode == 4u)
     {
-        float depth = nativeSize
-            ? Depth.Load(int3(pixel, 0))
-            : LoadBilinear(Depth, pixel, size, renderSize);
+        float depth = LoadForOutput(Depth, pixel, size);
         color = depth > 0.0 ? 1.0 - exp(-depth.xxx * 0.5) : 0;
     }
     else if (DebugMode == 5u)
     {
-        float2 motion = nativeSize
-            ? Motion.Load(int3(pixel, 0))
-            : LoadBilinear(Motion, pixel, size, renderSize);
+        float2 motion = LoadForOutput(Motion, pixel, size);
         color = float3(saturate(abs(motion) * 0.05), 0.0);
     }
     else if (DebugMode == 6u)
     {
-        float4 moments = nativeSize
-            ? Moments.Load(int3(pixel, 0))
-            : LoadBilinear(Moments, pixel, size, renderSize);
+        float4 moments = LoadForOutput(Moments, pixel, size);
         float variance = max(0.0, moments.y - moments.x * moments.x)
             + max(0.0, moments.w - moments.z * moments.z);
         color = saturate(log2(1.0 + variance) / 4.0).xxx;
     }
     else if (DebugMode == 7u)
     {
-        uint2 sourcePixel = nativeSize
-            ? pixel
-            : DiscreteSourcePixel(pixel, size, renderSize);
+        uint2 sourceSize;
+        RejectionMask.GetDimensions(sourceSize.x, sourceSize.y);
+        uint2 sourcePixel = DiscretePixelForExtent(pixel, size, sourceSize);
         color = RejectionColor(RejectionMask.Load(int3(sourcePixel, 0)));
     }
     else if (DebugMode == 8u)
     {
-        uint2 sourcePixel = nativeSize
-            ? pixel
-            : DiscreteSourcePixel(pixel, size, renderSize);
+        uint2 sourceSize;
+        HistoryLength.GetDimensions(sourceSize.x, sourceSize.y);
+        uint2 sourcePixel = DiscretePixelForExtent(pixel, size, sourceSize);
         uint2 length = HistoryLength.Load(int3(sourcePixel, 0));
         color = float3(saturate(float(length.x) / 64.0), saturate(float(length.y) / 32.0), 0);
     }
     else if (DebugMode == 9u)
     {
-        uint2 sourcePixel = nativeSize
-            ? pixel
-            : DiscreteSourcePixel(pixel, size, renderSize);
+        uint2 sourceSize;
+        Id.GetDimensions(sourceSize.x, sourceSize.y);
+        uint2 sourcePixel = DiscretePixelForExtent(pixel, size, sourceSize);
         uint id = Id.Load(int3(sourcePixel, 0));
         color = id == 0xFFFFFFFFu
             ? 0
@@ -243,24 +266,18 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     }
     else if (DebugMode == 10u)
     {
-        float hitDistance = nativeSize
-            ? HitDistance.Load(int3(pixel, 0))
-            : LoadBilinear(HitDistance, pixel, size, renderSize);
+        float hitDistance = LoadForOutput(HitDistance, pixel, size);
         color = (1.0 - exp(-hitDistance * 0.25)).xxx;
     }
     else if (DebugMode == 11u)
     {
         color = InputMode == 1u
-            ? (nativeSize
-                ? NrdValidation.Load(int3(pixel, 0))
-                : LoadBilinear(NrdValidation, pixel, size, renderSize)).xyz
+            ? LoadForOutput(NrdValidation, pixel, size).xyz
             : 0.0.xxx;
     }
     else if (DebugMode == 12u)
     {
-        float2 specularMotion = (nativeSize
-            ? NrdValidation.Load(int3(pixel, 0))
-            : LoadBilinear(NrdValidation, pixel, size, renderSize)).xy;
+        float2 specularMotion = LoadForOutput(NrdValidation, pixel, size).xy;
         color = InputMode == 3u
             ? float3(saturate(abs(specularMotion) * 0.05), 0.0)
             : 0.0.xxx;
@@ -269,20 +286,19 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     {
         // t1 is the independently stabilized output-resolution layer only on
         // RR. Other reconstruction paths deliberately show black here.
-        float3 stableEmissive = FilteredSpecular.Load(int3(pixel, 0)).xyz;
+        float3 stableEmissive = InputMode == 3u
+            ? LoadForOutput(FilteredSpecular, pixel, size).xyz
+            : 0.0;
         color = InputMode == 3u
             ? ToneMap(all(isfinite(stableEmissive)) ? max(stableEmissive, 0.0) : 0.0)
             : 0.0.xxx;
     }
     else
     {
-        uint2 sourcePixel = nativeSize
-            ? pixel
-            : DiscreteSourcePixel(pixel, size, renderSize);
-        float depth = Depth.Load(int3(sourcePixel, 0));
-        float2 motion = Motion.Load(int3(sourcePixel, 0));
-        float3 normal = NormalRoughness.Load(int3(sourcePixel, 0)).xyz * 2.0 - 1.0;
-        float hitDistance = HitDistance.Load(int3(sourcePixel, 0));
+        float depth = LoadForOutput(Depth, pixel, size);
+        float2 motion = LoadForOutput(Motion, pixel, size);
+        float3 normal = LoadForOutput(NormalRoughness, pixel, size).xyz * 2.0 - 1.0;
+        float hitDistance = LoadForOutput(HitDistance, pixel, size);
         color = float3(
             depth > 0.0 && isfinite(depth),
             all(isfinite(motion)),
