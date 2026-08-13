@@ -951,7 +951,11 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     bool isPsrSurface = NrdEnabled != 0u
         && payload.psrActive == 1u
         && kind != 1u;
-    bool isTransmissionSurface = NrdEnabled != 0u
+    // Both reconstruction backends need a deterministic principal transmitted
+    // path. NRD publishes a second REBLUR layer; RR keeps the complete glass
+    // signal and pairs it with a stable virtual-transmission guide downstream.
+    bool layeredTransmissionEnabled = NrdEnabled != 0u || DlssGuideMode == 2u;
+    bool isTransmissionSurface = layeredTransmissionEnabled
         && payload.psrActive == 3u
         && kind != 2u;
 
@@ -969,7 +973,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
             kind,
             instanceData.stableSurfaceId);
     }
-    if (isTransmissionSurface)
+    if (NrdEnabled != 0u && isTransmissionSurface)
     {
         WriteTransmissionSurfaceGuides(
             hitPosition,
@@ -1095,16 +1099,19 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
             payload.rawDiffuse = 0;
             payload.rawSpecular = payload.psrThroughput * payload.radiance;
             payload.psrActive = 4u;
-            uint2 transmissionPixel = DispatchRaysIndex().xy;
-            TransmissionRawDiffuse[transmissionPixel] = 0;
-            TransmissionRawSpecular[transmissionPixel] = float4(
-                FiniteNonNegative(payload.rawSpecular),
-                1.0);
-            TransmissionDiffuseHitDistance[transmissionPixel] = 0;
-            TransmissionSpecularHitDistance[transmissionPixel] = 0;
-            TransmissionPrimaryEmissive[transmissionPixel] = float4(
-                FiniteNonNegative(payload.rawSpecular),
-                1.0);
+            if (NrdEnabled != 0u)
+            {
+                uint2 transmissionPixel = DispatchRaysIndex().xy;
+                TransmissionRawDiffuse[transmissionPixel] = 0;
+                TransmissionRawSpecular[transmissionPixel] = float4(
+                    FiniteNonNegative(payload.rawSpecular),
+                    1.0);
+                TransmissionDiffuseHitDistance[transmissionPixel] = 0;
+                TransmissionSpecularHitDistance[transmissionPixel] = 0;
+                TransmissionPrimaryEmissive[transmissionPixel] = float4(
+                    FiniteNonNegative(payload.rawSpecular),
+                    1.0);
+            }
         }
         else if (payload.depth == 0)
         {
@@ -1243,7 +1250,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     // of the screen in the target scene, so tracing both Fresnel branches is a
     // better quality/cost trade than feeding Bernoulli noise into REBLUR. The
     // depth bound prevents exponential branching in nested glass geometry.
-    bool deterministicGlass = NrdEnabled != 0u
+    bool deterministicGlass = layeredTransmissionEnabled
         && kind == 2u
         && (payload.depth == 0u
             || isPsrSurface
@@ -1271,7 +1278,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
             // Glass reflection needs the same virtual replacement surface as a
             // metal mirror. Without it, the ceiling/light reflection is still
             // filtered using the glass interface depth and remains grainy.
-            if (payload.depth == 0u && payload.psrActive == 0u)
+            if (NrdEnabled != 0u && payload.depth == 0u && payload.psrActive == 0u)
             {
                 reflectionChild.psrActive = 1u;
                 reflectionChild.psrThroughput = baseColor.xyz * reflectionWeight;
@@ -1385,9 +1392,19 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         if (payload.depth == 0u || isPsrSurface)
         {
             uint2 glassPixel = DispatchRaysIndex().xy;
-            ReconstructionNoisyHdr[glassPixel] = float4(
-                payload.rawDiffuse + payload.rawSpecular,
-                1.0);
+            if (DlssGuideMode == 2u && payload.depth == 0u)
+            {
+                // RR still reconstructs the complete camera-visible glass
+                // signal. Its optional transparency overlay is composited but
+                // not a substitute for denoising raw path-traced refraction.
+                ReconstructionNoisyHdr[glassPixel] = float4(payload.radiance, 1.0);
+            }
+            else
+            {
+                ReconstructionNoisyHdr[glassPixel] = float4(
+                    payload.rawDiffuse + payload.rawSpecular,
+                    1.0);
+            }
             if (reflectionChild.psrActive != 2u)
             {
                 ReconstructionDiffuseHitDistance[glassPixel] = 0.0;
@@ -1599,18 +1616,21 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         payload.rawDiffuse = payload.psrThroughput * localRawDiffuse;
         payload.rawSpecular = payload.psrThroughput * localRawSpecular;
         payload.psrActive = 4u;
-        uint2 transmissionPixel = DispatchRaysIndex().xy;
-        TransmissionRawDiffuse[transmissionPixel] = float4(
-            FiniteNonNegative(payload.rawDiffuse),
-            1.0);
-        TransmissionRawSpecular[transmissionPixel] = float4(
-            FiniteNonNegative(payload.rawSpecular),
-            1.0);
-        TransmissionDiffuseHitDistance[transmissionPixel] = diffuseHitDistance;
-        TransmissionSpecularHitDistance[transmissionPixel] = specularHitDistance;
-        TransmissionPrimaryEmissive[transmissionPixel] = float4(
-            FiniteNonNegative(payload.psrThroughput * emissive),
-            1.0);
+        if (NrdEnabled != 0u)
+        {
+            uint2 transmissionPixel = DispatchRaysIndex().xy;
+            TransmissionRawDiffuse[transmissionPixel] = float4(
+                FiniteNonNegative(payload.rawDiffuse),
+                1.0);
+            TransmissionRawSpecular[transmissionPixel] = float4(
+                FiniteNonNegative(payload.rawSpecular),
+                1.0);
+            TransmissionDiffuseHitDistance[transmissionPixel] = diffuseHitDistance;
+            TransmissionSpecularHitDistance[transmissionPixel] = specularHitDistance;
+            TransmissionPrimaryEmissive[transmissionPixel] = float4(
+                FiniteNonNegative(payload.psrThroughput * emissive),
+                1.0);
+        }
     }
     if (payload.depth == 0)
     {
