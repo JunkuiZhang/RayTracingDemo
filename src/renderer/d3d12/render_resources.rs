@@ -18,7 +18,8 @@ use super::{
     RECONSTRUCTION_SPECULAR_HIT_DISTANCE_UAV_REGISTER, SHADER_DESCRIPTOR_COUNT,
     STABLE_BUILD_TABLE_BASE, STABLE_PLANE_DIFFUSE_UAV_REGISTER, STABLE_PLANE_HEADER_UAV_REGISTER,
     STABLE_PLANE_RECORD_UAV_REGISTER, STABLE_PLANE_SPECULAR_UAV_REGISTER,
-    STABLE_RADIANCE_UAV_REGISTER, TEMPORAL_TABLE_BASES, TONEMAP_TABLE_BASES,
+    STABLE_RADIANCE_UAV_REGISTER, STABLE_DIFFUSE_ALBEDO_UAV_REGISTER,
+    STABLE_SPECULAR_ALBEDO_UAV_REGISTER, TEMPORAL_TABLE_BASES, TONEMAP_TABLE_BASES,
     create_null_structured_uav, create_null_texture_array_uav, create_structured_srv,
     create_structured_uav, create_texture_srv, create_texture_uav,
     descriptor::DescriptorHeap,
@@ -76,6 +77,8 @@ pub(super) struct StablePlaneGenerationResources {
     pub(super) noisy_diffuse: TrackedResource,
     pub(super) noisy_specular: TrackedResource,
     pub(super) stable_radiance: TrackedResource,
+    pub(super) diffuse_albedo: TrackedResource,
+    pub(super) specular_albedo: TrackedResource,
     pub(super) record_count: u32,
     pub(super) allocated_bytes: u64,
 }
@@ -91,6 +94,8 @@ impl StablePlaneGenerationResources {
         self.noisy_diffuse.collect_transition(batch, state);
         self.noisy_specular.collect_transition(batch, state);
         self.stable_radiance.collect_transition(batch, state);
+        self.diffuse_albedo.collect_transition(batch, state);
+        self.specular_albedo.collect_transition(batch, state);
     }
 }
 
@@ -958,7 +963,7 @@ impl RenderResourceGeneration {
             super::STABLE_PLANE_RECORD_UAV_REGISTER
         );
         debug_assert_eq!(
-            super::STABLE_RADIANCE_UAV_REGISTER + 1,
+            super::STABLE_SPECULAR_ALBEDO_UAV_REGISTER + 1,
             DXR_UAV_REGISTER_COUNT
         );
 
@@ -995,6 +1000,18 @@ impl RenderResourceGeneration {
                     &self.shader_heap,
                     DXR_UAV_BASE + STABLE_RADIANCE_UAV_REGISTER,
                     &stable.stable_radiance,
+                );
+                create_texture_uav(
+                    device,
+                    &self.shader_heap,
+                    DXR_UAV_BASE + STABLE_DIFFUSE_ALBEDO_UAV_REGISTER,
+                    &stable.diffuse_albedo,
+                );
+                create_texture_uav(
+                    device,
+                    &self.shader_heap,
+                    DXR_UAV_BASE + STABLE_SPECULAR_ALBEDO_UAV_REGISTER,
+                    &stable.specular_albedo,
                 );
 
                 create_acceleration_structure_srv(
@@ -1093,6 +1110,18 @@ impl RenderResourceGeneration {
                     &self.shader_heap,
                     DXR_UAV_BASE + STABLE_RADIANCE_UAV_REGISTER,
                     reconstruction_noisy_hdr,
+                );
+                create_texture_uav(
+                    device,
+                    &self.shader_heap,
+                    DXR_UAV_BASE + STABLE_DIFFUSE_ALBEDO_UAV_REGISTER,
+                    reconstruction_diffuse_albedo,
+                );
+                create_texture_uav(
+                    device,
+                    &self.shader_heap,
+                    DXR_UAV_BASE + STABLE_SPECULAR_ALBEDO_UAV_REGISTER,
+                    reconstruction_specular_albedo,
                 );
             }
         }
@@ -1569,6 +1598,68 @@ impl RenderResourceGeneration {
                     &input_uavs,
                 )
             };
+            if let Some(stable) = self.stable_planes.as_ref() {
+                let base = super::RR_STABLE_INPUT_TABLE_BASE;
+                unsafe {
+                    create_texture_srv(
+                        device,
+                        &self.shader_heap,
+                        base,
+                        &stable.noisy_diffuse,
+                    );
+                    create_texture_srv(
+                        device,
+                        &self.shader_heap,
+                        base + 1,
+                        &stable.noisy_specular,
+                    );
+                    create_structured_srv(
+                        device,
+                        &self.shader_heap,
+                        base + 2,
+                        stable.records.resource(),
+                        stable.record_count,
+                        STABLE_PLANE_RECORD_STRIDE as u32,
+                    );
+                    create_texture_srv(device, &self.shader_heap, base + 3, &stable.headers);
+                    create_texture_srv(
+                        device,
+                        &self.shader_heap,
+                        base + 4,
+                        &stable.stable_radiance,
+                    );
+                    create_texture_srv(
+                        device,
+                        &self.shader_heap,
+                        base + 5,
+                        &stable.diffuse_albedo,
+                    );
+                    create_texture_srv(
+                        device,
+                        &self.shader_heap,
+                        base + 6,
+                        &stable.specular_albedo,
+                    );
+                    for (offset, resource) in [
+                        &rr.normal_roughness,
+                        &rr.input_hdr,
+                        &rr.primary_emissive,
+                        &rr.depth,
+                        &rr.motion,
+                        &rr.specular_motion,
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        create_texture_uav(
+                            device,
+                            &self.shader_heap,
+                            base + 7 + offset,
+                            resource,
+                        );
+                    }
+                }
+            }
             for current_index in 0..2 {
                 let previous_index = 1 - current_index;
                 let emissive_srvs = [
@@ -1642,7 +1733,10 @@ fn create_stable_plane_resources(
     // RGBA16F stable-radiance pixel shared by all planes.
     let allocated_bytes = pixels
         .checked_mul(
-            STABLE_PLANE_COUNT as u64 * (STABLE_PLANE_RECORD_STRIDE as u64 + 4 + 8 + 8) + 8,
+            STABLE_PLANE_COUNT as u64 * (STABLE_PLANE_RECORD_STRIDE as u64 + 4 + 8 + 8)
+                + 8
+                + 8
+                + 8,
         )
         .expect("stable-plane memory telemetry must fit u64");
     let array_size = STABLE_PLANE_COUNT as u16;
@@ -1689,6 +1783,18 @@ fn create_stable_plane_resources(
             extent,
             DXGI_FORMAT_R16G16B16A16_FLOAT,
             format!("代际 {generation} stable radiance and dominant plane"),
+        )?,
+        diffuse_albedo: create_uav_texture(
+            device,
+            extent,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            format!("代际 {generation} stable dominant diffuse albedo"),
+        )?,
+        specular_albedo: create_uav_texture(
+            device,
+            extent,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            format!("代际 {generation} stable dominant specular albedo"),
         )?,
         record_count,
         allocated_bytes,

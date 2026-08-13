@@ -1088,12 +1088,12 @@ const SHADER_DESCRIPTOR_COUNT: usize = 457;
 #[cfg(all(feature = "streamline-rr", not(feature = "nrd")))]
 const STABLE_BUILD_TABLE_BASE: usize = 501;
 #[cfg(all(feature = "streamline-rr", not(feature = "nrd")))]
-const SHADER_DESCRIPTOR_COUNT: usize = 510;
+const SHADER_DESCRIPTOR_COUNT: usize = 523;
 #[cfg(all(feature = "streamline-rr", feature = "nrd"))]
 const STABLE_BUILD_TABLE_BASE: usize = 501;
 #[cfg(all(feature = "streamline-rr", feature = "nrd"))]
-const SHADER_DESCRIPTOR_COUNT: usize = 567;
-const DXR_UAV_REGISTER_COUNT: usize = 37;
+const SHADER_DESCRIPTOR_COUNT: usize = 580;
+const DXR_UAV_REGISTER_COUNT: usize = 39;
 const RECONSTRUCTION_DIFFUSE_HIT_DISTANCE_UAV_REGISTER: usize = 15;
 const RECONSTRUCTION_SPECULAR_HIT_DISTANCE_UAV_REGISTER: usize = 16;
 const RECONSTRUCTION_PRIMARY_EMISSIVE_UAV_REGISTER: usize = 17;
@@ -1107,6 +1107,8 @@ const STABLE_PLANE_HEADER_UAV_REGISTER: usize = 33;
 const STABLE_PLANE_DIFFUSE_UAV_REGISTER: usize = 34;
 const STABLE_PLANE_SPECULAR_UAV_REGISTER: usize = 35;
 const STABLE_RADIANCE_UAV_REGISTER: usize = 36;
+const STABLE_DIFFUSE_ALBEDO_UAV_REGISTER: usize = 37;
+const STABLE_SPECULAR_ALBEDO_UAV_REGISTER: usize = 38;
 #[cfg(feature = "streamline")]
 const PCL_SIMULATION_START: u32 = 0;
 #[cfg(feature = "streamline")]
@@ -1149,6 +1151,11 @@ const DLSS_COMPOSE_SHADER: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/stage10_dlss_input.dxil"));
 #[cfg(feature = "streamline-rr")]
 const RR_INPUT_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage11_rr_input.dxil"));
+#[cfg(feature = "streamline-rr")]
+const RR_STABLE_INPUT_SHADER: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/stage11_rr_stable_input.dxil"
+));
 #[cfg(feature = "streamline-rr")]
 const RR_EMISSIVE_SHADER: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/stage11_rr_emissive.dxil"));
@@ -1229,6 +1236,10 @@ const DLSS_COMPOSE_TABLE_BASES: [usize; 2] = [368, 372];
 const DLSS_TONEMAP_TABLE_BASE: usize = 376;
 #[cfg(feature = "streamline-rr")]
 const RR_INPUT_TABLE_BASE: usize = 391;
+#[cfg(all(feature = "streamline-rr", not(feature = "nrd")))]
+const RR_STABLE_INPUT_TABLE_BASE: usize = 510;
+#[cfg(all(feature = "streamline-rr", feature = "nrd"))]
+const RR_STABLE_INPUT_TABLE_BASE: usize = 567;
 #[cfg(feature = "streamline-rr")]
 const RR_EMISSIVE_TABLE_BASES: [usize; 2] = [397, 401];
 #[cfg(feature = "streamline-rr")]
@@ -1489,6 +1500,8 @@ pub struct Dx12Renderer {
     dlss_compose_pipeline: ComputePipeline,
     #[cfg(feature = "streamline-rr")]
     rr_input_pipeline: ComputePipeline,
+    #[cfg(feature = "streamline-rr")]
+    rr_stable_input_pipeline: ComputePipeline,
     #[cfg(feature = "streamline-rr")]
     rr_emissive_pipeline: ComputePipeline,
     #[cfg(feature = "streamline-rr")]
@@ -1780,6 +1793,16 @@ impl Dx12Renderer {
             )
             .map_err(|error| dx_error("创建 DLSS RR 输入适配管线", error))?;
             #[cfg(feature = "streamline-rr")]
+            let rr_stable_input_pipeline = ComputePipeline::new(
+                &device,
+                RR_STABLE_INPUT_SHADER,
+                7,
+                6,
+                1,
+                "阶段 11 stable-plane DLSS RR 单次合并输入",
+            )
+            .map_err(|error| dx_error("创建 stable-plane DLSS RR 输入管线", error))?;
+            #[cfg(feature = "streamline-rr")]
             let rr_emissive_pipeline = ComputePipeline::new(
                 &device,
                 RR_EMISSIVE_SHADER,
@@ -2028,6 +2051,8 @@ impl Dx12Renderer {
                 dlss_compose_pipeline,
                 #[cfg(feature = "streamline-rr")]
                 rr_input_pipeline,
+                #[cfg(feature = "streamline-rr")]
+                rr_stable_input_pipeline,
                 #[cfg(feature = "streamline-rr")]
                 rr_emissive_pipeline,
                 #[cfg(feature = "streamline-rr")]
@@ -2917,20 +2942,41 @@ impl Dx12Renderer {
                             crate::streamline::STATUS_NOT_INITIALIZED,
                         )
                     })?;
-                    generation
-                        .reconstruction_normal_roughness
-                        .collect_transition(
+                    if self.path_space_mode == PathSpaceMode::StablePlanes {
+                        generation
+                            .stable_planes
+                            .as_mut()
+                            .expect("stable-plane RR generation validated above")
+                            .collect_all(
+                                &mut self.transition_batch,
+                                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                            );
+                        for resource in [
+                            &mut rr.depth,
+                            &mut rr.motion,
+                            &mut rr.specular_motion,
+                        ] {
+                            resource.collect_transition(
+                                &mut self.transition_batch,
+                                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                            );
+                        }
+                    } else {
+                        generation
+                            .reconstruction_normal_roughness
+                            .collect_transition(
+                                &mut self.transition_batch,
+                                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                            );
+                        generation.reconstruction_noisy_hdr.collect_transition(
                             &mut self.transition_batch,
                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                         );
-                    generation.reconstruction_noisy_hdr.collect_transition(
-                        &mut self.transition_batch,
-                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                    );
-                    generation.gbuffer_albedo.collect_transition(
-                        &mut self.transition_batch,
-                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                    );
+                        generation.gbuffer_albedo.collect_transition(
+                            &mut self.transition_batch,
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                        );
+                    }
                     rr.normal_roughness.collect_transition(
                         &mut self.transition_batch,
                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -2943,10 +2989,12 @@ impl Dx12Renderer {
                         &mut self.transition_batch,
                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     );
-                    rr.motion.collect_transition(
-                        &mut self.transition_batch,
-                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                    );
+                    if self.path_space_mode == PathSpaceMode::Legacy {
+                        rr.motion.collect_transition(
+                            &mut self.transition_batch,
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                        );
+                    }
                     rr.emissive_history[previous_history].collect_transition(
                         &mut self.transition_batch,
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -2962,13 +3010,23 @@ impl Dx12Renderer {
                     .begin(&self.command_list, frame_index, GpuPass::RrInputAdapter);
                 self.gpu_profiler
                     .begin_event(&self.command_list, GpuPass::RrInputAdapter);
-                self.rr_input_pipeline.bind(
-                    &self.command_list,
-                    self.active_generation
-                        .shader_heap
-                        .gpu_handle(RR_INPUT_TABLE_BASE),
-                    &[u32::from(self.reset_history)],
-                );
+                if self.path_space_mode == PathSpaceMode::StablePlanes {
+                    self.rr_stable_input_pipeline.bind(
+                        &self.command_list,
+                        self.active_generation
+                            .shader_heap
+                            .gpu_handle(RR_STABLE_INPUT_TABLE_BASE),
+                        &[u32::from(self.reset_history)],
+                    );
+                } else {
+                    self.rr_input_pipeline.bind(
+                        &self.command_list,
+                        self.active_generation
+                            .shader_heap
+                            .gpu_handle(RR_INPUT_TABLE_BASE),
+                        &[u32::from(self.reset_history)],
+                    );
+                }
                 self.command_list
                     .Dispatch(render_groups_x, render_groups_y, 1);
                 // The adapter produces the low-resolution emissive layer that
@@ -2984,6 +3042,25 @@ impl Dx12Renderer {
                         &mut self.transition_batch,
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     );
+                if self.path_space_mode == PathSpaceMode::StablePlanes {
+                    let rr = self
+                        .active_generation
+                        .rr
+                        .as_mut()
+                        .expect("stable-plane RR generation validated above");
+                    for resource in [
+                        &mut rr.motion,
+                        &mut rr.specular_motion,
+                        &mut rr.depth,
+                        &mut rr.normal_roughness,
+                        &mut rr.input_hdr,
+                    ] {
+                        resource.collect_transition(
+                            &mut self.transition_batch,
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                        );
+                    }
+                }
                 self.submit_transition_batch(&mut command_recording_stats);
                 self.rr_emissive_pipeline.bind(
                     &self.command_list,
@@ -3009,16 +3086,19 @@ impl Dx12Renderer {
                         &mut self.transition_batch,
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     );
-                    generation.reconstruction_diffuse_albedo.collect_transition(
-                        &mut self.transition_batch,
-                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                    );
-                    generation
-                        .reconstruction_specular_albedo
-                        .collect_transition(
-                            &mut self.transition_batch,
-                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                        );
+                    let (diffuse_albedo, specular_albedo) =
+                        if self.path_space_mode == PathSpaceMode::StablePlanes {
+                            let stable = generation
+                                .stable_planes
+                                .as_ref()
+                                .expect("stable-plane RR generation validated above");
+                            (&stable.diffuse_albedo, &stable.specular_albedo)
+                        } else {
+                            (
+                                &generation.reconstruction_diffuse_albedo,
+                                &generation.reconstruction_specular_albedo,
+                            )
+                        };
                     rr.normal_roughness.collect_transition(
                         &mut self.transition_batch,
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -3043,13 +3123,13 @@ impl Dx12Renderer {
                         streamline_resource_tag(&rr.input_hdr, 3, 0, render_extent),
                         streamline_resource_tag(&rr.output_hdr, 4, 0, output_extent),
                         streamline_resource_tag(
-                            &generation.reconstruction_diffuse_albedo,
+                            diffuse_albedo,
                             7,
                             0,
                             render_extent,
                         ),
                         streamline_resource_tag(
-                            &generation.reconstruction_specular_albedo,
+                            specular_albedo,
                             8,
                             0,
                             render_extent,
@@ -4517,6 +4597,8 @@ impl Dx12Renderer {
             "legacy"
         } else if self.denoiser == DenoiserBackend::NrdReblur {
             "nrd-stable-planes"
+        } else if self.denoiser == DenoiserBackend::DlssRayReconstruction {
+            "rr-stable-planes"
         } else {
             "diagnostic-only"
         }
@@ -5845,6 +5927,15 @@ impl Dx12Renderer {
             "阶段 11 DLSS RR 输入分层与 guide 适配",
         )?;
         #[cfg(feature = "streamline-rr")]
+        let rr_stable_input = ComputePipeline::new(
+            &self.device,
+            &shaders.rr_stable_input,
+            7,
+            6,
+            1,
+            "阶段 11 stable-plane DLSS RR 单次合并输入",
+        )?;
+        #[cfg(feature = "streamline-rr")]
         let rr_emissive = ComputePipeline::new(
             &self.device,
             &shaders.rr_emissive,
@@ -5920,6 +6011,7 @@ impl Dx12Renderer {
         #[cfg(feature = "streamline-rr")]
         {
             self.rr_input_pipeline = rr_input;
+            self.rr_stable_input_pipeline = rr_stable_input;
             self.rr_emissive_pipeline = rr_emissive;
             self.rr_primary_visibility_pipeline = rr_primary_visibility;
             self.rr_boundary_resolve_pipeline = rr_boundary_resolve;
@@ -6740,6 +6832,10 @@ mod tests {
         #[cfg(feature = "streamline-rr")]
         {
             ranges.push((RR_INPUT_TABLE_BASE, RR_INPUT_TABLE_BASE + 6));
+            ranges.push((
+                RR_STABLE_INPUT_TABLE_BASE,
+                RR_STABLE_INPUT_TABLE_BASE + 13,
+            ));
             for base in RR_EMISSIVE_TABLE_BASES {
                 ranges.push((base, base + 4));
             }

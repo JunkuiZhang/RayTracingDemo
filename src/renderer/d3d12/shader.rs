@@ -32,6 +32,8 @@ pub struct ReloadedShaders {
     #[cfg(feature = "streamline-rr")]
     pub rr_input: Vec<u8>,
     #[cfg(feature = "streamline-rr")]
+    pub rr_stable_input: Vec<u8>,
+    #[cfg(feature = "streamline-rr")]
     pub rr_emissive: Vec<u8>,
     #[cfg(feature = "streamline-rr")]
     pub rr_primary_visibility: Vec<u8>,
@@ -109,6 +111,12 @@ impl ShaderReloader {
                 (
                     "stage11_rr_input.hlsl",
                     "stage11_rr_input.dxil",
+                    "cs_6_6",
+                    None,
+                ),
+                (
+                    "stage11_rr_stable_input.hlsl",
+                    "stage11_rr_stable_input.dxil",
                     "cs_6_6",
                     None,
                 ),
@@ -248,7 +256,7 @@ impl ShaderReloader {
         #[cfg(feature = "nrd")]
         let nrd_base = 6
             + usize::from(cfg!(feature = "streamline"))
-            + 4 * usize::from(cfg!(feature = "streamline-rr"));
+            + 5 * usize::from(cfg!(feature = "streamline-rr"));
         let shaders = ReloadedShaders {
             raytracing: match read(0) {
                 Ok(value) => value,
@@ -285,17 +293,22 @@ impl ShaderReloader {
                 Err(error) => return Some(Err(error)),
             },
             #[cfg(feature = "streamline-rr")]
-            rr_emissive: match read(8) {
+            rr_stable_input: match read(8) {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             },
             #[cfg(feature = "streamline-rr")]
-            rr_primary_visibility: match read(9) {
+            rr_emissive: match read(9) {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             },
             #[cfg(feature = "streamline-rr")]
-            rr_boundary_resolve: match read(10) {
+            rr_primary_visibility: match read(10) {
+                Ok(value) => value,
+                Err(error) => return Some(Err(error)),
+            },
+            #[cfg(feature = "streamline-rr")]
+            rr_boundary_resolve: match read(11) {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             },
@@ -413,6 +426,7 @@ mod tests {
             let mut expected = expected;
             expected.extend([
                 "stage11_rr_input.hlsl",
+                "stage11_rr_stable_input.hlsl",
                 "stage11_rr_emissive.hlsl",
                 "stage11_rr_primary_visibility.hlsl",
                 "stage11_rr_boundary_resolve.hlsl",
@@ -436,7 +450,7 @@ mod tests {
         {
             let nrd_base = 6
                 + usize::from(cfg!(feature = "streamline"))
-                + 4 * usize::from(cfg!(feature = "streamline-rr"));
+                + 5 * usize::from(cfg!(feature = "streamline-rr"));
             assert!(reloader.sources[nrd_base].extra_include.is_some());
             assert!(reloader.sources[nrd_base + 1].extra_include.is_some());
             assert!(reloader.sources[nrd_base + 2].extra_include.is_some());

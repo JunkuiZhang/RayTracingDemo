@@ -67,6 +67,8 @@ RWTexture2DArray<uint> StablePlaneHeaders : register(u33);
 RWTexture2DArray<float4> StablePlaneNoisyDiffuse : register(u34);
 RWTexture2DArray<float4> StablePlaneNoisySpecular : register(u35);
 RWTexture2D<float4> StableRadiance : register(u36);
+RWTexture2D<float4> StableDiffuseAlbedo : register(u37);
+RWTexture2D<float4> StableSpecularAlbedo : register(u38);
 
 cbuffer FrameConstants : register(b0)
 {
@@ -261,12 +263,7 @@ float DlssDeviceDepth(float3 worldPosition)
     float3 up;
     CameraBasis(CameraYaw, CameraPitch, forward, right, up);
     float viewZ = dot(worldPosition - CameraPosition, forward);
-    const float nearPlane = 0.001;
-    const float farPlane = 1000.0;
-    return viewZ > nearPlane
-        ? farPlane / (farPlane - nearPlane)
-            - nearPlane * farPlane / ((farPlane - nearPlane) * viewZ)
-        : 1.0;
+    return Stage11DeviceDepthFromViewZ(viewZ);
 }
 
 float3 PreviousWorldPosition(float3 localPosition, InstanceGpu instanceData)
@@ -618,6 +615,19 @@ void WriteStablePlaneGuides(
     guide.data3 = float4(motion, asfloat(PackStableHdr(
         payload.psrThroughput * FiniteNonNegative(emissive))));
     StablePlaneRecords[address] = guide;
+    uint dominantPlane = min(
+        uint(round(StableRadiance[pixel].w)),
+        STABLE_PLANE_COUNT - 1u);
+    if (StablePlaneIndex == dominantPlane)
+    {
+        float3 f0 = lerp(0.04.xxx, baseColor, metallic);
+        StableDiffuseAlbedo[pixel] = float4(
+            FiniteNonNegative(baseColor * (1.0 - metallic)), 1.0);
+        StableSpecularAlbedo[pixel] = float4(
+            FiniteNonNegative(ComputeReconstructionSpecularAlbedo(
+                f0, roughness, NoV)),
+            1.0);
+    }
 }
 
 float4 MakeMirrorPlane(float3 normal, float3 planePoint)
@@ -948,6 +958,14 @@ void StableFillRayGen()
 {
     uint2 pixel = DispatchRaysIndex().xy;
     uint2 extent = DispatchRaysDimensions().xy;
+    // Plane fills run in reverse order. Clear the one-per-pixel dominant
+    // guides in the first dispatch so any later valid dominant plane replaces
+    // them without an extra full-screen clear pass.
+    if (StablePlaneIndex + 1u == STABLE_PLANE_COUNT)
+    {
+        StableDiffuseAlbedo[pixel] = 0.0;
+        StableSpecularAlbedo[pixel] = 0.0;
+    }
     uint branchId = StablePlaneHeaders[uint3(pixel, StablePlaneIndex)];
     if (branchId == STABLE_BRANCH_INVALID)
         return;

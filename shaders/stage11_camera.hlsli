@@ -47,6 +47,16 @@ float Stage11ViewZ(float3 worldPosition, float3 cameraPosition, float yaw, float
     return dot(worldPosition - cameraPosition, forward);
 }
 
+float Stage11DeviceDepthFromViewZ(float viewZ)
+{
+    const float nearPlane = 0.001;
+    const float farPlane = 1000.0;
+    return viewZ > nearPlane
+        ? farPlane / (farPlane - nearPlane)
+            - nearPlane * farPlane / ((farPlane - nearPlane) * viewZ)
+        : 1.0;
+}
+
 float3 Stage11PrimaryRayDirection(
     uint2 pixel,
     uint2 size,
