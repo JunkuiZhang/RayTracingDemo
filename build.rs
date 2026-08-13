@@ -155,8 +155,13 @@ fn emit_build_provenance() {
     };
     let head = git_value(&["rev-parse", "HEAD"]).unwrap_or_else(|| "unavailable".into());
     let tree = git_value(&["rev-parse", "HEAD^{tree}"]).unwrap_or_else(|| "unavailable".into());
-    let dirty = git_value(&["status", "--porcelain=v1", "--untracked-files=all"])
-        .map_or(true, |status| !status.is_empty());
+    let dirty = Command::new("git")
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .current_dir(repository_root)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map_or(true, |output| !output.stdout.is_empty());
     let mut features = env::vars()
         .filter_map(|(name, _)| {
             name.strip_prefix("CARGO_FEATURE_")
