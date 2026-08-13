@@ -191,6 +191,12 @@ StreamlineBridgeStatus streamline_bridge_create(
 #endif
         sl::Preferences preferences{};
         preferences.showConsole = desc->development != 0;
+        // Production diagnostics must not contaminate the benchmark's
+        // machine-readable stdout contract. Errors still propagate through
+        // Streamline return codes and the bridge's explicit error channel.
+        preferences.logLevel = desc->development != 0
+            ? sl::LogLevel::eDefault
+            : sl::LogLevel::eOff;
         preferences.flags = sl::PreferenceFlags::eDisableCLStateTracking |
                             sl::PreferenceFlags::eDisableDebugText |
                             sl::PreferenceFlags::eUseManualHooking |

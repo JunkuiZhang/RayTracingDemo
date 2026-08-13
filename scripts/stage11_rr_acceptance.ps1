@@ -70,17 +70,23 @@ function Test-Finite([object]$Value) {
 
 function Get-GitEvidence {
     $head = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
-    $tree = (& git -C $repoRoot write-tree 2>$null).Trim()
-    & git -C $repoRoot diff --quiet
-    $worktreeDirty = $LASTEXITCODE -ne 0
-    & git -C $repoRoot diff --cached --quiet
-    $indexDirty = $LASTEXITCODE -ne 0
+    $tree = (& git -C $repoRoot rev-parse 'HEAD^{tree}' 2>$null).Trim()
+    $statusLines = @(& git -C $repoRoot status --porcelain=v1 --untracked-files=all 2>$null)
+    $untrackedDirty = @($statusLines | Where-Object { $_.StartsWith("??") }).Count -gt 0
+    $indexDirty = @($statusLines | Where-Object {
+        $_.Length -ge 2 -and $_[0] -ne ' ' -and $_[0] -ne '?'
+    }).Count -gt 0
+    $worktreeDirty = @($statusLines | Where-Object {
+        $_.Length -ge 2 -and (($_[1] -ne ' ' -and $_[1] -ne '?') -or $_.StartsWith("??"))
+    }).Count -gt 0
     [ordered]@{
         head = if ([string]::IsNullOrWhiteSpace($head)) { "unavailable" } else { $head }
         tree = if ([string]::IsNullOrWhiteSpace($tree)) { "unavailable" } else { $tree }
-        dirty = $worktreeDirty -or $indexDirty
+        dirty = @($statusLines).Count -gt 0 -or [string]::IsNullOrWhiteSpace($head) -or [string]::IsNullOrWhiteSpace($tree)
         worktree_dirty = $worktreeDirty
         index_dirty = $indexDirty
+        untracked_dirty = $untrackedDirty
+        status = @($statusLines)
     }
 }
 
@@ -265,9 +271,99 @@ function Get-ExecutableEvidence([string]$PathValue, [string]$Feature) {
     }
     $path = Resolve-RepoPath $PathValue
     [ordered]@{
-        feature = $Feature
+        expected_features = @($Feature -split ',' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object)
         path = $path
         sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+    }
+}
+
+function Get-BuildProvenanceFailures(
+    [object]$Json,
+    [object]$ExpectedGit,
+    [string[]]$ExpectedFeatures
+) {
+    $failures = [System.Collections.Generic.List[string]]::new()
+    $build = Get-JsonPathValue $Json "build"
+    if ($null -eq $build) {
+        return @("benchmark JSON is missing embedded build provenance")
+    }
+    if ([string](Get-JsonPathValue $build "git_head") -ne [string]$ExpectedGit.head) {
+        $failures.Add("embedded build git_head does not match the runner checkout")
+    }
+    if ([string](Get-JsonPathValue $build "git_tree") -ne [string]$ExpectedGit.tree) {
+        $failures.Add("embedded build git_tree does not match the runner checkout")
+    }
+    if ([bool](Get-JsonPathValue $build "git_dirty")) {
+        $failures.Add("executable was built from a dirty worktree")
+    }
+    $actual = @((Get-JsonPathValue $build "features") | ForEach-Object { [string]$_ } | Sort-Object)
+    $expected = @($ExpectedFeatures | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object)
+    if (($actual -join ',') -ne ($expected -join ',')) {
+        $failures.Add("embedded build features mismatch: expected=$($expected -join ',') actual=$($actual -join ',')")
+    }
+    return @($failures)
+}
+
+function Get-StreamlineSdkFailures(
+    [object]$Evidence,
+    [object]$Executables,
+    [string]$ExpectedFlavor
+) {
+    $failures = [System.Collections.Generic.List[string]]::new()
+    if ([string]$Evidence.version -ne "2.12.0" -or [string]$Evidence.tag -ne "v2.12.0") {
+        $failures.Add("Streamline lock identity is unavailable or unexpected")
+    }
+    $common = @(
+        "sl.interposer.dll", "sl.common.dll", "sl.dlss.dll", "sl.reflex.dll",
+        "sl.pcl.dll", "nvngx_dlss.dll"
+    )
+    $rr = @($common) + @("sl.dlss_d.dll", "nvngx_dlssd.dll")
+    $expectations = @(
+        [pscustomobject]@{ executable = $Executables.rr; required = $rr; label = "rr" },
+        [pscustomobject]@{ executable = $Executables.default; required = @(); label = "default" },
+        [pscustomobject]@{ executable = $Executables.nrd_streamline; required = $common; label = "nrd_streamline" }
+    )
+    foreach ($expectation in $expectations) {
+        if ($null -eq $expectation.executable) { continue }
+        $directory = Split-Path -Parent ([string]$expectation.executable.path)
+        $deployed = @($Evidence.dlls | Where-Object { [string]$_.executable_directory -eq $directory })
+        $names = @($deployed | ForEach-Object { [string]$_.name })
+        foreach ($required in @($expectation.required)) {
+            if ($required -notin $names) {
+                $failures.Add("$($expectation.label) runtime is missing locked DLL $required")
+            }
+        }
+        if (@($expectation.required).Count -eq 0 -and $deployed.Count -ne 0) {
+            $failures.Add("default runtime contains proprietary Streamline DLLs")
+        }
+        foreach ($dll in $deployed) {
+            if ([string]$dll.flavor -eq "unmatched") {
+                $failures.Add("$($expectation.label) DLL hash is not present in version.lock.json: $($dll.name)")
+            } elseif ([string]$dll.flavor -ne $ExpectedFlavor) {
+                $failures.Add("$($expectation.label) DLL flavor mismatch for $($dll.name): expected=$ExpectedFlavor actual=$($dll.flavor)")
+            }
+        }
+    }
+    return @($failures)
+}
+
+function Get-QualityEvidence {
+    $commit = (& git -C $repoRoot rev-parse "a09748f^{commit}" 2>$null).Trim()
+    & git -C $repoRoot merge-base --is-ancestor $commit HEAD 2>$null
+    $isAncestor = -not [string]::IsNullOrWhiteSpace($commit) -and $LASTEXITCODE -eq 0
+    $imageDiffPath = Join-Path $repoRoot "src/bin/image_diff.rs"
+    $source = if (Test-Path -LiteralPath $imageDiffPath) {
+        Get-Content -LiteralPath $imageDiffPath -Raw
+    } else { "" }
+    $roiMetricTest = $source -match '(?s)#\[test\]\s*fn\s+roi_metrics_exclude_pixels_outside_the_region\s*\('
+    $roiParserTest = $source -match '(?s)#\[test\]\s*fn\s+roi_parser_requires_four_unsigned_components\s*\('
+    [ordered]@{
+        boundary_commit = if ([string]::IsNullOrWhiteSpace($commit)) { "unavailable" } else { $commit }
+        boundary_commit_is_ancestor = $isAncestor
+        image_diff_path = $imageDiffPath
+        roi_metric_unit_test_present = $roiMetricTest
+        roi_parser_unit_test_present = $roiParserTest
+        valid = $isAncestor -and $roiMetricTest -and $roiParserTest
     }
 }
 
@@ -296,12 +392,9 @@ function Get-ExactJsonLine([string]$RawText) {
     $json = $null
     $error = $null
     $exact = $false
-    if ($parseable.Count -ne 1) {
-        $error = "stdout must contain exactly one JSON line; parseable_json_lines=$($parseable.Count)"
+    if (@($lines).Count -ne 1 -or $parseable.Count -ne 1) {
+        $error = "stdout must contain exactly one JSON line; lines=$(@($lines).Count) parseable_json_lines=$($parseable.Count)"
     } else {
-        # Streamline's signed-DLL verifier can write informational lines to
-        # stdout. Preserve those raw lines, but accept only one parseable JSON
-        # record; a second JSON line remains a hard evidence error.
         $json = $parseable[0]
         $exact = $true
     }
@@ -457,7 +550,12 @@ function Test-GpuPass([object]$Json, [string]$PassName) {
     return $null -ne $samples -and [uint64]$samples -gt 0 -and (Test-Finite $p50) -and (Test-Finite $p95)
 }
 
-function Get-RrGateFailures([object]$Result, [string]$CaseLabel) {
+function Get-RrGateFailures(
+    [object]$Result,
+    [string]$CaseLabel,
+    [object]$ExpectedGit = $null,
+    [string[]]$ExpectedFeatures = @("streamline", "streamline-rr")
+) {
     $failures = [System.Collections.Generic.List[string]]::new()
     if ($Result.exit_code -ne 0) { $failures.Add("exit_code=$($Result.exit_code)") }
     if ($Result.timed_out) { $failures.Add("timeout after $($Result.timeout_seconds) seconds") }
@@ -469,6 +567,11 @@ function Get-RrGateFailures([object]$Result, [string]$CaseLabel) {
     }
     try {
         $json = $Result.json
+        if ($null -ne $ExpectedGit) {
+            foreach ($failure in @(Get-BuildProvenanceFailures $json $ExpectedGit $ExpectedFeatures)) {
+                $failures.Add($failure)
+            }
+        }
         $gpuName = [string](Get-JsonPathValue $json "gpu_name")
         if ($gpuName -notmatch "RTX 4060 Laptop") {
             $failures.Add("GPU must be NVIDIA RTX 4060 Laptop: actual=$gpuName")
@@ -610,7 +713,9 @@ function Invoke-Stage10SingleCase(
     [string]$Stage10Exe,
     [string]$NrdExecutable,
     [string]$CaseDirectory,
-    [string]$Stage10OutputRoot
+    [string]$Stage10OutputRoot,
+    [object]$ExpectedGit,
+    [string[]]$ExpectedFeatures
 ) {
     $pwsh = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
     if ([string]::IsNullOrWhiteSpace($pwsh)) { $pwsh = Join-Path $PSHOME "pwsh.exe" }
@@ -638,6 +743,19 @@ function Invoke-Stage10SingleCase(
     if ($null -ne $stage10.summary -and -not [bool]$stage10.summary.pass) {
         foreach ($failure in @($stage10.summary.failures)) { $failures.Add("Stage 10: $failure") }
     }
+    if ($null -ne $stage10.summary) {
+        if ([string]$stage10.summary.git_head -ne [string]$ExpectedGit.head) {
+            $failures.Add("Stage 10 runner git_head does not match the Stage 11 checkout")
+        }
+        foreach ($case in @($stage10.summary.cases)) {
+            if ([uint32]$case.stdout_nonempty_lines -ne 1 -or [uint32]$case.parseable_json_lines -ne 1) {
+                $failures.Add("Stage 10 benchmark stdout must contain exactly one JSON line: $($case.label)")
+            }
+            foreach ($failure in @(Get-BuildProvenanceFailures $case.json $ExpectedGit $ExpectedFeatures)) {
+                $failures.Add("$($case.label): $failure")
+            }
+        }
+    }
     $record | Add-Member -NotePropertyName gate_failures -NotePropertyValue @($failures)
     return $record
 }
@@ -646,6 +764,12 @@ function New-SelfTestJson {
     $inactive = [pscustomobject]@{ p50_ms = $null; p95_ms = $null; valid_samples = 0 }
     $active = [pscustomobject]@{ p50_ms = 0.1; p95_ms = 0.2; valid_samples = 1 }
     [pscustomobject]@{
+        build = [pscustomobject]@{
+            git_head = "self-test-head"
+            git_tree = "self-test-tree"
+            git_dirty = $false
+            features = @("streamline", "streamline-rr")
+        }
         gpu_name = "NVIDIA GeForce RTX 4060 Laptop GPU"
         denoiser = [pscustomobject]@{ requested = "dlss-rr"; active = "dlss-rr" }
         dlss_rr = [pscustomobject]@{ compiled = $true; supported = $true }
@@ -682,14 +806,19 @@ function New-SelfTestJson {
 
 function Invoke-SelfTest {
     $validJson = New-SelfTestJson
+    $expectedGit = [pscustomobject]@{ head = "self-test-head"; tree = "self-test-tree" }
     $base = [pscustomobject]@{
         exit_code = 0; timed_out = $false; timeout_seconds = 60
         stdout_exact_one_json = $true; json = $validJson; json_error = $null; stderr_raw = ""
     }
     $cases = [System.Collections.Generic.List[object]]::new()
+    $positiveFailures = @(Get-RrGateFailures $base "rr_quality" $expectedGit @("streamline", "streamline-rr"))
+    if ($positiveFailures.Count -ne 0) {
+        throw "SelfTest valid RR evidence was rejected: $($positiveFailures -join '; ')"
+    }
     function Assert-Rejected([string]$Name, [scriptblock]$Mutation) {
         $candidate = $Mutation.Invoke()
-        $failures = @(Get-RrGateFailures $candidate "rr_quality")
+        $failures = @(Get-RrGateFailures $candidate "rr_quality" $expectedGit @("streamline", "streamline-rr"))
         if ($failures.Count -eq 0) { throw "SelfTest expected rejection: $Name" }
         $cases.Add([ordered]@{ name = $Name; rejected = $true })
     }
@@ -722,9 +851,16 @@ function Invoke-SelfTest {
     Assert-Rejected "multiple_json_lines" {
         [pscustomobject]@{ exit_code = 0; timed_out = $false; timeout_seconds = 60; stdout_exact_one_json = $false; json = $null; json_error = "stdout must contain exactly one JSON line"; stderr_raw = "" }
     }
+    Assert-Rejected "stale_executable_provenance" {
+        $copy = $base.PSObject.Copy(); $copy.json = $validJson.PSObject.Copy()
+        $copy.json.build = $validJson.build.PSObject.Copy(); $copy.json.build.git_head = "stale-head"; $copy
+    }
     Assert-Rejected "debug_infoqueue_error" {
         $copy = $base.PSObject.Copy(); $copy.json = $validJson.PSObject.Copy(); $copy.stderr_raw = "D3D12 Debug InfoQueue：CORRUPTION 0，ERROR 1"; $copy
     }
+    $extraStdout = Get-ExactJsonLine "{`"ok`":true}`nStreamline diagnostic"
+    if ($extraStdout.exact) { throw "SelfTest accepted extra non-JSON stdout" }
+    $cases.Add([ordered]@{ name = "extra_stdout_line"; rejected = $true })
     [ordered]@{ self_test = "passed"; gpu_started = $false; rejected_cases = @($cases) } | ConvertTo-Json -Compress -Depth 20
 }
 
@@ -757,16 +893,26 @@ $environment = Get-EnvironmentSnapshot
 $executablePaths = @($rrExePath, $defaultExePath, $nrdExePath) | Where-Object { $null -ne $_ }
 $sdkEvidence = Get-StreamlineSdkEvidence $executablePaths
 $executableEvidence = [ordered]@{
-    rr = Get-ExecutableEvidence $rrExePath "streamline-rr"
+    rr = Get-ExecutableEvidence $rrExePath "streamline,streamline-rr"
     default = Get-ExecutableEvidence $defaultExePath "default"
     nrd_streamline = Get-ExecutableEvidence $nrdExePath "nrd,streamline"
 }
+$qualityEvidence = Get-QualityEvidence
 
 $processRecords = [System.Collections.Generic.List[object]]::new()
 $rrRecords = [System.Collections.Generic.List[object]]::new()
 $baselineRecords = [System.Collections.Generic.List[object]]::new()
 $allFailures = [System.Collections.Generic.List[string]]::new()
 $stage10Root = Join-Path $runRoot "stage10"
+if ($gitEvidence.head -eq "unavailable" -or $gitEvidence.tree -eq "unavailable") {
+    $allFailures.Add("Git HEAD/tree evidence is unavailable")
+}
+foreach ($failure in @(Get-StreamlineSdkFailures $sdkEvidence $executableEvidence $(if ($needsDebug) { "development" } else { "production" }))) {
+    $allFailures.Add("Streamline SDK: $failure")
+}
+if (-not $qualityEvidence.valid) {
+    $allFailures.Add("RR boundary evidence commit/ROI unit-test contract is no longer valid")
+}
 
 $rrCases = if (-not [string]::IsNullOrWhiteSpace($CaseName)) {
     @($CaseName)
@@ -800,7 +946,7 @@ foreach ($case in $rrCases) {
         $caseArguments += @("--streamline-application-id", [string]$StreamlineApplicationId)
     }
     $record = Invoke-RecordedProcess $rrExePath $caseArguments $caseRoot $case $TimeoutSeconds $true
-    $gateFailures = @(Get-RrGateFailures $record $case)
+    $gateFailures = @(Get-RrGateFailures $record $case $gitEvidence @("streamline", "streamline-rr"))
     $record | Add-Member -NotePropertyName gate_failures -NotePropertyValue $gateFailures
     $rrRecords.Add($record)
     $processRecords.Add($record)
@@ -809,14 +955,14 @@ foreach ($case in $rrCases) {
 
 if ($needsMatrix) {
     $baselineCases = @(
-        [ordered]@{ label = "default-native"; stage10_case = "native_svgf"; exe = $defaultExePath; nrd = $null },
-        [ordered]@{ label = "sr-quality"; stage10_case = "quality_svgf"; exe = $rrExePath; nrd = $null },
-        [ordered]@{ label = "nrd-quality"; stage10_case = "quality_nrd"; exe = $nrdExePath; nrd = $nrdExePath }
+        [ordered]@{ label = "default-native"; stage10_case = "native_svgf"; exe = $defaultExePath; nrd = $null; features = @() },
+        [ordered]@{ label = "sr-quality"; stage10_case = "quality_svgf"; exe = $rrExePath; nrd = $null; features = @("streamline", "streamline-rr") },
+        [ordered]@{ label = "nrd-quality"; stage10_case = "quality_nrd"; exe = $nrdExePath; nrd = $nrdExePath; features = @("nrd", "streamline") }
     )
     foreach ($baseline in $baselineCases) {
         $baselineRoot = Join-Path $runRoot $baseline.label
         try {
-            $record = Invoke-Stage10SingleCase $baseline.stage10_case $baseline.exe $baseline.nrd $baselineRoot $stage10Root
+            $record = Invoke-Stage10SingleCase $baseline.stage10_case $baseline.exe $baseline.nrd $baselineRoot $stage10Root $gitEvidence $baseline.features
         } catch {
             # A runner exception is evidence of an inconclusive baseline, not
             # permission to omit it. Keep the failure in the same summary so a
@@ -880,6 +1026,7 @@ $summary = [ordered]@{
     git = $gitEvidence
     executable = $executableEvidence
     streamline_sdk = $sdkEvidence
+    quality_evidence = $qualityEvidence
     environment = $environment
     commands = @($processRecords | ForEach-Object {
         [ordered]@{

@@ -8,6 +8,7 @@ use std::{
 use sha2::{Digest, Sha256};
 
 fn main() {
+    emit_build_provenance();
     let shaders = [
         (
             "shaders/stage3_triangle.hlsl",
@@ -137,6 +138,44 @@ fn main() {
     if env::var_os("CARGO_FEATURE_NRD").is_some() {
         build_nrd_bridge(&output_directory, &dxc);
     }
+}
+
+fn emit_build_provenance() {
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let git_value = |arguments: &[&str]| {
+        Command::new("git")
+            .args(arguments)
+            .current_dir(repository_root)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    };
+    let head = git_value(&["rev-parse", "HEAD"]).unwrap_or_else(|| "unavailable".into());
+    let tree = git_value(&["rev-parse", "HEAD^{tree}"]).unwrap_or_else(|| "unavailable".into());
+    let dirty = git_value(&["status", "--porcelain=v1", "--untracked-files=all"])
+        .map_or(true, |status| !status.is_empty());
+    let mut features = env::vars()
+        .filter_map(|(name, _)| {
+            name.strip_prefix("CARGO_FEATURE_")
+                .map(|feature| feature.to_ascii_lowercase().replace('_', "-"))
+        })
+        .collect::<Vec<_>>();
+    features.sort_unstable();
+
+    // Formal acceptance compares these values with the current clean Git tree.
+    // Recording them inside the executable prevents a stale binary from being
+    // attributed to whichever checkout happens to launch the runner later.
+    println!("cargo:rustc-env=RAY_TRACING_BUILD_GIT_HEAD={head}");
+    println!("cargo:rustc-env=RAY_TRACING_BUILD_GIT_TREE={tree}");
+    println!("cargo:rustc-env=RAY_TRACING_BUILD_GIT_DIRTY={dirty}");
+    println!(
+        "cargo:rustc-env=RAY_TRACING_BUILD_FEATURES={}",
+        features.join(",")
+    );
+    println!("cargo:rerun-if-changed=.git/HEAD");
 }
 
 fn validate_streamline_sdk(output_directory: &Path, rr_enabled: bool) {

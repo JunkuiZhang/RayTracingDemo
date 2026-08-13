@@ -4618,6 +4618,15 @@ fn benchmark_json_line(
     serde_json::json!({
         "schema_version": 1,
         "reconstruction_contract_version": RECONSTRUCTION_CONTRACT_VERSION,
+        "build": {
+            "git_head": env!("RAY_TRACING_BUILD_GIT_HEAD"),
+            "git_tree": env!("RAY_TRACING_BUILD_GIT_TREE"),
+            "git_dirty": env!("RAY_TRACING_BUILD_GIT_DIRTY") == "true",
+            "features": env!("RAY_TRACING_BUILD_FEATURES")
+                .split(',')
+                .filter(|feature| !feature.is_empty())
+                .collect::<Vec<_>>(),
+        },
         "gpu_name": gpu_name,
         "output_width": width,
         "output_height": height,
