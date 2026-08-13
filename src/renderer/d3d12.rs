@@ -5796,6 +5796,13 @@ mod tests {
         assert_eq!(size_of::<CameraConstants>(), 16 * size_of::<u32>());
     }
 
+    #[test]
+    fn material_srv_stride_tracks_the_shared_gpu_abi() {
+        let resources = include_str!("d3d12/render_resources.rs");
+        assert!(resources.contains("size_of::<GpuMaterial>() as u32"));
+        assert!(!resources.contains("scene_geometry.material_count(),\n                64,"));
+    }
+
     #[cfg(feature = "streamline-rr")]
     #[test]
     fn rr_and_compatible_dlss_options_share_one_viewport_contract() {

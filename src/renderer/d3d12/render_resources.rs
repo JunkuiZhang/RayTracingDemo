@@ -1,9 +1,11 @@
+use std::mem::size_of;
+
 use windows::{
     Win32::Graphics::{Direct3D12::*, Dxgi::Common::*},
     core::Result,
 };
 
-use crate::resolution::Extent2D;
+use crate::{resolution::Extent2D, scene::GpuMaterial};
 
 use super::{
     ATROUS_HISTORY_TABLE_BASES, ATROUS_PING_TO_PONG_BASES, ATROUS_PONG_TO_PING_BASES,
@@ -258,7 +260,7 @@ impl RenderResourceGeneration {
                 3,
                 scene_geometry.material_buffer(),
                 scene_geometry.material_count(),
-                64,
+                size_of::<GpuMaterial>() as u32,
             );
             textures.write_srvs(device, &shader_heap);
             create_acceleration_structure_srv(
