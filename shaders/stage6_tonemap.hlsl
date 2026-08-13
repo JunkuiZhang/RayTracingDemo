@@ -45,6 +45,7 @@ float3 RejectionColor(uint mask)
     if ((mask & 4u) != 0u) color += float3(1, 0, 1);
     if ((mask & 8u) != 0u) color += float3(1, 0.6, 0);
     if ((mask & 16u) != 0u) color += float3(1, 1, 1);
+    if ((mask & 32u) != 0u) color += float3(0, 0.8, 0.8);
     return saturate(color);
 }
 

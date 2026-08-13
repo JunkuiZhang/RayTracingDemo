@@ -5996,7 +5996,8 @@ mod tests {
         assert!(boundary.contains("SHADING_REJECTION_RELATIVE"));
         assert!(boundary.contains("CurrentBoundaryHistory[pixel] = float4(currentColor, count)"));
         assert!(boundary.contains("previousPosition = float2(pixel) + motion"));
-        assert!(boundary.contains("if (!boundary)"));
+        assert!(boundary.contains("if (!boundary && !virtualSurface)"));
+        assert!(boundary.contains("BOUNDARY_MASK_VIRTUAL_SURFACE"));
         assert!(boundary.contains("WriteCurrent(pixel, currentColor, 0u, 1.0)"));
     }
 
@@ -6434,6 +6435,8 @@ mod tests {
             "dot(currentNormal, previousNormal) < NORMAL_DOT_THRESHOLD",
             "previousMeta.z - currentMeta.w",
             "BOUNDARY_RADIUS",
+            "IsVirtualSurface(currentId)",
+            "BOUNDARY_MASK_VIRTUAL_SURFACE",
             "STATIC_HISTORY_COUNT",
             "SLOW_MOVING_HISTORY_COUNT",
             "MOTION_REJECT_PIXELS",

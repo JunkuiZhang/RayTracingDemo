@@ -1,7 +1,7 @@
-// Resolve only the pixels whose stable, unjittered primary visibility says
-// that a real opaque surface boundary is nearby. Non-boundary pixels are
-// copied from the current RR HDR value exactly; a full-screen temporal blend
-// would mix neighboring materials and reintroduce the seam this pass isolates.
+// Resolve real opaque boundaries plus stable virtual surfaces unfolded from a
+// static pure mirror. Ordinary non-boundary pixels are copied from the current
+// RR HDR value exactly; this remains a guide-limited reflection resolve rather
+// than a full-screen temporal blend across unrelated materials.
 
 Texture2D<float4> CurrentRrHdr : register(t0);
 Texture2D<uint> CurrentSurfaceId : register(t1);
@@ -25,6 +25,8 @@ static const uint BOUNDARY_MASK_NO_HISTORY = 2u;
 static const uint BOUNDARY_MASK_GUIDE_REJECT = 4u;
 static const uint BOUNDARY_MASK_SHADING_REJECT = 8u;
 static const uint BOUNDARY_MASK_RESET_OR_INVALID = 16u;
+static const uint BOUNDARY_MASK_VIRTUAL_SURFACE = 32u;
+static const uint VIRTUAL_SURFACE_BIT = 0x80000000u;
 static const float NORMAL_DOT_THRESHOLD = 0.95;
 static const float DEPTH_RELATIVE_THRESHOLD = 0.01;
 static const float DEPTH_ABSOLUTE_THRESHOLD = 0.01;
@@ -96,6 +98,12 @@ bool ValidSurface(uint surfaceId, float4 meta)
         && all(isfinite(meta))
         && meta.z > 0.0
         && meta.w > 0.0;
+}
+
+bool IsVirtualSurface(uint surfaceId)
+{
+    return surfaceId != INVALID_SURFACE_ID
+        && (surfaceId & VIRTUAL_SURFACE_BIT) != 0u;
 }
 
 bool SameGuide(float4 currentMeta, float4 previousMeta)
@@ -197,14 +205,20 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
     }
 
     bool boundary = IsBoundary(pixel, size, currentId, currentMeta);
-    if (!boundary)
+    bool virtualSurface = IsVirtualSurface(currentId);
+    if (!boundary && !virtualSurface)
     {
-        // Exact RGB passthrough is the key invariant for interior pixels.
+        // Exact RGB passthrough remains the invariant for ordinary interiors.
         WriteCurrent(pixel, currentColor, 0u, 1.0);
         return;
     }
 
-    uint mask = BOUNDARY_MASK_EDGE;
+    // A planar-mirror PSR guide is stable across the complete reflected hit,
+    // so accumulate that virtual surface rather than just its two-pixel edge.
+    // Motion, ID, depth, normal, neighborhood clamp and shading guards below
+    // still reject reflected-object motion and disocclusion.
+    uint mask = (boundary ? BOUNDARY_MASK_EDGE : 0u)
+        | (virtualSurface ? BOUNDARY_MASK_VIRTUAL_SURFACE : 0u);
     if (ResetHistory != 0u || currentId == INVALID_SURFACE_ID
         || !ValidSurface(currentId, currentMeta)
         || !all(isfinite(motion)))
