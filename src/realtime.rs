@@ -1,8 +1,8 @@
 use std::{error::Error, path::PathBuf};
 
 use crate::{
-    debug_view::DebugView, reconstruction::DenoiserBackend, resolution::ResolutionMode,
-    upscaler::UpscalerMode,
+    debug_view::DebugView, path_space::PathSpaceMode, reconstruction::DenoiserBackend,
+    resolution::ResolutionMode, upscaler::UpscalerMode,
 };
 
 /// Stable NGX identity for this custom engine. NVIDIA's DLSS guide requires a
@@ -23,6 +23,7 @@ pub struct RealtimeConfig {
     pub resolution_mode: ResolutionMode,
     pub command_recording_mode: CommandRecordingMode,
     pub acceleration_structure_mode: AccelerationStructureMode,
+    pub path_space_mode: PathSpaceMode,
     pub denoiser: DenoiserBackend,
     pub upscaler: UpscalerMode,
     /// `None` means the RR compatibility rule selected the default quality

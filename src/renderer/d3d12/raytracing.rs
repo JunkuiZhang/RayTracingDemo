@@ -1181,6 +1181,7 @@ pub struct RaytracingPipeline {
     pub root_signature: ID3D12RootSignature,
     _shader_table: ID3D12Resource,
     pub raygen: D3D12_GPU_VIRTUAL_ADDRESS_RANGE,
+    pub stable_fill_raygen: D3D12_GPU_VIRTUAL_ADDRESS_RANGE,
     pub miss: D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE,
     pub hit_group: D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE,
 }
@@ -1249,10 +1250,14 @@ impl RaytracingPipeline {
         let state_object: ID3D12StateObject = unsafe { device5.CreateStateObject(&description)? };
         let properties: ID3D12StateObjectProperties = state_object.cast()?;
         let raygen_name = wide("RayGen");
+        let stable_fill_raygen_name = wide("StableFillRayGen");
         let miss_name = wide("Miss");
         let shadow_miss_name = wide("ShadowMiss");
         let identifiers = [
             unsafe { properties.GetShaderIdentifier(PCWSTR(raygen_name.as_ptr())) },
+            unsafe {
+                properties.GetShaderIdentifier(PCWSTR(stable_fill_raygen_name.as_ptr()))
+            },
             unsafe { properties.GetShaderIdentifier(PCWSTR(miss_name.as_ptr())) },
             unsafe { properties.GetShaderIdentifier(PCWSTR(shadow_miss_name.as_ptr())) },
             unsafe { properties.GetShaderIdentifier(PCWSTR(hit_group_name.as_ptr())) },
@@ -1279,13 +1284,17 @@ impl RaytracingPipeline {
                 StartAddress: address,
                 SizeInBytes: record_size as u64,
             },
-            miss: D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE {
+            stable_fill_raygen: D3D12_GPU_VIRTUAL_ADDRESS_RANGE {
                 StartAddress: address + record_size as u64,
+                SizeInBytes: record_size as u64,
+            },
+            miss: D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE {
+                StartAddress: address + (record_size * 2) as u64,
                 SizeInBytes: (record_size * 2) as u64,
                 StrideInBytes: record_size as u64,
             },
             hit_group: D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE {
-                StartAddress: address + (record_size * 3) as u64,
+                StartAddress: address + (record_size * 4) as u64,
                 SizeInBytes: record_size as u64,
                 StrideInBytes: record_size as u64,
             },
@@ -1362,6 +1371,17 @@ fn create_raytracing_root_signature(device: &ID3D12Device) -> Result<ID3D12RootS
                 DescriptorTable: D3D12_ROOT_DESCRIPTOR_TABLE {
                     NumDescriptorRanges: 1,
                     pDescriptorRanges: &sampler_range,
+                },
+            },
+            ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+        },
+        D3D12_ROOT_PARAMETER {
+            ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
+            Anonymous: D3D12_ROOT_PARAMETER_0 {
+                Constants: D3D12_ROOT_CONSTANTS {
+                    ShaderRegister: 1,
+                    RegisterSpace: 0,
+                    Num32BitValues: 2,
                 },
             },
             ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
@@ -1695,8 +1715,8 @@ mod tests {
             shader
                 .matches("RAY_FLAG_CULL_BACK_FACING_TRIANGLES")
                 .count(),
-            8,
-            "primary, RR guide, split-glass, bounce and shadow rays in both shader paths must use the same culling rule"
+            9,
+            "primary, stable-plane fill, RR guide, split-glass, bounce and shadow rays in both shader paths must use the same culling rule"
         );
         assert!(!shader.contains("TraceRay(Scene, RAY_FLAG_NONE"));
         assert!(shader.contains("if (!sampledTransmission && dot(normal, direction) <= 0.0)"));

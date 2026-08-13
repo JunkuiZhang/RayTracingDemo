@@ -10,6 +10,48 @@ static const uint STABLE_BRANCH_ENQUEUED = 0xfffffffeu;
 static const uint STABLE_BRANCH_INVALID = 0xffffffffu;
 static const uint MAX_STABLE_DELTA_VERTICES = 15u;
 
+// The build pass uses these 64 bytes as restart state. The fill pass replaces
+// them in place with denoiser guides after loading the restart state locally.
+struct StablePlaneRecord
+{
+    float4 data0;
+    float4 data1;
+    float4 data2;
+    float4 data3;
+};
+
+uint StablePlaneAddress(uint2 pixel, uint planeIndex, uint2 extent)
+{
+    return planeIndex * extent.x * extent.y + pixel.y * extent.x + pixel.x;
+}
+
+float2 EncodeStableDirection(float3 direction)
+{
+    direction /= abs(direction.x) + abs(direction.y) + abs(direction.z);
+    float2 encoded = direction.xy;
+    if (direction.z < 0.0)
+    {
+        float2 signNotZero = float2(
+            encoded.x >= 0.0 ? 1.0 : -1.0,
+            encoded.y >= 0.0 ? 1.0 : -1.0);
+        encoded = (1.0 - abs(encoded.yx)) * signNotZero;
+    }
+    return encoded;
+}
+
+float3 DecodeStableDirection(float2 encoded)
+{
+    float3 direction = float3(encoded, 1.0 - abs(encoded.x) - abs(encoded.y));
+    if (direction.z < 0.0)
+    {
+        float2 signNotZero = float2(
+            direction.x >= 0.0 ? 1.0 : -1.0,
+            direction.y >= 0.0 ? 1.0 : -1.0);
+        direction.xy = (1.0 - abs(direction.yx)) * signNotZero;
+    }
+    return normalize(direction);
+}
+
 bool IsPersistentStableBranch(uint branchId)
 {
     return branchId != STABLE_BRANCH_JUST_STARTED

@@ -103,6 +103,7 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                 | "--target-gpu-ms"
                 | "--command-recording-mode"
                 | "--acceleration-structure-mode"
+                | "--path-space-mode"
                 | "--denoiser"
                 | "--upscaler"
                 | "--reflex-mode"
@@ -111,7 +112,7 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
     });
     if cpu_reference_requested && realtime_requested {
         return Err(
-            "--cpu-reference 不能与实时渲染选项（--model、--animate-model、--benchmark-seconds、--capture-output、--capture-after-spp、--debug-view、--atrous-mode、--output-size、--render-scale、--dynamic-resolution、--target-gpu-ms、--command-recording-mode、--acceleration-structure-mode、--denoiser、--upscaler、--reflex-mode、--streamline-application-id）同时使用"
+            "--cpu-reference 不能与实时渲染选项（--model、--animate-model、--benchmark-seconds、--capture-output、--capture-after-spp、--debug-view、--atrous-mode、--output-size、--render-scale、--dynamic-resolution、--target-gpu-ms、--command-recording-mode、--acceleration-structure-mode、--path-space-mode、--denoiser、--upscaler、--reflex-mode、--streamline-application-id）同时使用"
                 .to_string(),
         );
     }
@@ -213,6 +214,10 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                         .next()
                         .ok_or("--acceleration-structure-mode 缺少模式")?;
                     config.acceleration_structure_mode = parse_acceleration_structure_mode(&value)?;
+                }
+                "--path-space-mode" => {
+                    let value = arguments.next().ok_or("--path-space-mode 缺少模式")?;
+                    config.path_space_mode = parse_path_space_mode(&value)?;
                 }
                 "--denoiser" => {
                     let value = arguments.next().ok_or("--denoiser 缺少后端")?;
@@ -439,6 +444,16 @@ fn parse_denoiser_backend(value: &str) -> Result<reconstruction::DenoiserBackend
     }
 }
 
+fn parse_path_space_mode(value: &str) -> Result<path_space::PathSpaceMode, String> {
+    match value {
+        "legacy" => Ok(path_space::PathSpaceMode::Legacy),
+        "stable-planes" => Ok(path_space::PathSpaceMode::StablePlanes),
+        _ => Err(format!(
+            "无效的路径空间模式：{value}（仅支持 legacy 或 stable-planes）"
+        )),
+    }
+}
+
 fn parse_upscaler_mode(value: &str) -> Result<upscaler::UpscalerMode, String> {
     match value {
         "native" => Ok(upscaler::UpscalerMode::Native),
@@ -468,7 +483,7 @@ fn print_help() {
         "RayTracingDemo\n\n\
          用法：\n  \
          cargo run --release                 启动实时 DX12 窗口\n  \
-         cargo run --release -- --model <路径> [--animate-model] [--benchmark-seconds <秒> | --capture-output <PNG>] [--capture-after-spp <SPP>] [--debug-view <名称>] [--atrous-mode <模式>] [--output-size <宽x高>] [--render-scale <比例> | --dynamic-resolution [--target-gpu-ms <毫秒>]] [--command-recording-mode <模式>] [--acceleration-structure-mode <模式>] [--denoiser <后端>] [--upscaler <模式>] [--streamline-application-id <ID>]\n  \
+         cargo run --release -- --model <路径> [--animate-model] [--benchmark-seconds <秒> | --capture-output <PNG>] [--capture-after-spp <SPP>] [--debug-view <名称>] [--atrous-mode <模式>] [--output-size <宽x高>] [--render-scale <比例> | --dynamic-resolution [--target-gpu-ms <毫秒>]] [--command-recording-mode <模式>] [--acceleration-structure-mode <模式>] [--path-space-mode <模式>] [--denoiser <后端>] [--upscaler <模式>] [--streamline-application-id <ID>]\n  \
          cargo run --release -- --cpu-reference [选项]\n\n\
          选项：\n  \
          --samples <数量>       每像素采样数，默认 1\n  \
@@ -486,6 +501,7 @@ fn print_help() {
          --target-gpu-ms <毫秒>   动态目标，有限数值 4.0..50.0，默认 14.5\n  \
          --command-recording-mode <模式> 命令记录：baseline 或 optimized，默认 optimized\n  \
          --acceleration-structure-mode <模式> AS 策略：baseline 或 optimized，默认 baseline\n  \
+         --path-space-mode <模式> 路径空间：legacy 或 stable-planes，默认 legacy；P2 期间 stable-planes 仅生成诊断层\n  \
          --denoiser <后端>       重建后端：svgf、nrd-reblur 或 dlss-rr，默认 svgf；RR 未指定时使用 dlss-quality\n  \
          --upscaler <模式>       上采样：native、dlaa、dlss-quality、dlss-balanced、dlss-performance，默认 native\n  \
          --reflex-mode <模式>    Reflex：off、on 或 on-boost，默认 on；feature-off 时 unavailable\n  \
@@ -737,6 +753,29 @@ mod tests {
             "baseline".to_string(),
         ]);
         assert!(matches!(result, Err(message) if message.contains("不能与")));
+    }
+
+    #[test]
+    fn path_space_mode_defaults_to_legacy_and_parses_stable_planes() {
+        assert!(matches!(
+            parse_arguments(Vec::<String>::new()),
+            Ok(Command::Realtime(RealtimeConfig {
+                path_space_mode: crate::path_space::PathSpaceMode::Legacy,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            parse_arguments([
+                "--path-space-mode".to_string(),
+                "stable-planes".to_string()
+            ]),
+            Ok(Command::Realtime(RealtimeConfig {
+                path_space_mode: crate::path_space::PathSpaceMode::StablePlanes,
+                ..
+            }))
+        ));
+        assert!(parse_path_space_mode("invalid").is_err());
+        assert!(parse_arguments(["--path-space-mode".to_string()]).is_err());
     }
 
     #[test]

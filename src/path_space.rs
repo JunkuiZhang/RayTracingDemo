@@ -11,6 +11,23 @@ pub(crate) const STABLE_BRANCH_ENQUEUED: u32 = u32::MAX - 1;
 pub(crate) const STABLE_BRANCH_INVALID: u32 = u32::MAX;
 pub(crate) const MAX_STABLE_DELTA_VERTICES: u32 = 15;
 pub(crate) const DELTA_LOBE_COUNT: u32 = 4;
+pub(crate) const STABLE_PLANE_RECORD_STRIDE: usize = 64;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum PathSpaceMode {
+    #[default]
+    Legacy,
+    StablePlanes,
+}
+
+impl PathSpaceMode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::StablePlanes => "stable-planes",
+        }
+    }
+}
 
 /// Appends a two-bit delta-lobe identity to a stable branch.
 ///
@@ -253,5 +270,8 @@ mod tests {
         assert!(shader.contains("else\n            return false;"));
         assert_eq!(std::mem::size_of::<InteriorList>(), 8);
         assert_eq!(STABLE_PLANE_COUNT, 3);
+        assert_eq!(STABLE_PLANE_RECORD_STRIDE, 64);
+        assert!(shader.contains("struct StablePlaneRecord"));
+        assert!(shader.contains("float4 data3;"));
     }
 }

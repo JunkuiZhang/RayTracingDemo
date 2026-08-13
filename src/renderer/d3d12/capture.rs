@@ -25,6 +25,8 @@ pub struct CaptureMetadata {
     pub atrous_mode: String,
     pub command_recording_mode: String,
     pub acceleration_structure_mode: String,
+    pub path_space_mode: String,
+    pub stable_plane_allocated_bytes: u64,
     pub denoiser_backend: String,
     pub upscaler_mode: String,
     pub reflex_mode: String,
@@ -181,6 +183,15 @@ pub fn capture_json_line(metadata: &CaptureMetadata, png_bytes: u64) -> String {
             "upscaler": metadata.upscaler_mode,
             "reflex": metadata.reflex_mode,
         },
+        "path_space": {
+            "requested": metadata.path_space_mode,
+            "active": metadata.path_space_mode,
+            "plane_count": if metadata.path_space_mode == "stable-planes" { 3 } else { 0 },
+            // P2 deliberately leaves the displayed reconstruction on the
+            // legacy raygen until NRD/RR can consume every plane coherently.
+            "consumer": if metadata.path_space_mode == "stable-planes" { "diagnostic-only" } else { "legacy" },
+            "allocated_bytes": metadata.stable_plane_allocated_bytes,
+        },
         "streamline": {
             "sdk_version": metadata.streamline_sdk_version,
             "viewport_id": metadata.viewport_id,
@@ -239,6 +250,8 @@ mod tests {
             atrous_mode: "baseline".to_string(),
             command_recording_mode: "optimized".to_string(),
             acceleration_structure_mode: "baseline".to_string(),
+            path_space_mode: "stable-planes".to_string(),
+            stable_plane_allocated_bytes: 123_456,
             denoiser_backend: "svgf".to_string(),
             upscaler_mode: "native".to_string(),
             reflex_mode: "unavailable".to_string(),
@@ -251,6 +264,8 @@ mod tests {
         assert_eq!(value["debug_view"]["index"], 8);
         assert_eq!(value["modes"]["command_recording"], "optimized");
         assert_eq!(value["modes"]["denoiser"], "svgf");
+        assert_eq!(value["path_space"]["consumer"], "diagnostic-only");
+        assert_eq!(value["path_space"]["allocated_bytes"], 123_456);
         assert_eq!(value["png_bytes"], 256);
     }
 }

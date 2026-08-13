@@ -126,6 +126,57 @@ pub struct TrackedResource {
 
 #[allow(dead_code)]
 impl TrackedResource {
+    pub fn create_buffer(
+        device: &ID3D12Device,
+        byte_size: u64,
+        flags: D3D12_RESOURCE_FLAGS,
+        state: D3D12_RESOURCE_STATES,
+        name: impl Into<String>,
+    ) -> Result<Self> {
+        assert!(byte_size > 0);
+        let heap_properties = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_DEFAULT,
+            CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+            MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+            CreationNodeMask: 0,
+            VisibleNodeMask: 0,
+        };
+        let description = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+            Alignment: 0,
+            Width: byte_size,
+            Height: 1,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: DXGI_FORMAT_UNKNOWN,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            Flags: flags,
+        };
+        let mut resource = None;
+        unsafe {
+            device.CreateCommittedResource(
+                &heap_properties,
+                D3D12_HEAP_FLAG_NONE,
+                &description,
+                state,
+                None,
+                &mut resource,
+            )?;
+        }
+        Ok(Self::new(
+            resource.unwrap(),
+            state,
+            DXGI_FORMAT_UNKNOWN,
+            u32::try_from(byte_size).unwrap_or(u32::MAX),
+            1,
+            name,
+        ))
+    }
+
     pub fn create_texture_2d(
         device: &ID3D12Device,
         width: u32,
@@ -148,6 +199,60 @@ impl TrackedResource {
             Width: width as u64,
             Height: height,
             DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: format,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
+            Flags: flags,
+        };
+        let mut resource = None;
+        unsafe {
+            device.CreateCommittedResource(
+                &heap_properties,
+                D3D12_HEAP_FLAG_NONE,
+                &description,
+                state,
+                None,
+                &mut resource,
+            )?;
+        }
+        Ok(Self::new(
+            resource.unwrap(),
+            state,
+            format,
+            width,
+            height,
+            name,
+        ))
+    }
+
+    pub fn create_texture_2d_array(
+        device: &ID3D12Device,
+        width: u32,
+        height: u32,
+        array_size: u16,
+        format: DXGI_FORMAT,
+        flags: D3D12_RESOURCE_FLAGS,
+        state: D3D12_RESOURCE_STATES,
+        name: impl Into<String>,
+    ) -> Result<Self> {
+        assert!(array_size > 0);
+        let heap_properties = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_DEFAULT,
+            CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+            MemoryPoolPreference: D3D12_MEMORY_POOL_UNKNOWN,
+            CreationNodeMask: 0,
+            VisibleNodeMask: 0,
+        };
+        let description = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Alignment: 0,
+            Width: width as u64,
+            Height: height,
+            DepthOrArraySize: array_size,
             MipLevels: 1,
             Format: format,
             SampleDesc: DXGI_SAMPLE_DESC {

@@ -5,14 +5,22 @@ use windows::{
     core::Result,
 };
 
-use crate::{resolution::Extent2D, scene::GpuMaterial};
+use crate::{
+    path_space::{STABLE_PLANE_COUNT, STABLE_PLANE_RECORD_STRIDE},
+    resolution::Extent2D,
+    scene::GpuMaterial,
+};
 
 use super::{
     ATROUS_HISTORY_TABLE_BASES, ATROUS_PING_TO_PONG_BASES, ATROUS_PONG_TO_PING_BASES,
     DXR_UAV_REGISTER_COUNT, RECONSTRUCTION_DIFFUSE_HIT_DISTANCE_UAV_REGISTER,
     RECONSTRUCTION_PRIMARY_EMISSIVE_UAV_REGISTER,
     RECONSTRUCTION_SPECULAR_HIT_DISTANCE_UAV_REGISTER, SHADER_DESCRIPTOR_COUNT,
-    TEMPORAL_TABLE_BASES, TONEMAP_TABLE_BASES, create_structured_srv, create_texture_uav,
+    STABLE_BUILD_TABLE_BASE, STABLE_PLANE_DIFFUSE_UAV_REGISTER, STABLE_PLANE_HEADER_UAV_REGISTER,
+    STABLE_PLANE_RECORD_UAV_REGISTER, STABLE_PLANE_SPECULAR_UAV_REGISTER,
+    STABLE_RADIANCE_UAV_REGISTER, TEMPORAL_TABLE_BASES, TONEMAP_TABLE_BASES,
+    create_null_structured_uav, create_null_texture_array_uav, create_structured_srv,
+    create_structured_uav, create_texture_uav,
     descriptor::DescriptorHeap,
     populate_texture_table,
     raytracing::{AccelerationStructures, SceneGeometry},
@@ -54,6 +62,33 @@ pub(super) struct DenoiseHistory {
     pub(super) id: TrackedResource,
     pub(super) world_position: TrackedResource,
     pub(super) hit_distance: TrackedResource,
+}
+
+/// Generation-owned path-space storage. The 64-byte record is deliberately
+/// reused between build and fill so three planes stay within the laptop VRAM
+/// budget without mixing radiance that needs different temporal guides.
+pub(super) struct StablePlaneGenerationResources {
+    pub(super) records: TrackedResource,
+    pub(super) headers: TrackedResource,
+    pub(super) noisy_diffuse: TrackedResource,
+    pub(super) noisy_specular: TrackedResource,
+    pub(super) stable_radiance: TrackedResource,
+    pub(super) record_count: u32,
+    pub(super) allocated_bytes: u64,
+}
+
+impl StablePlaneGenerationResources {
+    pub(super) fn collect_all(
+        &mut self,
+        batch: &mut TransitionBatch,
+        state: D3D12_RESOURCE_STATES,
+    ) {
+        self.records.collect_transition(batch, state);
+        self.headers.collect_transition(batch, state);
+        self.noisy_diffuse.collect_transition(batch, state);
+        self.noisy_specular.collect_transition(batch, state);
+        self.stable_radiance.collect_transition(batch, state);
+    }
 }
 
 impl DenoiseHistory {
@@ -188,6 +223,7 @@ pub(super) struct RenderResourceGeneration {
     pub(super) reconstruction_diffuse_hit_distance: TrackedResource,
     pub(super) reconstruction_specular_hit_distance: TrackedResource,
     pub(super) reconstruction_primary_emissive: TrackedResource,
+    pub(super) stable_planes: Option<StablePlaneGenerationResources>,
     #[cfg(feature = "streamline")]
     #[allow(dead_code)] // 10D consumes the DLSS generation from its pass.
     pub(super) dlss: Option<DlssGenerationResources>,
@@ -213,6 +249,7 @@ pub(super) struct RenderGenerationDesc {
     pub(super) with_nrd: bool,
     pub(super) with_dlss_sr: bool,
     pub(super) with_dlss_rr: bool,
+    pub(super) with_stable_planes: bool,
 }
 
 impl RenderResourceGeneration {
@@ -230,6 +267,7 @@ impl RenderResourceGeneration {
             with_nrd,
             with_dlss_sr,
             with_dlss_rr,
+            with_stable_planes,
         } = description;
         let shader_heap = DescriptorHeap::new(
             device,
@@ -385,6 +423,9 @@ impl RenderResourceGeneration {
             DXGI_FORMAT_R16G16B16A16_FLOAT,
             format!("代际 {id} Reconstruction primary emissive"),
         )?;
+        let stable_planes = with_stable_planes
+            .then(|| create_stable_plane_resources(device, render_extent, id))
+            .transpose()?;
         #[cfg(feature = "streamline")]
         let dlss = if with_dlss_sr {
             Some(DlssGenerationResources {
@@ -695,6 +736,7 @@ impl RenderResourceGeneration {
             reconstruction_diffuse_hit_distance,
             reconstruction_specular_hit_distance,
             reconstruction_primary_emissive,
+            stable_planes,
             #[cfg(feature = "streamline")]
             dlss,
             #[cfg(feature = "streamline-rr")]
@@ -893,8 +935,147 @@ impl RenderResourceGeneration {
         );
         debug_assert_eq!(
             super::DLSS_SPECULAR_MOTION_UAV_REGISTER + 1,
+            super::STABLE_PLANE_RECORD_UAV_REGISTER
+        );
+        debug_assert_eq!(
+            super::STABLE_RADIANCE_UAV_REGISTER + 1,
             DXR_UAV_REGISTER_COUNT
         );
+
+        if let Some(stable) = self.stable_planes.as_ref() {
+            unsafe {
+                create_structured_uav(
+                    device,
+                    &self.shader_heap,
+                    DXR_UAV_BASE + STABLE_PLANE_RECORD_UAV_REGISTER,
+                    &stable.records,
+                    stable.record_count,
+                    STABLE_PLANE_RECORD_STRIDE as u32,
+                );
+                create_texture_uav(
+                    device,
+                    &self.shader_heap,
+                    DXR_UAV_BASE + STABLE_PLANE_HEADER_UAV_REGISTER,
+                    &stable.headers,
+                );
+                create_texture_uav(
+                    device,
+                    &self.shader_heap,
+                    DXR_UAV_BASE + STABLE_PLANE_DIFFUSE_UAV_REGISTER,
+                    &stable.noisy_diffuse,
+                );
+                create_texture_uav(
+                    device,
+                    &self.shader_heap,
+                    DXR_UAV_BASE + STABLE_PLANE_SPECULAR_UAV_REGISTER,
+                    &stable.noisy_specular,
+                );
+                create_texture_uav(
+                    device,
+                    &self.shader_heap,
+                    DXR_UAV_BASE + STABLE_RADIANCE_UAV_REGISTER,
+                    &stable.stable_radiance,
+                );
+
+                create_acceleration_structure_srv(
+                    device,
+                    &self.shader_heap,
+                    STABLE_BUILD_TABLE_BASE,
+                    acceleration_structures.tlas.GetGPUVirtualAddress(),
+                );
+                create_structured_srv(
+                    device,
+                    &self.shader_heap,
+                    STABLE_BUILD_TABLE_BASE + 1,
+                    scene_geometry.vertex_buffer(),
+                    scene_geometry.vertex_count(),
+                    size_of::<crate::scene::GpuVertex>() as u32,
+                );
+                create_structured_srv(
+                    device,
+                    &self.shader_heap,
+                    STABLE_BUILD_TABLE_BASE + 2,
+                    scene_geometry.index_buffer(),
+                    scene_geometry.index_count(),
+                    size_of::<u32>() as u32,
+                );
+                create_structured_srv(
+                    device,
+                    &self.shader_heap,
+                    STABLE_BUILD_TABLE_BASE + 3,
+                    scene_geometry.material_buffer(),
+                    scene_geometry.material_count(),
+                    size_of::<GpuMaterial>() as u32,
+                );
+                create_structured_uav(
+                    device,
+                    &self.shader_heap,
+                    STABLE_BUILD_TABLE_BASE + 4,
+                    &stable.records,
+                    stable.record_count,
+                    STABLE_PLANE_RECORD_STRIDE as u32,
+                );
+                create_texture_uav(
+                    device,
+                    &self.shader_heap,
+                    STABLE_BUILD_TABLE_BASE + 5,
+                    &stable.headers,
+                );
+                create_texture_uav(
+                    device,
+                    &self.shader_heap,
+                    STABLE_BUILD_TABLE_BASE + 6,
+                    &stable.noisy_diffuse,
+                );
+                create_texture_uav(
+                    device,
+                    &self.shader_heap,
+                    STABLE_BUILD_TABLE_BASE + 7,
+                    &stable.noisy_specular,
+                );
+                create_texture_uav(
+                    device,
+                    &self.shader_heap,
+                    STABLE_BUILD_TABLE_BASE + 8,
+                    &stable.stable_radiance,
+                );
+            }
+        } else {
+            unsafe {
+                create_null_structured_uav(
+                    device,
+                    &self.shader_heap,
+                    DXR_UAV_BASE + STABLE_PLANE_RECORD_UAV_REGISTER,
+                    STABLE_PLANE_RECORD_STRIDE as u32,
+                );
+                create_null_texture_array_uav(
+                    device,
+                    &self.shader_heap,
+                    DXR_UAV_BASE + STABLE_PLANE_HEADER_UAV_REGISTER,
+                    DXGI_FORMAT_R32_UINT,
+                );
+                create_null_texture_array_uav(
+                    device,
+                    &self.shader_heap,
+                    DXR_UAV_BASE + STABLE_PLANE_DIFFUSE_UAV_REGISTER,
+                    DXGI_FORMAT_R16G16B16A16_FLOAT,
+                );
+                create_null_texture_array_uav(
+                    device,
+                    &self.shader_heap,
+                    DXR_UAV_BASE + STABLE_PLANE_SPECULAR_UAV_REGISTER,
+                    DXGI_FORMAT_R16G16B16A16_FLOAT,
+                );
+                // StableRadiance is Texture2D, so an existing HDR UAV is a
+                // harmless fallback descriptor while legacy mode never reads it.
+                create_texture_uav(
+                    device,
+                    &self.shader_heap,
+                    DXR_UAV_BASE + STABLE_RADIANCE_UAV_REGISTER,
+                    reconstruction_noisy_hdr,
+                );
+            }
+        }
 
         #[cfg(feature = "nrd")]
         if let Some(nrd) = self.nrd.as_ref() {
@@ -1321,6 +1502,79 @@ impl RenderResourceGeneration {
             }
         }
     }
+}
+
+fn create_stable_plane_resources(
+    device: &ID3D12Device,
+    extent: Extent2D,
+    generation: u64,
+) -> Result<StablePlaneGenerationResources> {
+    let pixels = u64::from(extent.width)
+        .checked_mul(u64::from(extent.height))
+        .expect("render extent pixel count must fit u64");
+    let record_count_u64 = pixels
+        .checked_mul(STABLE_PLANE_COUNT as u64)
+        .expect("stable-plane record count must fit u64");
+    let record_count = u32::try_from(record_count_u64)
+        .expect("supported render extent must fit the stable-plane u32 address ABI");
+    let record_bytes = record_count_u64
+        .checked_mul(STABLE_PLANE_RECORD_STRIDE as u64)
+        .expect("stable-plane record allocation must fit u64");
+    // 64-byte record + R32 header + two RGBA16F signals per plane, plus one
+    // RGBA16F stable-radiance pixel shared by all planes.
+    let allocated_bytes = pixels
+        .checked_mul(
+            STABLE_PLANE_COUNT as u64 * (STABLE_PLANE_RECORD_STRIDE as u64 + 4 + 8 + 8) + 8,
+        )
+        .expect("stable-plane memory telemetry must fit u64");
+    let array_size = STABLE_PLANE_COUNT as u16;
+    Ok(StablePlaneGenerationResources {
+        records: TrackedResource::create_buffer(
+            device,
+            record_bytes,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            format!("代际 {generation} stable-plane 64-byte records"),
+        )?,
+        headers: TrackedResource::create_texture_2d_array(
+            device,
+            extent.width,
+            extent.height,
+            array_size,
+            DXGI_FORMAT_R32_UINT,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            format!("代际 {generation} stable-plane branch IDs"),
+        )?,
+        noisy_diffuse: TrackedResource::create_texture_2d_array(
+            device,
+            extent.width,
+            extent.height,
+            array_size,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            format!("代际 {generation} stable-plane noisy diffuse"),
+        )?,
+        noisy_specular: TrackedResource::create_texture_2d_array(
+            device,
+            extent.width,
+            extent.height,
+            array_size,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            format!("代际 {generation} stable-plane noisy specular"),
+        )?,
+        stable_radiance: create_uav_texture(
+            device,
+            extent,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            format!("代际 {generation} stable radiance and dominant plane"),
+        )?,
+        record_count,
+        allocated_bytes,
+    })
 }
 
 fn create_uav_texture(

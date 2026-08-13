@@ -495,6 +495,10 @@ mod tests {
         assert!(shader.contains("float3 absorptionCoefficient;"));
         assert!(shader.contains("uint mediumFlags;"));
         assert!(shader.contains("total stride of 80 bytes"));
+
+        let scene_shader = include_str!("../shaders/stage11_scene.hlsli");
+        assert!(scene_shader.contains("struct Vertex"));
+        assert!(scene_shader.contains("struct InstanceGpu"));
     }
 
     #[test]

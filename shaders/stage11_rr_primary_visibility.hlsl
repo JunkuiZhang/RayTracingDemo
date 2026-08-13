@@ -6,27 +6,9 @@
 #include "stage11_camera.hlsli"
 #include "stage11_material.hlsli"
 #include "stage11_path_space.hlsli"
+#include "stage11_scene.hlsli"
 
 RaytracingAccelerationStructure Scene : register(t0);
-
-struct Vertex
-{
-    float3 position;
-    float3 normal;
-    float4 tangent;
-    float2 texcoord0;
-};
-
-struct InstanceGpu
-{
-    float4 previousObjectToWorldRow0;
-    float4 previousObjectToWorldRow1;
-    float4 previousObjectToWorldRow2;
-    uint vertexOffset;
-    uint indexOffset;
-    uint materialIndex;
-    uint stableSurfaceId;
-};
 
 StructuredBuffer<Vertex> Vertices : register(t1);
 StructuredBuffer<uint> Indices : register(t2);

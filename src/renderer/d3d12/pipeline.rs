@@ -11,6 +11,7 @@ pub struct ComputePipeline {
     root_signature: ID3D12RootSignature,
     pipeline_state: ID3D12PipelineState,
     constant_count: usize,
+    root_srv_parameter: Option<u32>,
 }
 
 impl ComputePipeline {
@@ -22,10 +23,55 @@ impl ComputePipeline {
         constant_count: usize,
         name: &str,
     ) -> Result<Self> {
+        Self::new_internal(
+            device,
+            shader,
+            srv_count,
+            uav_count,
+            constant_count,
+            None,
+            name,
+        )
+    }
+
+    pub fn new_with_root_srv(
+        device: &ID3D12Device,
+        shader: &[u8],
+        srv_count: u32,
+        uav_count: u32,
+        constant_count: usize,
+        root_srv_register: u32,
+        name: &str,
+    ) -> Result<Self> {
+        Self::new_internal(
+            device,
+            shader,
+            srv_count,
+            uav_count,
+            constant_count,
+            Some(root_srv_register),
+            name,
+        )
+    }
+
+    fn new_internal(
+        device: &ID3D12Device,
+        shader: &[u8],
+        srv_count: u32,
+        uav_count: u32,
+        constant_count: usize,
+        root_srv_register: Option<u32>,
+        name: &str,
+    ) -> Result<Self> {
         assert!(srv_count > 0 || uav_count > 0);
         assert!(constant_count > 0 && constant_count <= 64);
-        let root_signature =
-            create_root_signature(device, srv_count, uav_count, constant_count as u32)?;
+        let root_signature = create_root_signature(
+            device,
+            srv_count,
+            uav_count,
+            constant_count as u32,
+            root_srv_register,
+        )?;
         let mut description = D3D12_COMPUTE_PIPELINE_STATE_DESC {
             pRootSignature: ManuallyDrop::new(Some(root_signature.clone())),
             CS: D3D12_SHADER_BYTECODE {
@@ -42,6 +88,7 @@ impl ComputePipeline {
             root_signature,
             pipeline_state,
             constant_count,
+            root_srv_parameter: root_srv_register.map(|_| 2),
         })
     }
 
@@ -79,6 +126,19 @@ impl ComputePipeline {
         self.bind_pipeline(command_list);
         self.set_arguments(command_list, descriptor_table, constants);
     }
+
+    pub fn set_root_shader_resource_view(
+        &self,
+        command_list: &ID3D12GraphicsCommandList,
+        gpu_address: u64,
+    ) {
+        let parameter = self
+            .root_srv_parameter
+            .expect("compute pipeline was not created with a root SRV");
+        unsafe {
+            command_list.SetComputeRootShaderResourceView(parameter, gpu_address);
+        }
+    }
 }
 
 fn create_root_signature(
@@ -86,6 +146,7 @@ fn create_root_signature(
     srv_count: u32,
     uav_count: u32,
     constant_count: u32,
+    root_srv_register: Option<u32>,
 ) -> Result<ID3D12RootSignature> {
     let mut ranges = Vec::with_capacity(2);
     if srv_count > 0 {
@@ -106,7 +167,7 @@ fn create_root_signature(
             OffsetInDescriptorsFromTableStart: srv_count,
         });
     }
-    let parameters = [
+    let mut parameters = vec![
         D3D12_ROOT_PARAMETER {
             ParameterType: D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
             Anonymous: D3D12_ROOT_PARAMETER_0 {
@@ -129,6 +190,18 @@ fn create_root_signature(
             ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
         },
     ];
+    if let Some(shader_register) = root_srv_register {
+        parameters.push(D3D12_ROOT_PARAMETER {
+            ParameterType: D3D12_ROOT_PARAMETER_TYPE_SRV,
+            Anonymous: D3D12_ROOT_PARAMETER_0 {
+                Descriptor: D3D12_ROOT_DESCRIPTOR {
+                    ShaderRegister: shader_register,
+                    RegisterSpace: 0,
+                },
+            },
+            ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+        });
+    }
     let description = D3D12_ROOT_SIGNATURE_DESC {
         NumParameters: parameters.len() as u32,
         pParameters: parameters.as_ptr(),

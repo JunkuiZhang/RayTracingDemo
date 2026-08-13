@@ -5,26 +5,8 @@
 #include "stage11_camera.hlsli"
 #include "stage11_material.hlsli"
 #include "stage11_path_space.hlsli"
+#include "stage11_scene.hlsli"
 RaytracingAccelerationStructure Scene : register(t0);
-
-struct Vertex
-{
-    float3 position;
-    float3 normal;
-    float4 tangent;
-    float2 texcoord0;
-};
-
-struct InstanceGpu
-{
-    float4 previousObjectToWorldRow0;
-    float4 previousObjectToWorldRow1;
-    float4 previousObjectToWorldRow2;
-    uint vertexOffset;
-    uint indexOffset;
-    uint materialIndex;
-    uint stableSurfaceId;
-};
 
 StructuredBuffer<Vertex> Vertices : register(t1);
 StructuredBuffer<uint> Indices : register(t2);
@@ -80,6 +62,11 @@ RWTexture2D<float4> TransmissionViewProxy : register(u30);
 // reconstructing it from a scalar hit distance because the latter inherits
 // subpixel variation from the primary ray origin.
 RWTexture2D<float2> DlssSpecularMotion : register(u31);
+RWStructuredBuffer<StablePlaneRecord> StablePlaneRecords : register(u32);
+RWTexture2DArray<uint> StablePlaneHeaders : register(u33);
+RWTexture2DArray<float4> StablePlaneNoisyDiffuse : register(u34);
+RWTexture2DArray<float4> StablePlaneNoisySpecular : register(u35);
+RWTexture2D<float4> StableRadiance : register(u36);
 
 cbuffer FrameConstants : register(b0)
 {
@@ -97,6 +84,13 @@ cbuffer FrameConstants : register(b0)
     uint DlssGuideMode;
     uint NrdEnabled;
     uint ResetHistory;
+};
+
+cbuffer PathSpaceConstants : register(b1)
+{
+    // 0 = ordinary legacy raygen, 1 = fill one previously built stable plane.
+    uint PathSpacePass;
+    uint StablePlaneIndex;
 };
 
 struct Payload
@@ -528,6 +522,62 @@ float3 FiniteNonNegative(float3 value)
     return all(isfinite(value)) ? max(value, 0.0.xxx) : 0.0.xxx;
 }
 
+void WriteStablePlaneGuides(
+    Payload payload,
+    float3 normal,
+    float3 baseColor,
+    float metallic,
+    float roughness,
+    uint kind)
+{
+    uint2 pixel = DispatchRaysIndex().xy;
+    uint2 extent = DispatchRaysDimensions().xy;
+    uint address = StablePlaneAddress(pixel, StablePlaneIndex, extent);
+    StablePlaneRecord restart = StablePlaneRecords[address];
+    float sceneLength = restart.data1.w + RayTCurrent();
+    float3 primaryDirection = DecodeStableDirection(restart.data3.zw);
+    float3 virtualPosition = CameraPosition + primaryDirection * sceneLength;
+    float2 currentUv = ProjectToCurrentUv(virtualPosition, extent);
+    float2 previousUv = ProjectToPreviousUv(virtualPosition, extent);
+
+    float3 cameraForward;
+    float3 cameraRight;
+    float3 cameraUp;
+    CameraBasis(CameraYaw, CameraPitch, cameraForward, cameraRight, cameraUp);
+    float3 previousCameraForward;
+    float3 previousCameraRight;
+    float3 previousCameraUp;
+    CameraBasis(
+        PreviousCameraYaw,
+        PreviousCameraPitch,
+        previousCameraForward,
+        previousCameraRight,
+        previousCameraUp);
+    float viewZ = dot(virtualPosition - CameraPosition, cameraForward);
+    float previousViewZ = dot(
+        virtualPosition - PreviousCameraPosition,
+        previousCameraForward);
+    float3 motion = ResetHistory != 0u
+        ? 0.0.xxx
+        : float3(
+            (previousUv - currentUv) * float2(extent),
+            previousViewZ - viewZ);
+    float3 viewDirection = normalize(-WorldRayDirection());
+    float NoV = saturate(dot(normal, viewDirection));
+    float3 f0 = lerp(0.04.xxx, baseColor, metallic);
+
+    StablePlaneRecord guide;
+    guide.data0 = float4(normal, roughness);
+    guide.data1 = float4(FiniteNonNegative(baseColor * (1.0 - metallic)), viewZ);
+    guide.data2 = float4(
+        FiniteNonNegative(ComputeReconstructionSpecularAlbedo(f0, roughness, NoV)),
+        float(kind));
+    guide.data3 = float4(
+        motion,
+        (payload.psrThroughput.x + payload.psrThroughput.y + payload.psrThroughput.z) / 3.0);
+    StablePlaneRecords[address] = guide;
+}
+
 float4 MakeMirrorPlane(float3 normal, float3 planePoint)
 {
     // Reflecting geometry across the mirror plane unfolds the reflected ray
@@ -851,6 +901,62 @@ void RayGen()
     RawSpecular[pixel] = float4(payload.rawSpecular, 1.0);
 }
 
+[shader("raygeneration")]
+void StableFillRayGen()
+{
+    uint2 pixel = DispatchRaysIndex().xy;
+    uint2 extent = DispatchRaysDimensions().xy;
+    uint branchId = StablePlaneHeaders[uint3(pixel, StablePlaneIndex)];
+    if (branchId == STABLE_BRANCH_INVALID)
+        return;
+
+    uint address = StablePlaneAddress(pixel, StablePlaneIndex, extent);
+    StablePlaneRecord restart = StablePlaneRecords[address];
+    float3 planeThroughput = restart.data2.xyz;
+    RayDesc ray;
+    ray.Origin = restart.data0.xyz;
+    ray.Direction = normalize(restart.data1.xyz);
+    ray.TMin = 0.001;
+    ray.TMax = max(restart.data0.w + 0.01, 0.002);
+
+    Payload payload;
+    payload.radiance = 0.0;
+    payload.seed = HashUint(
+        pixel.x * 1973u
+        + pixel.y * 9277u
+        + FrameIndex * 26699u
+        + branchId * 104729u);
+    payload.depth = 0u;
+    payload.lastPdf = 0.0;
+    payload.firstKind = 0u;
+    payload.hitDistance = 0.0;
+    payload.rawDiffuse = 0.0;
+    payload.rawSpecular = 0.0;
+    payload.psrActive = 0u;
+    payload.sampleDimensionOffset = (branchId & 0xffu) * 64u;
+    // The closest-hit shader publishes the plane guide before recursive
+    // shading mutates the legacy PSR fields.
+    payload.psrThroughput = planeThroughput;
+    payload.psrMirrorPlane = 0.0;
+
+    TraceRay(
+        Scene,
+        RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+        0xff,
+        0,
+        1,
+        0,
+        ray,
+        payload);
+
+    StablePlaneNoisyDiffuse[uint3(pixel, StablePlaneIndex)] = float4(
+        FiniteNonNegative(planeThroughput * payload.rawDiffuse),
+        1.0);
+    StablePlaneNoisySpecular[uint3(pixel, StablePlaneIndex)] = float4(
+        FiniteNonNegative(planeThroughput * payload.rawSpecular),
+        1.0);
+}
+
 [shader("miss")]
 void Miss(inout Payload payload)
 {
@@ -945,6 +1051,9 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     bool isTransmissionSurface = layeredTransmissionEnabled
         && payload.psrActive == 3u
         && kind != 2u;
+
+    if (PathSpacePass == 1u && payload.depth == 0u)
+        WriteStablePlaneGuides(payload, normal, baseColor.xyz, metallic, roughness, kind);
 
     if (isPsrSurface)
     {

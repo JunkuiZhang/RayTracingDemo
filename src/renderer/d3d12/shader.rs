@@ -26,6 +26,7 @@ pub struct ReloadedShaders {
     pub atrous: Vec<u8>,
     pub atrous_shared: Vec<u8>,
     pub tonemap: Vec<u8>,
+    pub stable_plane_build: Vec<u8>,
     #[cfg(feature = "streamline")]
     pub dlss_compose: Vec<u8>,
     #[cfg(feature = "streamline-rr")]
@@ -79,6 +80,12 @@ impl ShaderReloader {
                 None,
             ),
             ("stage6_tonemap.hlsl", "stage6_tonemap.dxil", "cs_6_6", None),
+            (
+                "stage11_stable_plane_build.hlsl",
+                "stage11_stable_plane_build.dxil",
+                "cs_6_6",
+                None,
+            ),
         ];
         #[cfg(feature = "streamline")]
         let descriptions = {
@@ -223,7 +230,7 @@ impl ShaderReloader {
             })
         };
         #[cfg(feature = "nrd")]
-        let nrd_base = 5
+        let nrd_base = 6
             + usize::from(cfg!(feature = "streamline"))
             + 4 * usize::from(cfg!(feature = "streamline-rr"));
         let shaders = ReloadedShaders {
@@ -247,28 +254,32 @@ impl ShaderReloader {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             },
+            stable_plane_build: match read(5) {
+                Ok(value) => value,
+                Err(error) => return Some(Err(error)),
+            },
             #[cfg(feature = "streamline")]
-            dlss_compose: match read(5) {
+            dlss_compose: match read(6) {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             },
             #[cfg(feature = "streamline-rr")]
-            rr_input: match read(6) {
+            rr_input: match read(7) {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             },
             #[cfg(feature = "streamline-rr")]
-            rr_emissive: match read(7) {
+            rr_emissive: match read(8) {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             },
             #[cfg(feature = "streamline-rr")]
-            rr_primary_visibility: match read(8) {
+            rr_primary_visibility: match read(9) {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             },
             #[cfg(feature = "streamline-rr")]
-            rr_boundary_resolve: match read(9) {
+            rr_boundary_resolve: match read(10) {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             },
@@ -363,6 +374,7 @@ mod tests {
             "stage6_atrous.hlsl",
             "stage8_atrous_shared.hlsl",
             "stage6_tonemap.hlsl",
+            "stage11_stable_plane_build.hlsl",
         ];
         #[cfg(feature = "streamline")]
         let expected = {
@@ -391,13 +403,13 @@ mod tests {
 
         #[cfg(feature = "nrd")]
         {
-            let nrd_base = 5
+            let nrd_base = 6
                 + usize::from(cfg!(feature = "streamline"))
                 + 4 * usize::from(cfg!(feature = "streamline-rr"));
             assert!(reloader.sources[nrd_base].extra_include.is_some());
             assert!(reloader.sources[nrd_base + 1].extra_include.is_some());
         }
         #[cfg(feature = "streamline")]
-        assert_eq!(names[5], "stage10_dlss_input.hlsl");
+        assert_eq!(names[6], "stage10_dlss_input.hlsl");
     }
 }

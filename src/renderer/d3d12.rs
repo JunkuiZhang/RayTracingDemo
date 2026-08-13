@@ -38,6 +38,7 @@ use crate::upscaler::DlssFrameInput;
 use crate::{
     as_policy::AccelerationStructureStats,
     debug_view::DebugView,
+    path_space::PathSpaceMode,
     realtime::{AtrousMode, CommandRecordingMode, RealtimeConfig, ReflexMode},
     reconstruction::{
         CameraPose, DenoiserBackend, NRD_COMMIT_PREFIX, NRD_VERSION,
@@ -1061,14 +1062,22 @@ mod texture;
 
 const FRAME_COUNT: usize = 3;
 #[cfg(not(any(feature = "streamline", feature = "nrd")))]
-const SHADER_DESCRIPTOR_COUNT: usize = 314;
+const STABLE_BUILD_TABLE_BASE: usize = 319;
+#[cfg(not(any(feature = "streamline", feature = "nrd")))]
+const SHADER_DESCRIPTOR_COUNT: usize = 328;
 #[cfg(all(feature = "nrd", not(feature = "streamline")))]
-const SHADER_DESCRIPTOR_COUNT: usize = 363;
+const STABLE_BUILD_TABLE_BASE: usize = 368;
+#[cfg(all(feature = "nrd", not(feature = "streamline")))]
+const SHADER_DESCRIPTOR_COUNT: usize = 377;
 #[cfg(all(feature = "streamline", not(feature = "streamline-rr")))]
-const SHADER_DESCRIPTOR_COUNT: usize = 386;
+const STABLE_BUILD_TABLE_BASE: usize = 391;
+#[cfg(all(feature = "streamline", not(feature = "streamline-rr")))]
+const SHADER_DESCRIPTOR_COUNT: usize = 400;
 #[cfg(feature = "streamline-rr")]
-const SHADER_DESCRIPTOR_COUNT: usize = 496;
-const DXR_UAV_REGISTER_COUNT: usize = 32;
+const STABLE_BUILD_TABLE_BASE: usize = 501;
+#[cfg(feature = "streamline-rr")]
+const SHADER_DESCRIPTOR_COUNT: usize = 510;
+const DXR_UAV_REGISTER_COUNT: usize = 37;
 const RECONSTRUCTION_DIFFUSE_HIT_DISTANCE_UAV_REGISTER: usize = 15;
 const RECONSTRUCTION_SPECULAR_HIT_DISTANCE_UAV_REGISTER: usize = 16;
 const RECONSTRUCTION_PRIMARY_EMISSIVE_UAV_REGISTER: usize = 17;
@@ -1077,6 +1086,11 @@ const DLSS_MOTION_UAV_REGISTER: usize = 19;
 const DLSS_SPECULAR_MOTION_UAV_REGISTER: usize = 31;
 const TRANSMISSION_RAW_DIFFUSE_UAV_REGISTER: usize = 20;
 const TRANSMISSION_VIEW_PROXY_UAV_REGISTER: usize = 30;
+const STABLE_PLANE_RECORD_UAV_REGISTER: usize = 32;
+const STABLE_PLANE_HEADER_UAV_REGISTER: usize = 33;
+const STABLE_PLANE_DIFFUSE_UAV_REGISTER: usize = 34;
+const STABLE_PLANE_SPECULAR_UAV_REGISTER: usize = 35;
+const STABLE_RADIANCE_UAV_REGISTER: usize = 36;
 #[cfg(feature = "streamline")]
 const PCL_SIMULATION_START: u32 = 0;
 #[cfg(feature = "streamline")]
@@ -1095,6 +1109,10 @@ const ATROUS_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage6_at
 const ATROUS_SHARED_SHADER: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/stage8_atrous_shared.dxil"));
 const TONEMAP_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage6_tonemap.dxil"));
+const STABLE_PLANE_BUILD_SHADER: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/stage11_stable_plane_build.dxil"
+));
 #[cfg(feature = "nrd")]
 const NRD_PREP_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage9_nrd_prep.dxil"));
 #[cfg(feature = "nrd")]
@@ -1157,32 +1175,32 @@ fn tonemap_input_mode(denoiser: DenoiserBackend, dlss_active: bool) -> u32 {
 
 const DXR_TABLE_BASE: usize = 0;
 #[cfg(feature = "nrd")]
-const NRD_PREP_TABLE_BASE: usize = 314;
+const NRD_PREP_TABLE_BASE: usize = 319;
 #[cfg(feature = "nrd")]
-const NRD_TRANSMISSION_PREP_TABLE_BASE: usize = 332;
+const NRD_TRANSMISSION_PREP_TABLE_BASE: usize = 337;
 #[cfg(feature = "nrd")]
-const NRD_COMPOSE_TABLE_BASE: usize = 350;
-const TEMPORAL_TABLE_BASES: [usize; 2] = [168, 196];
-const ATROUS_HISTORY_TABLE_BASES: [usize; 2] = [224, 234];
-const ATROUS_PING_TO_PONG_BASES: [usize; 2] = [244, 254];
-const ATROUS_PONG_TO_PING_BASES: [usize; 2] = [264, 274];
-const TONEMAP_TABLE_BASES: [usize; 2] = [284, 299];
+const NRD_COMPOSE_TABLE_BASE: usize = 355;
+const TEMPORAL_TABLE_BASES: [usize; 2] = [173, 201];
+const ATROUS_HISTORY_TABLE_BASES: [usize; 2] = [229, 239];
+const ATROUS_PING_TO_PONG_BASES: [usize; 2] = [249, 259];
+const ATROUS_PONG_TO_PING_BASES: [usize; 2] = [269, 279];
+const TONEMAP_TABLE_BASES: [usize; 2] = [289, 304];
 #[cfg(feature = "streamline")]
-const DLSS_COMPOSE_TABLE_BASES: [usize; 2] = [363, 367];
+const DLSS_COMPOSE_TABLE_BASES: [usize; 2] = [368, 372];
 #[cfg(feature = "streamline")]
-const DLSS_TONEMAP_TABLE_BASE: usize = 371;
+const DLSS_TONEMAP_TABLE_BASE: usize = 376;
 #[cfg(feature = "streamline-rr")]
-const RR_INPUT_TABLE_BASE: usize = 386;
+const RR_INPUT_TABLE_BASE: usize = 391;
 #[cfg(feature = "streamline-rr")]
-const RR_EMISSIVE_TABLE_BASES: [usize; 2] = [392, 396];
+const RR_EMISSIVE_TABLE_BASES: [usize; 2] = [397, 401];
 #[cfg(feature = "streamline-rr")]
-const RR_TONEMAP_TABLE_BASES: [usize; 2] = [400, 415];
+const RR_TONEMAP_TABLE_BASES: [usize; 2] = [405, 420];
 #[cfg(feature = "streamline-rr")]
-const RR_PRIMARY_VISIBILITY_TABLE_BASE: usize = 430;
+const RR_PRIMARY_VISIBILITY_TABLE_BASE: usize = 435;
 #[cfg(feature = "streamline-rr")]
 const RR_PRIMARY_VISIBILITY_TABLE_STRIDE: usize = 8;
 #[cfg(feature = "streamline-rr")]
-const RR_BOUNDARY_TABLE_BASES: [usize; 2] = [478, 487];
+const RR_BOUNDARY_TABLE_BASES: [usize; 2] = [483, 492];
 
 #[cfg(feature = "nrd")]
 fn bridge_resource(resource: &TrackedResource) -> reconstruction::NrdBridgeResource {
@@ -1348,13 +1366,25 @@ struct CameraConstants {
     reset_history: u32,
 }
 
-#[cfg(feature = "streamline-rr")]
 fn camera_constant_words(camera: &CameraConstants) -> [u32; 16] {
     debug_assert_eq!(size_of::<CameraConstants>(), 16 * size_of::<u32>());
     // CameraConstants is the existing 16-DWORD root ABI. The visibility pass
     // deliberately receives the same block so its camera basis stays exactly
     // aligned with the path tracer while it ignores jitter/frame state.
     unsafe { std::ptr::read((camera as *const CameraConstants).cast::<[u32; 16]>()) }
+}
+
+fn submit_global_uav_barrier(command_list: &ID3D12GraphicsCommandList) {
+    let barrier = D3D12_RESOURCE_BARRIER {
+        Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
+        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+        Anonymous: D3D12_RESOURCE_BARRIER_0 {
+            UAV: ManuallyDrop::new(D3D12_RESOURCE_UAV_BARRIER {
+                pResource: ManuallyDrop::new(None),
+            }),
+        },
+    };
+    unsafe { command_list.ResourceBarrier(std::slice::from_ref(&barrier)) };
 }
 
 /// 阶段 1 的最小 DX12 后端：三缓冲交换链、清屏和逐帧 Fence。
@@ -1416,6 +1446,7 @@ pub struct Dx12Renderer {
     atrous_baseline_pipeline: ComputePipeline,
     atrous_shared_pipeline: ComputePipeline,
     tonemap_pipeline: ComputePipeline,
+    stable_plane_build_pipeline: ComputePipeline,
     #[cfg(feature = "streamline")]
     dlss_compose_pipeline: ComputePipeline,
     #[cfg(feature = "streamline-rr")]
@@ -1465,6 +1496,7 @@ pub struct Dx12Renderer {
     animate_model: bool,
     atrous_mode: AtrousMode,
     command_recording_mode: CommandRecordingMode,
+    path_space_mode: PathSpaceMode,
     denoiser: DenoiserBackend,
     denoiser_switch_count: u64,
     animation_start: Instant,
@@ -1675,6 +1707,16 @@ impl Dx12Renderer {
             let tonemap_pipeline =
                 ComputePipeline::new(&device, TONEMAP_SHADER, 14, 1, 3, "Tone Map 与调试视图")
                     .map_err(|error| dx_error("创建 Tone Map 管线", error))?;
+            let stable_plane_build_pipeline = ComputePipeline::new_with_root_srv(
+                &device,
+                STABLE_PLANE_BUILD_SHADER,
+                4,
+                5,
+                16,
+                4,
+                "阶段 11 RTXPT-style BuildStablePlanes",
+            )
+            .map_err(|error| dx_error("创建 stable-plane build 管线", error))?;
             #[cfg(feature = "streamline")]
             let dlss_compose_pipeline = ComputePipeline::new(
                 &device,
@@ -1844,6 +1886,7 @@ impl Dx12Renderer {
                     with_dlss_sr: !config.upscaler.is_native()
                         && config.denoiser != DenoiserBackend::DlssRayReconstruction,
                     with_dlss_rr: config.denoiser == DenoiserBackend::DlssRayReconstruction,
+                    with_stable_planes: config.path_space_mode == PathSpaceMode::StablePlanes,
                 },
             )
             .map_err(|error| dx_error("创建初始渲染资源代际", error))?;
@@ -1918,6 +1961,7 @@ impl Dx12Renderer {
                 atrous_baseline_pipeline,
                 atrous_shared_pipeline,
                 tonemap_pipeline,
+                stable_plane_build_pipeline,
                 #[cfg(feature = "streamline")]
                 dlss_compose_pipeline,
                 #[cfg(feature = "streamline-rr")]
@@ -1970,6 +2014,7 @@ impl Dx12Renderer {
                 animate_model: config.animate_model,
                 atrous_mode: config.atrous_mode,
                 command_recording_mode: config.command_recording_mode,
+                path_space_mode: config.path_space_mode,
                 denoiser: config.denoiser,
                 denoiser_switch_count: 0,
                 animation_start: Instant::now(),
@@ -2233,6 +2278,93 @@ impl Dx12Renderer {
                 1,
                 16,
                 (&camera as *const CameraConstants).cast(),
+                0,
+            );
+
+            // RTXPT-style stable planes use two separate phases. The compute
+            // pass first follows only deterministic delta chains and records
+            // restart points. Each DXR fill then resumes one recorded branch.
+            // The legacy raygen still runs last during P2 so enabling the
+            // diagnostic path cannot alter the displayed reconstruction yet.
+            if self.path_space_mode == PathSpaceMode::StablePlanes {
+                let camera_words = camera_constant_words(&camera);
+                self.stable_plane_build_pipeline.bind(
+                    &self.command_list,
+                    self.active_generation
+                        .shader_heap
+                        .gpu_handle(STABLE_BUILD_TABLE_BASE),
+                    &camera_words,
+                );
+                self.stable_plane_build_pipeline
+                    .set_root_shader_resource_view(
+                        &self.command_list,
+                        self._acceleration_structures
+                            .instance_gpu_address(frame_index),
+                    );
+                self.command_list.Dispatch(
+                    render_extent.width.div_ceil(8),
+                    render_extent.height.div_ceil(8),
+                    1,
+                );
+                submit_global_uav_barrier(&self.command_list);
+
+                // A compute pipeline owns a different root signature, so all
+                // DXR root arguments must be rebound before replaying planes.
+                command_list4.SetComputeRootSignature(&self.raytracing_pipeline.root_signature);
+                command_list4.SetComputeRootDescriptorTable(
+                    0,
+                    self.active_generation
+                        .shader_heap
+                        .gpu_handle(DXR_TABLE_BASE),
+                );
+                command_list4.SetComputeRoot32BitConstants(
+                    1,
+                    camera_words.len() as u32,
+                    camera_words.as_ptr().cast(),
+                    0,
+                );
+                command_list4.SetComputeRootShaderResourceView(
+                    2,
+                    self._acceleration_structures
+                        .instance_gpu_address(frame_index),
+                );
+                command_list4
+                    .SetComputeRootDescriptorTable(3, self._sampler_heap.gpu_handle(0));
+                command_list4.SetPipelineState1(&self.raytracing_pipeline.state_object);
+
+                // Reverse plane order matches the later denoiser/compositor
+                // contract: dependent branches are resolved before plane 0.
+                for plane_index in (0..crate::path_space::STABLE_PLANE_COUNT).rev() {
+                    let pass_constants = [1u32, plane_index as u32];
+                    command_list4.SetComputeRoot32BitConstants(
+                        4,
+                        pass_constants.len() as u32,
+                        pass_constants.as_ptr().cast(),
+                        0,
+                    );
+                    let fill_dispatch = D3D12_DISPATCH_RAYS_DESC {
+                        RayGenerationShaderRecord: self.raytracing_pipeline.stable_fill_raygen,
+                        MissShaderTable: self.raytracing_pipeline.miss,
+                        HitGroupTable: self.raytracing_pipeline.hit_group,
+                        CallableShaderTable:
+                            D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE::default(),
+                        Width: render_extent.width,
+                        Height: render_extent.height,
+                        Depth: 1,
+                    };
+                    command_list4.DispatchRays(&fill_dispatch);
+                    submit_global_uav_barrier(&self.command_list);
+                }
+            }
+
+            // Pass zero is the existing monolithic path tracer. Explicitly
+            // initialize b1 even in legacy mode; relying on stale root data
+            // would make hot reload and mode switches nondeterministic.
+            let legacy_pass_constants = [0u32, 0u32];
+            command_list4.SetComputeRoot32BitConstants(
+                4,
+                legacy_pass_constants.len() as u32,
+                legacy_pass_constants.as_ptr().cast(),
                 0,
             );
             command_list4.SetPipelineState1(&self.raytracing_pipeline.state_object);
@@ -3306,6 +3438,12 @@ impl Dx12Renderer {
                     .mode
                     .as_str()
                     .to_string(),
+                path_space_mode: self.path_space_mode.as_str().to_string(),
+                stable_plane_allocated_bytes: self
+                    .active_generation
+                    .stable_planes
+                    .as_ref()
+                    .map_or(0, |stable_planes| stable_planes.allocated_bytes),
                 denoiser_backend: self.denoiser.as_str().to_string(),
                 upscaler_mode: self.upscaler.as_str().to_string(),
                 reflex_mode: self.reflex_mode_name().to_string(),
@@ -3478,6 +3616,7 @@ impl Dx12Renderer {
                     with_dlss_sr: !self.upscaler.is_native()
                         && self.denoiser != DenoiserBackend::DlssRayReconstruction,
                     with_dlss_rr: self.denoiser == DenoiserBackend::DlssRayReconstruction,
+                    with_stable_planes: self.path_space_mode == PathSpaceMode::StablePlanes,
                 },
             )?;
             self.next_generation_id = self.next_generation_id.saturating_add(1);
@@ -3646,6 +3785,7 @@ impl Dx12Renderer {
                 with_dlss_sr: !self.upscaler.is_native()
                     && self.denoiser != DenoiserBackend::DlssRayReconstruction,
                 with_dlss_rr: self.denoiser == DenoiserBackend::DlssRayReconstruction,
+                with_stable_planes: self.path_space_mode == PathSpaceMode::StablePlanes,
             },
         )
         .map_err(|error| {
@@ -3779,6 +3919,7 @@ impl Dx12Renderer {
                     with_dlss_sr: next.uses_streamline()
                         && self.denoiser != DenoiserBackend::DlssRayReconstruction,
                     with_dlss_rr: self.denoiser == DenoiserBackend::DlssRayReconstruction,
+                    with_stable_planes: self.path_space_mode == PathSpaceMode::StablePlanes,
                 },
             )
             .map_err(|error| {
@@ -3898,6 +4039,7 @@ impl Dx12Renderer {
                 with_dlss_sr: !self.upscaler.is_native()
                     && next != DenoiserBackend::DlssRayReconstruction,
                 with_dlss_rr: next == DenoiserBackend::DlssRayReconstruction,
+                with_stable_planes: self.path_space_mode == PathSpaceMode::StablePlanes,
             },
         )
         .map_err(|error| {
@@ -4263,6 +4405,12 @@ impl Dx12Renderer {
                     .saturating_sub(self.benchmark_extent_change_baseline),
                 atrous_mode: self.atrous_mode.as_str(),
                 command_recording_mode: self.command_recording_mode.as_str(),
+                path_space_mode: self.path_space_mode.as_str(),
+                stable_plane_allocated_bytes: self
+                    .active_generation
+                    .stable_planes
+                    .as_ref()
+                    .map_or(0, |stable_planes| stable_planes.allocated_bytes),
                 denoiser_backend: self.denoiser.as_str(),
                 upscaler_mode: self.upscaler.as_str(),
                 dlss_optimal: self.dlss_optimal_json(),
@@ -4541,6 +4689,8 @@ struct BenchmarkJsonContext<'a> {
     render_extent_change_count: u64,
     atrous_mode: &'a str,
     command_recording_mode: &'a str,
+    path_space_mode: &'a str,
+    stable_plane_allocated_bytes: u64,
     denoiser_backend: &'a str,
     upscaler_mode: &'a str,
     dlss_optimal: serde_json::Value,
@@ -4585,6 +4735,8 @@ fn benchmark_json_line(
         render_extent_change_count,
         atrous_mode,
         command_recording_mode,
+        path_space_mode,
+        stable_plane_allocated_bytes,
         denoiser_backend,
         upscaler_mode,
         dlss_optimal,
@@ -4649,6 +4801,13 @@ fn benchmark_json_line(
         "gpu_idle_wait_count": gpu_idle_wait_count,
         "render_scale_quantized_noop_count": render_scale_quantized_noop_count,
         "dynamic_resolution": dynamic_resolution,
+        "path_space": {
+            "requested": path_space_mode,
+            "active": path_space_mode,
+            "plane_count": if path_space_mode == "stable-planes" { crate::path_space::STABLE_PLANE_COUNT } else { 0 },
+            "consumer": if path_space_mode == "stable-planes" { "diagnostic-only" } else { "legacy" },
+            "allocated_bytes": stable_plane_allocated_bytes,
+        },
         "atrous_mode": atrous_mode,
         "upscaler": {
             "mode": upscaler_mode,
@@ -4905,6 +5064,9 @@ impl Dx12Renderer {
         generation
             .reconstruction_primary_emissive
             .collect_transition(&mut self.transition_batch, state);
+        if let Some(stable) = generation.stable_planes.as_mut() {
+            stable.collect_all(&mut self.transition_batch, state);
+        }
         #[cfg(feature = "nrd")]
         if let Some(nrd) = generation.nrd.as_mut() {
             for resource in [
@@ -5298,6 +5460,15 @@ impl Dx12Renderer {
             3,
             "Tone Map 与调试视图",
         )?;
+        let stable_plane_build = ComputePipeline::new_with_root_srv(
+            &self.device,
+            &shaders.stable_plane_build,
+            4,
+            5,
+            16,
+            4,
+            "阶段 11 RTXPT-style BuildStablePlanes",
+        )?;
         #[cfg(feature = "streamline")]
         let dlss_compose = ComputePipeline::new(
             &self.device,
@@ -5366,6 +5537,7 @@ impl Dx12Renderer {
         self.atrous_baseline_pipeline = atrous_baseline;
         self.atrous_shared_pipeline = atrous_shared;
         self.tonemap_pipeline = tonemap;
+        self.stable_plane_build_pipeline = stable_plane_build;
         #[cfg(feature = "streamline")]
         {
             self.dlss_compose_pipeline = dlss_compose;
@@ -5495,6 +5667,84 @@ unsafe fn create_texture_uav(
 ) {
     unsafe {
         device.CreateUnorderedAccessView(resource.resource(), None, None, heap.cpu_handle(index));
+    }
+}
+
+unsafe fn create_structured_uav(
+    device: &ID3D12Device,
+    heap: &DescriptorHeap,
+    index: usize,
+    resource: &TrackedResource,
+    element_count: u32,
+    stride: u32,
+) {
+    let description = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+        Format: DXGI_FORMAT_UNKNOWN,
+        ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+        Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+            Buffer: D3D12_BUFFER_UAV {
+                FirstElement: 0,
+                NumElements: element_count,
+                StructureByteStride: stride,
+                CounterOffsetInBytes: 0,
+                Flags: D3D12_BUFFER_UAV_FLAG_NONE,
+            },
+        },
+    };
+    unsafe {
+        device.CreateUnorderedAccessView(
+            resource.resource(),
+            None,
+            Some(&description),
+            heap.cpu_handle(index),
+        );
+    }
+}
+
+unsafe fn create_null_structured_uav(
+    device: &ID3D12Device,
+    heap: &DescriptorHeap,
+    index: usize,
+    stride: u32,
+) {
+    let description = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+        Format: DXGI_FORMAT_UNKNOWN,
+        ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+        Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+            Buffer: D3D12_BUFFER_UAV {
+                FirstElement: 0,
+                NumElements: 1,
+                StructureByteStride: stride,
+                CounterOffsetInBytes: 0,
+                Flags: D3D12_BUFFER_UAV_FLAG_NONE,
+            },
+        },
+    };
+    unsafe {
+        device.CreateUnorderedAccessView(None, None, Some(&description), heap.cpu_handle(index));
+    }
+}
+
+unsafe fn create_null_texture_array_uav(
+    device: &ID3D12Device,
+    heap: &DescriptorHeap,
+    index: usize,
+    format: DXGI_FORMAT,
+) {
+    let description = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+        Format: format,
+        ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2DARRAY,
+        Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+            Texture2DArray: D3D12_TEX2D_ARRAY_UAV {
+                MipSlice: 0,
+                FirstArraySlice: 0,
+                ArraySize: crate::path_space::STABLE_PLANE_COUNT as u32,
+                PlaneSlice: 0,
+            },
+        },
+    };
+    unsafe {
+        device.CreateUnorderedAccessView(None, None, Some(&description), heap.cpu_handle(index));
     }
 }
 
@@ -6333,6 +6583,8 @@ mod tests {
                 render_extent_change_count: 1,
                 atrous_mode: "shared",
                 command_recording_mode: "optimized",
+                path_space_mode: "stable-planes",
+                stable_plane_allocated_bytes: 228_556_800,
                 denoiser_backend: "svgf",
                 upscaler_mode: "native",
                 dlss_optimal: serde_json::Value::Null,
@@ -6377,6 +6629,8 @@ mod tests {
         assert_eq!(value["reconstruction_contract_version"], 1);
         assert_eq!(value["gpu_name"], "RTX 4060 \"Laptop\"");
         assert_eq!(value["resolution_mode"], "fixed");
+        assert_eq!(value["path_space"]["plane_count"], 3);
+        assert_eq!(value["path_space"]["consumer"], "diagnostic-only");
         assert!(value["dynamic_resolution"].is_null());
         assert_eq!(value["render_scale_requested"], 1.0);
         assert_eq!(value["render_generation_id"], 1);

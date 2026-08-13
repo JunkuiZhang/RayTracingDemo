@@ -32,6 +32,11 @@ fn main() {
             "cs_6_6",
         ),
         (
+            "shaders/stage11_stable_plane_build.hlsl",
+            "stage11_stable_plane_build.dxil",
+            "cs_6_6",
+        ),
+        (
             "shaders/stage10_dlss_input.hlsl",
             "stage10_dlss_input.dxil",
             "cs_6_6",
