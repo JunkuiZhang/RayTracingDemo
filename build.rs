@@ -161,7 +161,7 @@ fn emit_build_provenance() {
         .output()
         .ok()
         .filter(|output| output.status.success())
-        .map_or(true, |output| !output.stdout.is_empty());
+        .is_none_or(|output| !output.stdout.is_empty());
     let mut features = env::vars()
         .filter_map(|(name, _)| {
             name.strip_prefix("CARGO_FEATURE_")
