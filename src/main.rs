@@ -501,7 +501,7 @@ fn print_help() {
          --target-gpu-ms <毫秒>   动态目标，有限数值 4.0..50.0，默认 14.5\n  \
          --command-recording-mode <模式> 命令记录：baseline 或 optimized，默认 optimized\n  \
          --acceleration-structure-mode <模式> AS 策略：baseline 或 optimized，默认 baseline\n  \
-         --path-space-mode <模式> 路径空间：legacy 或 stable-planes，默认 legacy；P2 期间 stable-planes 仅生成诊断层\n  \
+         --path-space-mode <模式> 路径空间：legacy 或 stable-planes，默认 legacy；stable-planes 是 NRD/RR 候选路径，SVGF 下仅生成诊断层\n  \
          --denoiser <后端>       重建后端：svgf、nrd-reblur 或 dlss-rr，默认 svgf；RR 未指定时使用 dlss-quality\n  \
          --upscaler <模式>       上采样：native、dlaa、dlss-quality、dlss-balanced、dlss-performance，默认 native\n  \
          --reflex-mode <模式>    Reflex：off、on 或 on-boost，默认 on；feature-off 时 unavailable\n  \

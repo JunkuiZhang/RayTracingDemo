@@ -195,6 +195,27 @@ cargo run --release --features streamline-rr --locked -- --output-size 1280x720 
 或相机运动区域应显示非零运动。`specular-hit-distance` 仍用于检查备用距离，但 RR 不再提交该
 tag。详细短测见 [`docs/阶段11短测记录.md`](docs/阶段11短测记录.md)。
 
+### RTXPT-style stable planes（候选路径）
+
+阶段 11 另提供显式启用的 `stable-planes` 路径空间：在理想反射/折射处分解路径，每像素最多
+保存 3 个可独立重投影的稳定平面；NRD 为每个平面维护独立 REBLUR history 并反向合成，RR
+把全部平面合并成一次重建输入。闭合玻璃使用有优先级的嵌套介质列表和 Beer-Lambert 吸收，
+不再依赖 post-RR 屏幕空间玻璃补丁。
+
+NRD 与 RR 的候选路径分别这样运行：
+
+```powershell
+cargo run --release --features nrd -- --output-size 1280x720 --path-space-mode stable-planes --denoiser nrd-reblur
+cargo run --release --features streamline-rr --locked -- --output-size 1280x720 --path-space-mode stable-planes --denoiser dlss-rr --upscaler dlss-quality
+```
+
+需要 A/B 回退时，把 `--path-space-mode stable-planes` 改成 `--path-space-mode legacy`。当前默认
+仍是 `legacy`；这是为了在 720p/1080p 固定 ROI、动态观察、resize 和嵌套介质夹具完成验收前
+保留可靠回退，不代表 stable planes 只是一套接口。SVGF 不消费多平面，和
+`--path-space-mode stable-planes` 同时使用时只执行诊断生成。具体设计、证据和剩余准入项见
+[`docs/阶段11RTXPT路径空间重构执行方案.md`](docs/阶段11RTXPT路径空间重构执行方案.md) 与
+[`docs/阶段11RTXPT路径空间重构验收记录.md`](docs/阶段11RTXPT路径空间重构验收记录.md)。
+
 ## 阶段 8：性能优化（8A–8E-2、8G）
 
 8A 已建立可信 GPU 基线和显存遥测；8B 的 À-Trous shared tile 实验因 RTX 4060 Laptop 三档实测回退而未采纳；8C 的 barrier/bind 优化已设为默认并保留 baseline 回退；8D 已实现两阶段 AS 初始化、TLAS 策略、profitable BLAS compaction 和 allocation 遥测，但仓库小模型没有触发真实 compact copy，AS 默认仍为 baseline；8E-1 已完成输出/内部尺寸解耦和按 fence 退休的资源代际切换；8E-2 已实现由已完成 GPU Total timestamp 驱动的动态分辨率、旧 generation 样本隔离、双重冷却和 measurement/lifetime 遥测，并完成首轮 review 修复。8G 已补齐 typed DebugView、fence-safe PNG、image_diff、bounded 显存 measurement、正确 median、环境来源、五条 Debug raw 证据和有界 runner。自认证 commit paired 在同一 RTX 4060 Laptop/AC 环境下得到 candidate `0fdcb7f`/reference `2031abf` p95 median `7.91/7.84 ms`，差 `+0.893%`；同一 candidate 的 dynamic/fixed paired 为 `7.89/7.85 ms`，差 `+0.510%`，三次 dynamic 均保持原生 1920×1080、零切换。因此当前是绝对历史门槛 FAIL，但没有 commit regression 或 dynamic-mode regression，不应据此改 renderer。1800/600 秒长测、真实 F1/F2/resize/最小化/恢复/hot-reload、公开 PBR/大模型和 PIX UI 证据仍未执行，阶段 8 尚未完成。窗口标题显示阶段 8、命令记录模式、最近有效 GPU Total、滚动 p95、输出/内部尺寸、动态控制状态、generation、À-Trous 模式和 local VRAM usage/budget。
