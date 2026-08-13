@@ -485,6 +485,22 @@ mod tests {
     }
 
     #[test]
+    fn cornell_closed_box_bottoms_do_not_overlap_or_float_above_floor() {
+        let scene = SceneAsset::cornell_box();
+        for name in ["metal box face 5", "glass box face 5"] {
+            let bottom = scene
+                .primitives
+                .iter()
+                .find(|primitive| primitive.name == name)
+                .unwrap_or_else(|| panic!("missing Cornell primitive {name}"));
+            assert!(
+                bottom.vertices.iter().all(|vertex| vertex.position[1] < -1.0),
+                "{name} must remain slightly embedded below the floor"
+            );
+        }
+    }
+
+    #[test]
     fn scene_validation_rejects_out_of_range_texture_reference() {
         let mut scene = SceneAsset::cornell_box();
         scene.materials[0].base_color_texture = Some(TextureBindingAsset {

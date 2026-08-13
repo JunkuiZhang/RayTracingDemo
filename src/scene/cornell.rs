@@ -174,10 +174,11 @@ pub fn create() -> SceneAsset {
     add_box(
         &mut add,
         "glass box",
-        // Keep the closed dielectric slightly above the Cornell floor. A
-        // coplanar glass bottom and floor are an ambiguous zero-thickness
-        // medium boundary for DXR and show up as a temporally unstable strip.
-        [0.16666667, -0.995, 0.4],
+        // Keep the closed dielectric bottom below the Cornell floor. A
+        // coplanar bottom is an ambiguous zero-thickness medium boundary,
+        // while lifting the box exposes a real bright gap. A slight embed
+        // removes both cases and keeps the visible side/floor contact closed.
+        [0.16666667, -1.005, 0.4],
         [0.6666667, -0.5, 0.9],
         5.0_f32.to_radians(),
         5,
