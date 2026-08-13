@@ -569,8 +569,11 @@ function Get-RrGateFailures([object]$Result, [string]$CaseLabel) {
             }
         }
         $stderr = [string]$Result.stderr_raw
-        if ($stderr -match "(?i)device removed|DRED|NaN|Inf|silent fallback|静默回退") {
+        if ($stderr -match "(?i)device removed|DRED|NaN|Infinity|(?:^|\s)Inf(?:\s|$)|silent fallback|静默回退") {
             $failures.Add("stderr contains device removal, invalid guide, or fallback evidence")
+        }
+        if ($stderr -match "(?i)D3D12 Debug.*severity=ERROR|InfoQueue.*CORRUPTION\s+[1-9]|InfoQueue.*ERROR\s+[1-9]") {
+            $failures.Add("D3D12 Debug InfoQueue contains CORRUPTION or ERROR messages")
         }
         if ($CaseLabel -eq "rr_animated" -and
             [bool](Get-JsonPathValue $json "acceleration_structures.tlas_update_enabled") -ne $true) {
@@ -718,6 +721,9 @@ function Invoke-SelfTest {
     }
     Assert-Rejected "multiple_json_lines" {
         [pscustomobject]@{ exit_code = 0; timed_out = $false; timeout_seconds = 60; stdout_exact_one_json = $false; json = $null; json_error = "stdout must contain exactly one JSON line"; stderr_raw = "" }
+    }
+    Assert-Rejected "debug_infoqueue_error" {
+        $copy = $base.PSObject.Copy(); $copy.json = $validJson.PSObject.Copy(); $copy.stderr_raw = "D3D12 Debug InfoQueue：CORRUPTION 0，ERROR 1"; $copy
     }
     [ordered]@{ self_test = "passed"; gpu_started = $false; rejected_cases = @($cases) } | ConvertTo-Json -Compress -Depth 20
 }
