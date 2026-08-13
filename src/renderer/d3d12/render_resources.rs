@@ -1262,7 +1262,7 @@ impl RenderResourceGeneration {
                     depth,
                     &rr.primary_motion,
                     &self.histories[current_index].moments,
-                    rejection,
+                    &rr.boundary_mask,
                     &self.histories[current_index].length,
                     &rr.primary_surface_id[current_index],
                     reconstruction_specular_hit_distance,
