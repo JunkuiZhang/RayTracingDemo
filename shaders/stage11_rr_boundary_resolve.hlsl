@@ -108,7 +108,27 @@ bool IsBoundary(
     float4 centerMeta)
 {
     if (!ValidSurface(centerId, centerMeta))
-        return true;
+    {
+        // A large continuous miss region is not a geometry boundary. Only a
+        // miss directly touching a valid primary surface needs a mask bit;
+        // otherwise the debug view would make the background look like a
+        // full-screen rejection region.
+        for (int y = -1; y <= 1; ++y)
+        {
+            for (int x = -1; x <= 1; ++x)
+            {
+                int2 neighbor = int2(pixel) + int2(x, y);
+                if (neighbor.x < 0 || neighbor.y < 0
+                    || neighbor.x >= int(size.x) || neighbor.y >= int(size.y))
+                    continue;
+                if (ValidSurface(
+                        CurrentSurfaceId.Load(int3(neighbor, 0)),
+                        CurrentSurfaceMeta.Load(int3(neighbor, 0))))
+                    return true;
+            }
+        }
+        return false;
+    }
     float3 centerNormal = DecodeOctNormal(centerMeta.xy);
     for (int y = -1; y <= 1; ++y)
     {
