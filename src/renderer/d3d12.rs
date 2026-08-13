@@ -6374,10 +6374,18 @@ mod tests {
             if !motion_pixels.is_finite() || motion_pixels > 2.0 {
                 return None;
             }
-            Some(if motion_pixels > 0.5 { 4.0 } else { 32.0 })
+            Some(if motion_pixels <= 0.01 {
+                128.0
+            } else if motion_pixels > 0.5 {
+                4.0
+            } else {
+                32.0
+            })
         }
 
-        assert_eq!(history_limit(0.0), Some(32.0));
+        assert_eq!(history_limit(0.0), Some(128.0));
+        assert_eq!(history_limit(0.01), Some(128.0));
+        assert_eq!(history_limit(0.0101), Some(32.0));
         assert_eq!(history_limit(0.5), Some(32.0));
         assert_eq!(history_limit(0.5001), Some(4.0));
         assert_eq!(history_limit(2.0), Some(4.0));
@@ -6393,7 +6401,9 @@ mod tests {
             "previousId != currentId",
             "dot(currentNormal, previousNormal) < NORMAL_DOT_THRESHOLD",
             "previousMeta.z - currentMeta.w",
-            "MAX_HISTORY_COUNT",
+            "BOUNDARY_RADIUS",
+            "STATIC_HISTORY_COUNT",
+            "SLOW_MOVING_HISTORY_COUNT",
             "MOTION_REJECT_PIXELS",
         ] {
             assert!(

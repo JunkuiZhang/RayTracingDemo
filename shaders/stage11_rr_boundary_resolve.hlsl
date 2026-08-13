@@ -29,7 +29,16 @@ static const float NORMAL_DOT_THRESHOLD = 0.95;
 static const float DEPTH_RELATIVE_THRESHOLD = 0.01;
 static const float DEPTH_ABSOLUTE_THRESHOLD = 0.01;
 static const float MIN_HISTORY_WEIGHT = 0.25;
-static const float MAX_HISTORY_COUNT = 32.0;
+// RR reconstructs an output pixel from a neighborhood rather than from one
+// exact primary ray. Cover two output pixels on both sides of an opaque edge
+// so the stabilizer contains that reconstruction footprint.
+static const int BOUNDARY_RADIUS = 2;
+// A truly static surface can safely retain a longer bounded average because
+// ID, normal, depth and shading guards below still reject real changes. As
+// soon as motion appears, shorten history aggressively to avoid ghost trails.
+static const float STATIC_MOTION_PIXELS = 0.01;
+static const float STATIC_HISTORY_COUNT = 128.0;
+static const float SLOW_MOVING_HISTORY_COUNT = 32.0;
 static const float MOVING_HISTORY_COUNT = 4.0;
 static const float MOTION_CLAMP_PIXELS = 0.5;
 static const float MOTION_REJECT_PIXELS = 2.0;
@@ -40,6 +49,11 @@ static const float SHADING_REJECTION_ABSOLUTE = 0.05;
 // A small relative expansion prevents half-precision guide quantization from
 // rejecting a valid tap while keeping the clamp inside the same surface.
 static const float YCOCG_CLAMP_RELATIVE_EXPANSION = 0.02;
+// At a verified static boundary, RR can move every sample in the small
+// same-surface neighborhood together. A wider bound prevents that stochastic
+// footprint from dragging an otherwise valid history on every frame. This is
+// never used for moving geometry/cameras, and the shading guard remains active.
+static const float STATIC_YCOCG_CLAMP_RELATIVE_EXPANSION = 0.25;
 
 bool FiniteValue(float value)
 {
@@ -113,9 +127,9 @@ bool IsBoundary(
         // miss directly touching a valid primary surface needs a mask bit;
         // otherwise the debug view would make the background look like a
         // full-screen rejection region.
-        for (int y = -1; y <= 1; ++y)
+        for (int y = -BOUNDARY_RADIUS; y <= BOUNDARY_RADIUS; ++y)
         {
-            for (int x = -1; x <= 1; ++x)
+            for (int x = -BOUNDARY_RADIUS; x <= BOUNDARY_RADIUS; ++x)
             {
                 int2 neighbor = int2(pixel) + int2(x, y);
                 if (neighbor.x < 0 || neighbor.y < 0
@@ -130,9 +144,9 @@ bool IsBoundary(
         return false;
     }
     float3 centerNormal = DecodeOctNormal(centerMeta.xy);
-    for (int y = -1; y <= 1; ++y)
+    for (int y = -BOUNDARY_RADIUS; y <= BOUNDARY_RADIUS; ++y)
     {
-        for (int x = -1; x <= 1; ++x)
+        for (int x = -BOUNDARY_RADIUS; x <= BOUNDARY_RADIUS; ++x)
         {
             int2 neighbor = int2(pixel) + int2(x, y);
             if (neighbor.x < 0 || neighbor.y < 0
@@ -271,8 +285,11 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
         WriteCurrent(pixel, currentColor, mask | BOUNDARY_MASK_SHADING_REJECT, 1.0);
         return;
     }
+    float clampExpansion = motionLength <= STATIC_MOTION_PIXELS
+        ? STATIC_YCOCG_CLAMP_RELATIVE_EXPANSION
+        : YCOCG_CLAMP_RELATIVE_EXPANSION;
     float3 margin = max(abs(yCoCgMin), abs(yCoCgMax))
-        * YCOCG_CLAMP_RELATIVE_EXPANSION + 0.001;
+        * clampExpansion + 0.001;
     float3 clampedYCoCg = clamp(
         RgbToYCoCg(historyColor),
         yCoCgMin - margin,
@@ -290,9 +307,11 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
         return;
     }
 
-    float maxCount = motionLength > MOTION_CLAMP_PIXELS
-        ? MOVING_HISTORY_COUNT
-        : MAX_HISTORY_COUNT;
+    float maxCount = motionLength <= STATIC_MOTION_PIXELS
+        ? STATIC_HISTORY_COUNT
+        : (motionLength > MOTION_CLAMP_PIXELS
+            ? MOVING_HISTORY_COUNT
+            : SLOW_MOVING_HISTORY_COUNT);
     historyCount = clamp(historyCount, 1.0, maxCount);
     float historyWeight = historyCount / (historyCount + 1.0);
     float3 resolved = lerp(currentColor, clampedHistory, historyWeight);
