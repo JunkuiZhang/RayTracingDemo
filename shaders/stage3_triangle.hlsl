@@ -517,6 +517,42 @@ float3 ComputeReconstructionSpecularAlbedo(float3 f0, float roughness, float NoV
     return max(f0 * ab.x + ab.y, 0.0.xxx);
 }
 
+void ComputeStableNrdMaterialFactors(
+    float3 baseColor,
+    float metallic,
+    float roughness,
+    float NoV,
+    out float3 diffuseFactor,
+    out float3 specularFactor)
+{
+    // Locked to NRD 4.17.3 NRD_MaterialFactors. The stable record must carry
+    // exactly the factors used for front-end demodulation and back-end restore;
+    // the older EnvBRDF approximation is intentionally not mixed into REBLUR.
+    float m = saturate(roughness * roughness);
+    float4 x = float4(1.0, NoV, NoV * NoV, NoV * NoV * NoV);
+    float4 y = float4(1.0, m, m * m, m * m * m);
+    const float2x2 m1 = float2x2(0.99044, -1.28514, 1.29678, -0.755907);
+    const float3x3 m2 = float3x3(
+        1.0, 2.92338, 59.4188,
+        20.3225, -27.0302, 222.592,
+        121.563, 626.13, 316.627);
+    const float2x2 m3 = float2x2(0.0365463, 3.32707, 9.0632, -9.04756);
+    const float3x3 m4 = float3x3(
+        1.0, 3.59685, -1.36772,
+        9.04401, -16.3174, 9.22949,
+        5.56589, 19.7886, -20.2123);
+    float bias = dot(mul(m1, x.xy), y.xy)
+        / max(dot(mul(m2, x.xyw), y.xyw), 1.0e-6);
+    float scale = dot(mul(m3, x.xy), y.xy)
+        / max(dot(mul(m4, x.xzw), y.xyw), 1.0e-6);
+    float3 f0 = lerp(0.04.xxx, baseColor, metallic);
+    float3 environmentFresnel = saturate(f0 * scale + bias);
+    float3 diffuseAlbedo = baseColor * (1.0 - metallic);
+    diffuseFactor = lerp(0.02.xxx, 1.0.xxx, (1.0 - environmentFresnel) * diffuseAlbedo);
+    specularFactor = environmentFresnel * lerp(0.1, 1.0, roughness);
+    specularFactor = lerp(0.02.xxx, 1.0.xxx, specularFactor);
+}
+
 float3 FiniteNonNegative(float3 value)
 {
     return all(isfinite(value)) ? max(value, 0.0.xxx) : 0.0.xxx;
@@ -528,7 +564,8 @@ void WriteStablePlaneGuides(
     float3 baseColor,
     float metallic,
     float roughness,
-    uint kind)
+    uint kind,
+    float3 emissive)
 {
     uint2 pixel = DispatchRaysIndex().xy;
     uint2 extent = DispatchRaysDimensions().xy;
@@ -564,17 +601,22 @@ void WriteStablePlaneGuides(
             previousViewZ - viewZ);
     float3 viewDirection = normalize(-WorldRayDirection());
     float NoV = saturate(dot(normal, viewDirection));
-    float3 f0 = lerp(0.04.xxx, baseColor, metallic);
+    float3 diffuseFactor;
+    float3 specularFactor;
+    ComputeStableNrdMaterialFactors(
+        baseColor,
+        metallic,
+        roughness,
+        NoV,
+        diffuseFactor,
+        specularFactor);
 
     StablePlaneRecord guide;
     guide.data0 = float4(normal, roughness);
-    guide.data1 = float4(FiniteNonNegative(baseColor * (1.0 - metallic)), viewZ);
-    guide.data2 = float4(
-        FiniteNonNegative(ComputeReconstructionSpecularAlbedo(f0, roughness, NoV)),
-        float(kind));
-    guide.data3 = float4(
-        motion,
-        (payload.psrThroughput.x + payload.psrThroughput.y + payload.psrThroughput.z) / 3.0);
+    guide.data1 = float4(FiniteNonNegative(diffuseFactor), viewZ);
+    guide.data2 = float4(FiniteNonNegative(specularFactor), float(kind));
+    guide.data3 = float4(motion, asfloat(PackStableHdr(
+        payload.psrThroughput * FiniteNonNegative(emissive))));
     StablePlaneRecords[address] = guide;
 }
 
@@ -951,10 +993,10 @@ void StableFillRayGen()
 
     StablePlaneNoisyDiffuse[uint3(pixel, StablePlaneIndex)] = float4(
         FiniteNonNegative(planeThroughput * payload.rawDiffuse),
-        1.0);
+        payload.lastPdf);
     StablePlaneNoisySpecular[uint3(pixel, StablePlaneIndex)] = float4(
         FiniteNonNegative(planeThroughput * payload.rawSpecular),
-        1.0);
+        payload.hitDistance);
 }
 
 [shader("miss")]
@@ -1053,7 +1095,14 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         && kind != 2u;
 
     if (PathSpacePass == 1u && payload.depth == 0u)
-        WriteStablePlaneGuides(payload, normal, baseColor.xyz, metallic, roughness, kind);
+        WriteStablePlaneGuides(
+            payload,
+            normal,
+            baseColor.xyz,
+            metallic,
+            roughness,
+            kind,
+            emissive);
 
     if (isPsrSurface)
     {
@@ -1670,6 +1719,14 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
             diffuseHitDistance = child.hitDistance;
         if (any(specularBounceWeight > 0.0))
             specularHitDistance = child.hitDistance;
+        if (PathSpacePass == 1u)
+        {
+            // A stable fill root has no parent MIS consumer after it returns.
+            // Reuse these two output slots instead of increasing the recursive
+            // 96-byte payload paid by every path vertex.
+            payload.lastPdf = diffuseHitDistance;
+            payload.hitDistance = specularHitDistance;
+        }
         // Trace reflection tracking independently from the noisy radiance
         // sample. Explicit reflected-geometry motion avoids the residual
         // subpixel wobble produced when RR derives it from scalar hitT.

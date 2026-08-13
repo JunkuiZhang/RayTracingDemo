@@ -52,6 +52,34 @@ float3 DecodeStableDirection(float2 encoded)
     return normalize(direction);
 }
 
+// Unsigned RGB9E5-style packing keeps per-plane emissive separate from the
+// noisy specular signal without growing the 64-byte restart/guide record.
+// The shared exponent is sufficient for radiance and exactly preserves zero.
+uint PackStableHdr(float3 value)
+{
+    value = all(isfinite(value)) ? max(value, 0.0.xxx) : 0.0.xxx;
+    float maximum = min(max(value.x, max(value.y, value.z)), 65408.0);
+    if (maximum <= 0.0)
+        return 0u;
+    int exponent = clamp(int(floor(log2(maximum))) + 1, -15, 16);
+    float scale = exp2(float(exponent) - 9.0);
+    uint3 mantissa = min(uint3(round(value / scale)), 511u.xxx);
+    uint biasedExponent = uint(exponent + 15);
+    return mantissa.x
+        | (mantissa.y << 9u)
+        | (mantissa.z << 18u)
+        | (biasedExponent << 27u);
+}
+
+float3 UnpackStableHdr(uint packed)
+{
+    if (packed == 0u)
+        return 0.0.xxx;
+    uint3 mantissa = uint3(packed, packed >> 9u, packed >> 18u) & 511u;
+    int exponent = int(packed >> 27u) - 15;
+    return float3(mantissa) * exp2(float(exponent) - 9.0);
+}
+
 bool IsPersistentStableBranch(uint branchId)
 {
     return branchId != STABLE_BRANCH_JUST_STARTED

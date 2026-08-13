@@ -41,6 +41,10 @@ pub struct ReloadedShaders {
     pub nrd_prep: Vec<u8>,
     #[cfg(feature = "nrd")]
     pub nrd_compose: Vec<u8>,
+    #[cfg(feature = "nrd")]
+    pub nrd_stable_prep: Vec<u8>,
+    #[cfg(feature = "nrd")]
+    pub nrd_stable_compose: Vec<u8>,
 }
 
 /// Debug-only shader reloader. A changed source causes the complete compatible
@@ -145,6 +149,18 @@ impl ShaderReloader {
                     "stage9_nrd_compose.dxil",
                     "cs_6_6",
                     Some(nrd_shader_root),
+                ),
+                (
+                    "stage11_nrd_stable_prep.hlsl",
+                    "stage11_nrd_stable_prep.dxil",
+                    "cs_6_6",
+                    Some(PathBuf::from(env!("RAY_TRACING_NRD_SHADER_DIR"))),
+                ),
+                (
+                    "stage11_nrd_stable_compose.hlsl",
+                    "stage11_nrd_stable_compose.dxil",
+                    "cs_6_6",
+                    Some(PathBuf::from(env!("RAY_TRACING_NRD_SHADER_DIR"))),
                 ),
             ]);
             descriptions
@@ -293,6 +309,16 @@ impl ShaderReloader {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             },
+            #[cfg(feature = "nrd")]
+            nrd_stable_prep: match read(nrd_base + 2) {
+                Ok(value) => value,
+                Err(error) => return Some(Err(error)),
+            },
+            #[cfg(feature = "nrd")]
+            nrd_stable_compose: match read(nrd_base + 3) {
+                Ok(value) => value,
+                Err(error) => return Some(Err(error)),
+            },
         };
         for source in &mut self.sources {
             source.last_modified = source
@@ -396,7 +422,12 @@ mod tests {
         #[cfg(feature = "nrd")]
         let expected = {
             let mut expected = expected;
-            expected.extend(["stage9_nrd_prep.hlsl", "stage9_nrd_compose.hlsl"]);
+            expected.extend([
+                "stage9_nrd_prep.hlsl",
+                "stage9_nrd_compose.hlsl",
+                "stage11_nrd_stable_prep.hlsl",
+                "stage11_nrd_stable_compose.hlsl",
+            ]);
             expected
         };
         assert_eq!(names, expected);
@@ -408,6 +439,8 @@ mod tests {
                 + 4 * usize::from(cfg!(feature = "streamline-rr"));
             assert!(reloader.sources[nrd_base].extra_include.is_some());
             assert!(reloader.sources[nrd_base + 1].extra_include.is_some());
+            assert!(reloader.sources[nrd_base + 2].extra_include.is_some());
+            assert!(reloader.sources[nrd_base + 3].extra_include.is_some());
         }
         #[cfg(feature = "streamline")]
         assert_eq!(names[6], "stage10_dlss_input.hlsl");

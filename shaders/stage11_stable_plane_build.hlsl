@@ -168,6 +168,15 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 
             PathInteriorList interior;
             interior.slots = state.interiorSlots;
+            uint currentMaterial = interior.TopMaterial();
+            if (currentMaterial != NO_INTERIOR_MATERIAL)
+            {
+                // Closed media tint by traveled distance, not by repeatedly
+                // multiplying the interface base color. This is the same
+                // Beer-Lambert convention used by RTXPT-style nested media.
+                state.throughput *= exp(
+                    -max(Materials[currentMaterial].absorptionCoefficient, 0.0.xxx) * hitT);
+            }
             if (dielectric && !MaterialIsThinSurface(material)
                 && !interior.IsTrueIntersection(MaterialNestedPriority(material)))
             {
@@ -218,7 +227,6 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
                 break;
             }
 
-            uint currentMaterial = interior.TopMaterial();
             float incidentIor = currentMaterial == NO_INTERIOR_MATERIAL
                 ? 1.0
                 : max(Materials[currentMaterial].ior, 1.0e-4);

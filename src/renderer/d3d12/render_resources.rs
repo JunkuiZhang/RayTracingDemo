@@ -20,7 +20,7 @@ use super::{
     STABLE_PLANE_RECORD_UAV_REGISTER, STABLE_PLANE_SPECULAR_UAV_REGISTER,
     STABLE_RADIANCE_UAV_REGISTER, TEMPORAL_TABLE_BASES, TONEMAP_TABLE_BASES,
     create_null_structured_uav, create_null_texture_array_uav, create_structured_srv,
-    create_structured_uav, create_texture_uav,
+    create_structured_uav, create_texture_srv, create_texture_uav,
     descriptor::DescriptorHeap,
     populate_texture_table,
     raytracing::{AccelerationStructures, SceneGeometry},
@@ -31,7 +31,10 @@ use super::{
 #[cfg(feature = "streamline")]
 use super::{DLSS_COMPOSE_TABLE_BASES, DLSS_TONEMAP_TABLE_BASE, create_null_texture_srv};
 #[cfg(feature = "nrd")]
-use super::{NRD_COMPOSE_TABLE_BASE, NRD_PREP_TABLE_BASE};
+use super::{
+    NRD_COMPOSE_TABLE_BASE, NRD_PREP_TABLE_BASE, NRD_STABLE_COMPOSE_TABLE_BASES,
+    NRD_STABLE_PREP_TABLE_BASES,
+};
 
 unsafe fn create_acceleration_structure_srv(
     device: &ID3D12Device,
@@ -125,8 +128,10 @@ pub(super) struct NrdDenoiserResources {
 
 #[cfg(feature = "nrd")]
 pub(super) struct NrdGenerationResources {
-    pub(super) primary: NrdDenoiserResources,
-    pub(super) transmission: NrdDenoiserResources,
+    // Legacy owns primary/transmission layers; stable-plane mode owns exactly
+    // STABLE_PLANE_COUNT independent histories. A Vec keeps creation fallible
+    // without unsafe partially-initialized arrays.
+    pub(super) layers: Vec<NrdDenoiserResources>,
     // The refracted layer mirrors the primary reconstruction contract so its
     // material factors and temporal guides describe the surface behind glass,
     // never the glass interface itself.
@@ -591,14 +596,29 @@ impl RenderResourceGeneration {
         let _ = with_dlss_rr;
         #[cfg(feature = "nrd")]
         let nrd = if with_nrd {
-            Some(NrdGenerationResources {
-                primary: create_nrd_denoiser_resources(device, render_extent, id, "primary")?,
-                transmission: create_nrd_denoiser_resources(
+            let layer_count = if with_stable_planes {
+                STABLE_PLANE_COUNT
+            } else {
+                2
+            };
+            let mut layers = Vec::with_capacity(layer_count);
+            for layer_index in 0..layer_count {
+                let label = if with_stable_planes {
+                    format!("stable-plane-{layer_index}")
+                } else if layer_index == 0 {
+                    "primary".to_string()
+                } else {
+                    "transmission".to_string()
+                };
+                layers.push(create_nrd_denoiser_resources(
                     device,
                     render_extent,
                     id,
-                    "transmission",
-                )?,
+                    &label,
+                )?);
+            }
+            Some(NrdGenerationResources {
+                layers,
                 transmission_raw_diffuse: create_uav_texture(
                     device,
                     render_extent,
@@ -1079,7 +1099,7 @@ impl RenderResourceGeneration {
 
         #[cfg(feature = "nrd")]
         if let Some(nrd) = self.nrd.as_ref() {
-            let primary = &nrd.primary;
+            let primary = &nrd.layers[0];
             let prep_srvs = [
                 raw_diffuse,
                 raw_specular,
@@ -1112,7 +1132,7 @@ impl RenderResourceGeneration {
                 )
             };
 
-            let transmission = &nrd.transmission;
+            let transmission = &nrd.layers[1];
             let transmission_prep_srvs = [
                 &nrd.transmission_raw_diffuse,
                 &nrd.transmission_raw_specular,
@@ -1168,6 +1188,104 @@ impl RenderResourceGeneration {
                     &compose_uavs,
                 )
             };
+
+            if let Some(stable) = self.stable_planes.as_ref() {
+                debug_assert_eq!(nrd.layers.len(), STABLE_PLANE_COUNT);
+                for (plane_index, layer) in nrd.layers.iter().enumerate() {
+                    let prep_base = NRD_STABLE_PREP_TABLE_BASES[plane_index];
+                    unsafe {
+                        create_texture_srv(
+                            device,
+                            &self.shader_heap,
+                            prep_base,
+                            &stable.noisy_diffuse,
+                        );
+                        create_texture_srv(
+                            device,
+                            &self.shader_heap,
+                            prep_base + 1,
+                            &stable.noisy_specular,
+                        );
+                        create_structured_srv(
+                            device,
+                            &self.shader_heap,
+                            prep_base + 2,
+                            stable.records.resource(),
+                            stable.record_count,
+                            STABLE_PLANE_RECORD_STRIDE as u32,
+                        );
+                        create_texture_srv(
+                            device,
+                            &self.shader_heap,
+                            prep_base + 3,
+                            &stable.headers,
+                        );
+                        for (offset, resource) in [
+                            &layer.diffuse_input,
+                            &layer.specular_input,
+                            &layer.normal_roughness,
+                            &layer.motion,
+                            &layer.view_z,
+                            &layer.diffuse_factor,
+                            &layer.specular_factor,
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            create_texture_uav(
+                                device,
+                                &self.shader_heap,
+                                prep_base + 4 + offset,
+                                resource,
+                            );
+                        }
+
+                        let compose_base = NRD_STABLE_COMPOSE_TABLE_BASES[plane_index];
+                        for (offset, resource) in [
+                            &layer.diffuse_output,
+                            &layer.specular_output,
+                            &layer.diffuse_factor,
+                            &layer.specular_factor,
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            create_texture_srv(
+                                device,
+                                &self.shader_heap,
+                                compose_base + offset,
+                                resource,
+                            );
+                        }
+                        create_structured_srv(
+                            device,
+                            &self.shader_heap,
+                            compose_base + 4,
+                            stable.records.resource(),
+                            stable.record_count,
+                            STABLE_PLANE_RECORD_STRIDE as u32,
+                        );
+                        create_texture_srv(
+                            device,
+                            &self.shader_heap,
+                            compose_base + 5,
+                            &stable.headers,
+                        );
+                        create_texture_uav(
+                            device,
+                            &self.shader_heap,
+                            compose_base + 6,
+                            &self.filter_diffuse_pong,
+                        );
+                        create_texture_uav(
+                            device,
+                            &self.shader_heap,
+                            compose_base + 7,
+                            &self.filter_specular_pong,
+                        );
+                    }
+                }
+            }
         }
 
         for current_index in 0..2 {

@@ -77,6 +77,8 @@ fn main() {
     println!("cargo:rerun-if-changed=native/nrd_bridge/src/nrd_bridge.cpp");
     println!("cargo:rerun-if-changed=shaders/stage9_nrd_prep.hlsl");
     println!("cargo:rerun-if-changed=shaders/stage9_nrd_compose.hlsl");
+    println!("cargo:rerun-if-changed=shaders/stage11_nrd_stable_prep.hlsl");
+    println!("cargo:rerun-if-changed=shaders/stage11_nrd_stable_compose.hlsl");
     println!("cargo:rerun-if-env-changed=NRD_SOURCE_DIR");
     println!("cargo:rerun-if-env-changed=NRI_SOURCE_DIR");
     println!("cargo:rerun-if-env-changed=MATHLIB_SOURCE_DIR");
@@ -125,6 +127,20 @@ fn main() {
             &dxc,
             "shaders/stage9_nrd_compose.hlsl",
             &output_directory.join("stage9_nrd_compose.dxil"),
+            "cs_6_6",
+            Some(&nrd_shader_directory),
+        );
+        compile_shader(
+            &dxc,
+            "shaders/stage11_nrd_stable_prep.hlsl",
+            &output_directory.join("stage11_nrd_stable_prep.dxil"),
+            "cs_6_6",
+            Some(&nrd_shader_directory),
+        );
+        compile_shader(
+            &dxc,
+            "shaders/stage11_nrd_stable_compose.hlsl",
+            &output_directory.join("stage11_nrd_stable_compose.dxil"),
             "cs_6_6",
             Some(&nrd_shader_directory),
         );

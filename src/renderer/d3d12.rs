@@ -1068,15 +1068,31 @@ const SHADER_DESCRIPTOR_COUNT: usize = 328;
 #[cfg(all(feature = "nrd", not(feature = "streamline")))]
 const STABLE_BUILD_TABLE_BASE: usize = 368;
 #[cfg(all(feature = "nrd", not(feature = "streamline")))]
-const SHADER_DESCRIPTOR_COUNT: usize = 377;
-#[cfg(all(feature = "streamline", not(feature = "streamline-rr")))]
+const SHADER_DESCRIPTOR_COUNT: usize = 434;
+#[cfg(all(
+    feature = "streamline",
+    not(feature = "streamline-rr"),
+    not(feature = "nrd")
+))]
 const STABLE_BUILD_TABLE_BASE: usize = 391;
-#[cfg(all(feature = "streamline", not(feature = "streamline-rr")))]
+#[cfg(all(
+    feature = "streamline",
+    not(feature = "streamline-rr"),
+    not(feature = "nrd")
+))]
 const SHADER_DESCRIPTOR_COUNT: usize = 400;
-#[cfg(feature = "streamline-rr")]
+#[cfg(all(feature = "streamline", not(feature = "streamline-rr"), feature = "nrd"))]
+const STABLE_BUILD_TABLE_BASE: usize = 391;
+#[cfg(all(feature = "streamline", not(feature = "streamline-rr"), feature = "nrd"))]
+const SHADER_DESCRIPTOR_COUNT: usize = 457;
+#[cfg(all(feature = "streamline-rr", not(feature = "nrd")))]
 const STABLE_BUILD_TABLE_BASE: usize = 501;
-#[cfg(feature = "streamline-rr")]
+#[cfg(all(feature = "streamline-rr", not(feature = "nrd")))]
 const SHADER_DESCRIPTOR_COUNT: usize = 510;
+#[cfg(all(feature = "streamline-rr", feature = "nrd"))]
+const STABLE_BUILD_TABLE_BASE: usize = 501;
+#[cfg(all(feature = "streamline-rr", feature = "nrd"))]
+const SHADER_DESCRIPTOR_COUNT: usize = 567;
 const DXR_UAV_REGISTER_COUNT: usize = 37;
 const RECONSTRUCTION_DIFFUSE_HIT_DISTANCE_UAV_REGISTER: usize = 15;
 const RECONSTRUCTION_SPECULAR_HIT_DISTANCE_UAV_REGISTER: usize = 16;
@@ -1118,6 +1134,16 @@ const NRD_PREP_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage9_
 #[cfg(feature = "nrd")]
 const NRD_COMPOSE_SHADER: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/stage9_nrd_compose.dxil"));
+#[cfg(feature = "nrd")]
+const NRD_STABLE_PREP_SHADER: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/stage11_nrd_stable_prep.dxil"
+));
+#[cfg(feature = "nrd")]
+const NRD_STABLE_COMPOSE_SHADER: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/stage11_nrd_stable_compose.dxil"
+));
 #[cfg(feature = "streamline")]
 const DLSS_COMPOSE_SHADER: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/stage10_dlss_input.dxil"));
@@ -1180,6 +1206,18 @@ const NRD_PREP_TABLE_BASE: usize = 319;
 const NRD_TRANSMISSION_PREP_TABLE_BASE: usize = 337;
 #[cfg(feature = "nrd")]
 const NRD_COMPOSE_TABLE_BASE: usize = 355;
+#[cfg(feature = "nrd")]
+const NRD_STABLE_PREP_TABLE_BASES: [usize; crate::path_space::STABLE_PLANE_COUNT] = [
+    STABLE_BUILD_TABLE_BASE + 9,
+    STABLE_BUILD_TABLE_BASE + 20,
+    STABLE_BUILD_TABLE_BASE + 31,
+];
+#[cfg(feature = "nrd")]
+const NRD_STABLE_COMPOSE_TABLE_BASES: [usize; crate::path_space::STABLE_PLANE_COUNT] = [
+    STABLE_BUILD_TABLE_BASE + 42,
+    STABLE_BUILD_TABLE_BASE + 50,
+    STABLE_BUILD_TABLE_BASE + 58,
+];
 const TEMPORAL_TABLE_BASES: [usize; 2] = [173, 201];
 const ATROUS_HISTORY_TABLE_BASES: [usize; 2] = [229, 239];
 const ATROUS_PING_TO_PONG_BASES: [usize; 2] = [249, 259];
@@ -1461,6 +1499,10 @@ pub struct Dx12Renderer {
     nrd_prep_pipeline: ComputePipeline,
     #[cfg(feature = "nrd")]
     nrd_compose_pipeline: ComputePipeline,
+    #[cfg(feature = "nrd")]
+    nrd_stable_prep_pipeline: ComputePipeline,
+    #[cfg(feature = "nrd")]
+    nrd_stable_compose_pipeline: ComputePipeline,
     #[cfg(feature = "streamline")]
     streamline: Option<StreamlineRuntime>,
     #[cfg(feature = "streamline")]
@@ -1787,6 +1829,26 @@ impl Dx12Renderer {
                 "阶段 9 NRD REBLUR 输出合成",
             )
             .map_err(|error| dx_error("创建 NRD 输出合成管线", error))?;
+            #[cfg(feature = "nrd")]
+            let nrd_stable_prep_pipeline = ComputePipeline::new(
+                &device,
+                NRD_STABLE_PREP_SHADER,
+                4,
+                7,
+                1,
+                "阶段 11 stable-plane NRD 输入准备",
+            )
+            .map_err(|error| dx_error("创建 stable-plane NRD 输入准备管线", error))?;
+            #[cfg(feature = "nrd")]
+            let nrd_stable_compose_pipeline = ComputePipeline::new(
+                &device,
+                NRD_STABLE_COMPOSE_SHADER,
+                6,
+                2,
+                2,
+                "阶段 11 stable-plane NRD 反向合成",
+            )
+            .map_err(|error| dx_error("创建 stable-plane NRD 合成管线", error))?;
             command_list.Close()?;
 
             let fence: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_NONE)?;
@@ -1976,6 +2038,10 @@ impl Dx12Renderer {
                 nrd_prep_pipeline,
                 #[cfg(feature = "nrd")]
                 nrd_compose_pipeline,
+                #[cfg(feature = "nrd")]
+                nrd_stable_prep_pipeline,
+                #[cfg(feature = "nrd")]
+                nrd_stable_compose_pipeline,
                 #[cfg(feature = "streamline")]
                 streamline,
                 #[cfg(feature = "streamline")]
@@ -3439,6 +3505,7 @@ impl Dx12Renderer {
                     .as_str()
                     .to_string(),
                 path_space_mode: self.path_space_mode.as_str().to_string(),
+                path_space_consumer: self.path_space_consumer().to_string(),
                 stable_plane_allocated_bytes: self
                     .active_generation
                     .stable_planes
@@ -4406,6 +4473,7 @@ impl Dx12Renderer {
                 atrous_mode: self.atrous_mode.as_str(),
                 command_recording_mode: self.command_recording_mode.as_str(),
                 path_space_mode: self.path_space_mode.as_str(),
+                path_space_consumer: self.path_space_consumer(),
                 stable_plane_allocated_bytes: self
                     .active_generation
                     .stable_planes
@@ -4442,6 +4510,16 @@ impl Dx12Renderer {
                 at_max_count: self.benchmark_dynamic_at_max_baseline,
             },
         )
+    }
+
+    fn path_space_consumer(&self) -> &'static str {
+        if self.path_space_mode == PathSpaceMode::Legacy {
+            "legacy"
+        } else if self.denoiser == DenoiserBackend::NrdReblur {
+            "nrd-stable-planes"
+        } else {
+            "diagnostic-only"
+        }
     }
 
     fn dlss_optimal_json(&self) -> serde_json::Value {
@@ -4690,6 +4768,7 @@ struct BenchmarkJsonContext<'a> {
     atrous_mode: &'a str,
     command_recording_mode: &'a str,
     path_space_mode: &'a str,
+    path_space_consumer: &'a str,
     stable_plane_allocated_bytes: u64,
     denoiser_backend: &'a str,
     upscaler_mode: &'a str,
@@ -4736,6 +4815,7 @@ fn benchmark_json_line(
         atrous_mode,
         command_recording_mode,
         path_space_mode,
+        path_space_consumer,
         stable_plane_allocated_bytes,
         denoiser_backend,
         upscaler_mode,
@@ -4805,7 +4885,7 @@ fn benchmark_json_line(
             "requested": path_space_mode,
             "active": path_space_mode,
             "plane_count": if path_space_mode == "stable-planes" { crate::path_space::STABLE_PLANE_COUNT } else { 0 },
-            "consumer": if path_space_mode == "stable-planes" { "diagnostic-only" } else { "legacy" },
+            "consumer": path_space_consumer,
             "allocated_bytes": stable_plane_allocated_bytes,
         },
         "atrous_mode": atrous_mode,
@@ -5098,6 +5178,14 @@ impl Dx12Renderer {
         render_groups_y: u32,
         command_recording_stats: &mut CommandRecordingFrameStats,
     ) -> Result<()> {
+        if self.path_space_mode == PathSpaceMode::StablePlanes {
+            return self.record_nrd_stable_path(
+                frame_index,
+                render_groups_x,
+                render_groups_y,
+                command_recording_stats,
+            );
+        }
         self.collect_frame_input_transitions(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         {
             let generation = &mut self.active_generation;
@@ -5107,7 +5195,7 @@ impl Dx12Renderer {
                     "NRD generation resources 未初始化",
                 )
             })?;
-            for layer in [&mut nrd.primary, &mut nrd.transmission] {
+            for layer in &mut nrd.layers[..2] {
                 for resource in [
                     &mut layer.diffuse_input,
                     &mut layer.specular_input,
@@ -5172,7 +5260,7 @@ impl Dx12Renderer {
                     "NRD generation resources 未初始化",
                 )
             })?;
-            for layer in [&mut nrd.primary, &mut nrd.transmission] {
+            for layer in &mut nrd.layers[..2] {
                 for resource in [
                     &mut layer.diffuse_input,
                     &mut layer.specular_input,
@@ -5218,9 +5306,9 @@ impl Dx12Renderer {
                 reconstruction::NrdBridgeResource::default()
             };
             (
-                bridge_resources_for_layer(&nrd.primary, validation),
+                bridge_resources_for_layer(&nrd.layers[0], validation),
                 bridge_resources_for_layer(
-                    &nrd.transmission,
+                    &nrd.layers[1],
                     reconstruction::NrdBridgeResource::default(),
                 ),
             )
@@ -5238,7 +5326,7 @@ impl Dx12Renderer {
                 )
             })?;
             let primary_result = unsafe {
-                nrd.primary.backend.denoise(
+                nrd.layers[0].backend.denoise(
                     &frame_state,
                     &mut primary_bridge_resources,
                     &self.command_list,
@@ -5253,7 +5341,7 @@ impl Dx12Renderer {
                 return Err(error);
             }
             let transmission_result = unsafe {
-                nrd.transmission.backend.denoise(
+                nrd.layers[1].backend.denoise(
                     &frame_state,
                     &mut transmission_bridge_resources,
                     &self.command_list,
@@ -5280,8 +5368,8 @@ impl Dx12Renderer {
                     "NRD generation resources 未初始化",
                 )
             })?;
-            apply_bridge_resource_states(&mut nrd.primary, &primary_bridge_resources)?;
-            apply_bridge_resource_states(&mut nrd.transmission, &transmission_bridge_resources)?;
+            apply_bridge_resource_states(&mut nrd.layers[0], &primary_bridge_resources)?;
+            apply_bridge_resource_states(&mut nrd.layers[1], &transmission_bridge_resources)?;
             if enable_validation {
                 set_bridge_resource_state(
                     &mut generation.nrd_validation,
@@ -5306,7 +5394,7 @@ impl Dx12Renderer {
                     "NRD generation resources 未初始化",
                 )
             })?;
-            for layer in [&mut nrd.primary, &mut nrd.transmission] {
+            for layer in &mut nrd.layers[..2] {
                 for resource in [&mut layer.diffuse_output, &mut layer.specular_output] {
                     resource.collect_transition(
                         &mut self.transition_batch,
@@ -5349,6 +5437,275 @@ impl Dx12Renderer {
         unsafe {
             self.command_list
                 .Dispatch(render_groups_x, render_groups_y, 1);
+        }
+        self.gpu_profiler
+            .end(&self.command_list, frame_index, GpuPass::NrdCompose);
+        self.gpu_profiler.end_event(&self.command_list);
+        self.active_generation
+            .filter_diffuse_pong
+            .collect_transition(
+                &mut self.transition_batch,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            );
+        self.active_generation
+            .filter_specular_pong
+            .collect_transition(
+                &mut self.transition_batch,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            );
+        self.submit_transition_batch(command_recording_stats);
+        Ok(())
+    }
+
+    #[cfg(feature = "nrd")]
+    fn record_nrd_stable_path(
+        &mut self,
+        frame_index: usize,
+        render_groups_x: u32,
+        render_groups_y: u32,
+        command_recording_stats: &mut CommandRecordingFrameStats,
+    ) -> Result<()> {
+        self.collect_frame_input_transitions(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        {
+            let generation = &mut self.active_generation;
+            let nrd = generation.nrd.as_mut().ok_or_else(|| {
+                WindowsError::new(
+                    windows::core::HRESULT(0x80004005_u32 as i32),
+                    "stable-plane NRD generation resources 未初始化",
+                )
+            })?;
+            if nrd.layers.len() != crate::path_space::STABLE_PLANE_COUNT {
+                return Err(WindowsError::new(
+                    windows::core::HRESULT(0x80004005_u32 as i32),
+                    "stable-plane NRD history 数量与 plane contract 不一致",
+                ));
+            }
+            for layer in &mut nrd.layers {
+                for resource in [
+                    &mut layer.diffuse_input,
+                    &mut layer.specular_input,
+                    &mut layer.normal_roughness,
+                    &mut layer.motion,
+                    &mut layer.view_z,
+                    &mut layer.diffuse_factor,
+                    &mut layer.specular_factor,
+                    &mut layer.diffuse_output,
+                    &mut layer.specular_output,
+                ] {
+                    resource.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    );
+                }
+            }
+        }
+        self.submit_transition_batch(command_recording_stats);
+
+        self.gpu_profiler
+            .begin(&self.command_list, frame_index, GpuPass::NrdPrep);
+        self.gpu_profiler
+            .begin_event(&self.command_list, GpuPass::NrdPrep);
+        for plane_index in 0..crate::path_space::STABLE_PLANE_COUNT {
+            self.nrd_stable_prep_pipeline.bind(
+                &self.command_list,
+                self.active_generation
+                    .shader_heap
+                    .gpu_handle(NRD_STABLE_PREP_TABLE_BASES[plane_index]),
+                &[plane_index as u32],
+            );
+            unsafe {
+                self.command_list
+                    .Dispatch(render_groups_x, render_groups_y, 1);
+            }
+        }
+        self.gpu_profiler
+            .end(&self.command_list, frame_index, GpuPass::NrdPrep);
+        self.gpu_profiler.end_event(&self.command_list);
+
+        {
+            let generation = &mut self.active_generation;
+            let nrd = generation.nrd.as_mut().ok_or_else(|| {
+                WindowsError::new(
+                    windows::core::HRESULT(0x80004005_u32 as i32),
+                    "stable-plane NRD generation resources 未初始化",
+                )
+            })?;
+            for layer in &mut nrd.layers {
+                for resource in [
+                    &mut layer.diffuse_input,
+                    &mut layer.specular_input,
+                    &mut layer.normal_roughness,
+                    &mut layer.motion,
+                    &mut layer.view_z,
+                ] {
+                    resource.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+                            | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                    );
+                }
+                for resource in [&mut layer.diffuse_factor, &mut layer.specular_factor] {
+                    resource.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                }
+            }
+        }
+        let enable_validation = self.debug_view == DebugView::NrdValidation;
+        if enable_validation {
+            self.active_generation.nrd_validation.collect_transition(
+                &mut self.transition_batch,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            );
+        }
+        self.submit_transition_batch(command_recording_stats);
+
+        let frame_state = self.reconstruction_frame_state;
+        let mut bridge_layers = {
+            let generation = &self.active_generation;
+            let nrd = generation.nrd.as_ref().ok_or_else(|| {
+                WindowsError::new(
+                    windows::core::HRESULT(0x80004005_u32 as i32),
+                    "stable-plane NRD generation resources 未初始化",
+                )
+            })?;
+            nrd.layers
+                .iter()
+                .enumerate()
+                .map(|(plane_index, layer)| {
+                    let validation = if enable_validation && plane_index == 0 {
+                        bridge_resource(&generation.nrd_validation)
+                    } else {
+                        reconstruction::NrdBridgeResource::default()
+                    };
+                    bridge_resources_for_layer(layer, validation)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        self.gpu_profiler
+            .begin(&self.command_list, frame_index, GpuPass::NrdDenoise);
+        self.gpu_profiler
+            .begin_event(&self.command_list, GpuPass::NrdDenoise);
+        {
+            let generation = &mut self.active_generation;
+            let nrd = generation.nrd.as_mut().ok_or_else(|| {
+                WindowsError::new(
+                    windows::core::HRESULT(0x80004005_u32 as i32),
+                    "stable-plane NRD generation resources 未初始化",
+                )
+            })?;
+            for (plane_index, (layer, resources)) in nrd
+                .layers
+                .iter_mut()
+                .zip(bridge_layers.iter_mut())
+                .enumerate()
+            {
+                if let Err(error) = unsafe {
+                    layer.backend.denoise(
+                        &frame_state,
+                        resources,
+                        &self.command_list,
+                        enable_validation && plane_index == 0,
+                    )
+                } {
+                    eprintln!(
+                        "nrd_dispatch_failed layer=stable-plane-{plane_index} status=error frame={} error={error}",
+                        frame_state.frame_index
+                    );
+                    return Err(error);
+                }
+            }
+        }
+        self.gpu_profiler
+            .end(&self.command_list, frame_index, GpuPass::NrdDenoise);
+        self.gpu_profiler.end_event(&self.command_list);
+
+        {
+            let generation = &mut self.active_generation;
+            let nrd = generation.nrd.as_mut().ok_or_else(|| {
+                WindowsError::new(
+                    windows::core::HRESULT(0x80004005_u32 as i32),
+                    "stable-plane NRD generation resources 未初始化",
+                )
+            })?;
+            for (layer, resources) in nrd.layers.iter_mut().zip(&bridge_layers) {
+                apply_bridge_resource_states(layer, resources)?;
+            }
+            if enable_validation {
+                set_bridge_resource_state(
+                    &mut generation.nrd_validation,
+                    bridge_layers[0].validation_output.state,
+                )?;
+            }
+        }
+
+        // Every NRD Integration instance temporarily owns the descriptor heap.
+        // Restore the application heaps once after all independent histories.
+        unsafe {
+            self.command_list.SetDescriptorHeaps(&[
+                Some(self.active_generation.shader_heap.heap().clone()),
+                Some(self._sampler_heap.heap().clone()),
+            ]);
+        }
+        {
+            let generation = &mut self.active_generation;
+            let nrd = generation.nrd.as_mut().ok_or_else(|| {
+                WindowsError::new(
+                    windows::core::HRESULT(0x80004005_u32 as i32),
+                    "stable-plane NRD generation resources 未初始化",
+                )
+            })?;
+            for layer in &mut nrd.layers {
+                for resource in [&mut layer.diffuse_output, &mut layer.specular_output] {
+                    resource.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                }
+            }
+        }
+        self.active_generation
+            .filter_diffuse_pong
+            .collect_transition(
+                &mut self.transition_batch,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            );
+        self.active_generation
+            .filter_specular_pong
+            .collect_transition(
+                &mut self.transition_batch,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            );
+        if enable_validation {
+            self.active_generation.nrd_validation.collect_transition(
+                &mut self.transition_batch,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            );
+        }
+        self.submit_transition_batch(command_recording_stats);
+
+        self.gpu_profiler
+            .begin(&self.command_list, frame_index, GpuPass::NrdCompose);
+        self.gpu_profiler
+            .begin_event(&self.command_list, GpuPass::NrdCompose);
+        for plane_index in (0..crate::path_space::STABLE_PLANE_COUNT).rev() {
+            self.nrd_stable_compose_pipeline.bind(
+                &self.command_list,
+                self.active_generation
+                    .shader_heap
+                    .gpu_handle(NRD_STABLE_COMPOSE_TABLE_BASES[plane_index]),
+                &[
+                    plane_index as u32,
+                    u32::from(plane_index + 1 == crate::path_space::STABLE_PLANE_COUNT),
+                ],
+            );
+            unsafe {
+                self.command_list
+                    .Dispatch(render_groups_x, render_groups_y, 1);
+            }
+            submit_global_uav_barrier(&self.command_list);
         }
         self.gpu_profiler
             .end(&self.command_list, frame_index, GpuPass::NrdCompose);
@@ -5532,6 +5889,24 @@ impl Dx12Renderer {
             1,
             "阶段 9 NRD REBLUR 输出合成",
         )?;
+        #[cfg(feature = "nrd")]
+        let nrd_stable_prep = ComputePipeline::new(
+            &self.device,
+            &shaders.nrd_stable_prep,
+            4,
+            7,
+            1,
+            "阶段 11 stable-plane NRD 输入准备",
+        )?;
+        #[cfg(feature = "nrd")]
+        let nrd_stable_compose = ComputePipeline::new(
+            &self.device,
+            &shaders.nrd_stable_compose,
+            6,
+            2,
+            2,
+            "阶段 11 stable-plane NRD 反向合成",
+        )?;
         self.raytracing_pipeline = raytracing;
         self.temporal_pipeline = temporal;
         self.atrous_baseline_pipeline = atrous_baseline;
@@ -5553,6 +5928,8 @@ impl Dx12Renderer {
         {
             self.nrd_prep_pipeline = nrd_prep;
             self.nrd_compose_pipeline = nrd_compose;
+            self.nrd_stable_prep_pipeline = nrd_stable_prep;
+            self.nrd_stable_compose_pipeline = nrd_stable_compose;
         }
         self.request_history_reset();
         self.accumulated_frames = 0;
@@ -6337,6 +6714,7 @@ mod tests {
         for base in TONEMAP_TABLE_BASES {
             ranges.push((base, base + 15));
         }
+        ranges.push((STABLE_BUILD_TABLE_BASE, STABLE_BUILD_TABLE_BASE + 9));
         #[cfg(feature = "nrd")]
         {
             ranges.push((NRD_PREP_TABLE_BASE, NRD_PREP_TABLE_BASE + 18));
@@ -6345,6 +6723,12 @@ mod tests {
                 NRD_TRANSMISSION_PREP_TABLE_BASE + 18,
             ));
             ranges.push((NRD_COMPOSE_TABLE_BASE, NRD_COMPOSE_TABLE_BASE + 13));
+            for base in NRD_STABLE_PREP_TABLE_BASES {
+                ranges.push((base, base + 11));
+            }
+            for base in NRD_STABLE_COMPOSE_TABLE_BASES {
+                ranges.push((base, base + 8));
+            }
         }
         #[cfg(feature = "streamline")]
         {
@@ -6584,6 +6968,7 @@ mod tests {
                 atrous_mode: "shared",
                 command_recording_mode: "optimized",
                 path_space_mode: "stable-planes",
+                path_space_consumer: "nrd-stable-planes",
                 stable_plane_allocated_bytes: 228_556_800,
                 denoiser_backend: "svgf",
                 upscaler_mode: "native",
@@ -6630,7 +7015,7 @@ mod tests {
         assert_eq!(value["gpu_name"], "RTX 4060 \"Laptop\"");
         assert_eq!(value["resolution_mode"], "fixed");
         assert_eq!(value["path_space"]["plane_count"], 3);
-        assert_eq!(value["path_space"]["consumer"], "diagnostic-only");
+        assert_eq!(value["path_space"]["consumer"], "nrd-stable-planes");
         assert!(value["dynamic_resolution"].is_null());
         assert_eq!(value["render_scale_requested"], 1.0);
         assert_eq!(value["render_generation_id"], 1);

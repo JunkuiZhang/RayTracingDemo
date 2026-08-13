@@ -273,5 +273,7 @@ mod tests {
         assert_eq!(STABLE_PLANE_RECORD_STRIDE, 64);
         assert!(shader.contains("struct StablePlaneRecord"));
         assert!(shader.contains("float4 data3;"));
+        assert!(shader.contains("uint PackStableHdr(float3 value)"));
+        assert!(shader.contains("float3 UnpackStableHdr(uint packed)"));
     }
 }
