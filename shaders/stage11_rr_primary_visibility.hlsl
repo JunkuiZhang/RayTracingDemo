@@ -4,6 +4,7 @@
 // shading quality. In particular, neither frame index nor projection jitter
 // participates in this ray construction.
 #include "stage11_camera.hlsli"
+#include "stage11_material.hlsli"
 #include "stage11_path_space.hlsli"
 
 RaytracingAccelerationStructure Scene : register(t0);
@@ -14,21 +15,6 @@ struct Vertex
     float3 normal;
     float4 tangent;
     float2 texcoord0;
-};
-
-struct Material
-{
-    float4 baseColorFactor;
-    float3 emissiveFactor;
-    float metallicFactor;
-    float roughnessFactor;
-    float normalScale;
-    float ior;
-    uint flags;
-    uint baseColorTextureAndSampler;
-    uint metallicRoughnessTextureAndSampler;
-    uint normalTextureAndSampler;
-    uint emissiveTextureAndSampler;
 };
 
 struct InstanceGpu

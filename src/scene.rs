@@ -10,6 +10,9 @@ pub const MATERIAL_FLAG_HAS_TANGENT: u32 = 1 << 1;
 pub const MATERIAL_FLAG_LEGACY_DIELECTRIC: u32 = 1 << 2;
 pub const MATERIAL_FLAG_LEGACY_METAL: u32 = 1 << 3;
 pub const MATERIAL_FLAG_LEGACY_EMISSIVE: u32 = 1 << 4;
+pub const MATERIAL_MEDIUM_PRIORITY_MASK: u32 = 0x0f;
+pub const MATERIAL_MEDIUM_FLAG_THIN_SURFACE: u32 = 1 << 4;
+pub const MAX_MATERIAL_NESTED_PRIORITY: u8 = 15;
 pub const MAX_SCENE_SAMPLERS: usize = 64;
 pub const TEXTURE_VIEW_BITS: u32 = 7;
 pub const SAMPLER_INDEX_BITS: u32 = 6;
@@ -97,6 +100,13 @@ pub struct MaterialAsset {
     pub normal_scale: f32,
     pub emissive_factor: [f32; 3],
     pub ior: f32,
+    /// Zero is the asset-facing highest priority, matching the stable-plane
+    /// interior-list contract. Ordinary closed glass should normally use one.
+    pub nested_priority: u8,
+    /// Thin sheets refract once and never change the path's interior list.
+    pub thin_surface: bool,
+    /// Beer-Lambert absorption per world-space distance unit.
+    pub absorption_coefficient: [f32; 3],
     pub kind: MaterialKind,
     pub double_sided: bool,
     pub base_color_texture: Option<TextureBindingAsset>,
@@ -115,6 +125,9 @@ impl MaterialAsset {
             normal_scale: 1.0,
             emissive_factor: [0.0; 3],
             ior: 1.5,
+            nested_priority: 1,
+            thin_surface: false,
+            absorption_coefficient: [0.0; 3],
             kind: MaterialKind::Opaque,
             double_sided: false,
             base_color_texture: None,
@@ -199,6 +212,8 @@ pub struct GpuMaterial {
     pub metallic_roughness_texture_and_sampler: u32,
     pub normal_texture_and_sampler: u32,
     pub emissive_texture_and_sampler: u32,
+    pub absorption_coefficient: [f32; 3],
+    pub medium_flags: u32,
 }
 
 #[repr(C)]
@@ -286,6 +301,31 @@ impl SceneAsset {
             ));
         }
         for (material_index, material) in self.materials.iter().enumerate() {
+            if !material.ior.is_finite() || material.ior <= 0.0 {
+                return Err(format!(
+                    "material {material_index} 的 IOR 必须为有限正数"
+                ));
+            }
+            if material.nested_priority > MAX_MATERIAL_NESTED_PRIORITY {
+                return Err(format!(
+                    "material {material_index} 的 nested_priority {} 超过上限 {MAX_MATERIAL_NESTED_PRIORITY}",
+                    material.nested_priority
+                ));
+            }
+            if !material
+                .absorption_coefficient
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0)
+            {
+                return Err(format!(
+                    "material {material_index} 的 absorption_coefficient 必须为有限非负数"
+                ));
+            }
+            if material.thin_surface && material.kind != MaterialKind::LegacyDielectric {
+                return Err(format!(
+                    "material {material_index} 只有 dielectric 才能声明 thin_surface"
+                ));
+            }
             for (texture_name, texture_index) in [
                 ("base_color", material.base_color_texture),
                 ("metallic_roughness", material.metallic_roughness_texture),
@@ -436,18 +476,25 @@ impl SceneAsset {
 
 #[cfg(test)]
 mod tests {
-    use std::mem::{align_of, size_of};
+    use std::mem::{align_of, offset_of, size_of};
 
     use super::*;
 
     #[test]
     fn gpu_layouts_match_hlsl_contract() {
         assert_eq!(size_of::<GpuVertex>(), 48);
-        assert_eq!(size_of::<GpuMaterial>(), 64);
+        assert_eq!(size_of::<GpuMaterial>(), 80);
         assert_eq!(size_of::<InstanceGpu>(), 64);
+        assert_eq!(offset_of!(GpuMaterial, absorption_coefficient), 64);
+        assert_eq!(offset_of!(GpuMaterial, medium_flags), 76);
         assert_eq!(align_of::<GpuVertex>(), 4);
         assert_eq!(align_of::<GpuMaterial>(), 4);
         assert_eq!(align_of::<InstanceGpu>(), 4);
+
+        let shader = include_str!("../shaders/stage11_material.hlsli");
+        assert!(shader.contains("float3 absorptionCoefficient;"));
+        assert!(shader.contains("uint mediumFlags;"));
+        assert!(shader.contains("total stride of 80 bytes"));
     }
 
     #[test]
@@ -482,6 +529,26 @@ mod tests {
             scene.validate().unwrap_err(),
             "场景实例 stable_id 必须小于 0x7fffffff"
         );
+    }
+
+    #[test]
+    fn material_validation_rejects_invalid_medium_parameters() {
+        let mut scene = SceneAsset::cornell_box();
+        scene.materials[5].nested_priority = 16;
+        assert!(scene.validate().unwrap_err().contains("nested_priority"));
+
+        let mut scene = SceneAsset::cornell_box();
+        scene.materials[5].absorption_coefficient[1] = -0.1;
+        assert!(
+            scene
+                .validate()
+                .unwrap_err()
+                .contains("absorption_coefficient")
+        );
+
+        let mut scene = SceneAsset::cornell_box();
+        scene.materials[0].thin_surface = true;
+        assert!(scene.validate().unwrap_err().contains("thin_surface"));
     }
 
     #[test]

@@ -13,7 +13,7 @@ use windows::{
 use crate::scene::{
     GpuMaterial, GpuVertex, InstanceGpu, MATERIAL_FLAG_DOUBLE_SIDED, MATERIAL_FLAG_HAS_TANGENT,
     MATERIAL_FLAG_LEGACY_DIELECTRIC, MATERIAL_FLAG_LEGACY_EMISSIVE, MATERIAL_FLAG_LEGACY_METAL,
-    MaterialKind, SceneAsset,
+    MATERIAL_MEDIUM_FLAG_THIN_SURFACE, MATERIAL_MEDIUM_PRIORITY_MASK, MaterialKind, SceneAsset,
 };
 use crate::{
     as_policy::{
@@ -447,6 +447,10 @@ fn gpu_material(
     }
     let [base_color, metallic_roughness, normal, emissive] =
         textures.material_texture_indices(material)?;
+    let mut medium_flags = u32::from(material.nested_priority) & MATERIAL_MEDIUM_PRIORITY_MASK;
+    if material.thin_surface {
+        medium_flags |= MATERIAL_MEDIUM_FLAG_THIN_SURFACE;
+    }
     Ok(GpuMaterial {
         base_color_factor: material.base_color_factor,
         emissive_factor: material.emissive_factor,
@@ -459,6 +463,8 @@ fn gpu_material(
         metallic_roughness_texture_and_sampler: metallic_roughness,
         normal_texture_and_sampler: normal,
         emissive_texture_and_sampler: emissive,
+        absorption_coefficient: material.absorption_coefficient,
+        medium_flags,
     })
 }
 
