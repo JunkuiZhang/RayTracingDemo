@@ -125,6 +125,17 @@ pub(super) struct RrGenerationResources {
     /// avoids asking RR to reconstruct reflection motion from a jittered
     /// primary hit and one scalar hit distance.
     pub(super) specular_motion: TrackedResource,
+    /// Output-resolution visibility written by the unjittered RR-only pass.
+    /// Two phases match the existing history ping/pong and are owned by the
+    /// generation so a resize cannot alias an in-flight visibility frame.
+    pub(super) primary_surface_id: [TrackedResource; 2],
+    pub(super) primary_surface_meta: [TrackedResource; 2],
+    pub(super) primary_motion: TrackedResource,
+    /// Output-resolution RR HDR history used only where the stable primary
+    /// pass classifies a true surface boundary. Non-boundary pixels bypass it.
+    pub(super) boundary_history: [TrackedResource; 2],
+    /// Bit flags for F1/debug validation; this never participates in color.
+    pub(super) boundary_mask: TrackedResource,
 }
 
 /// All resources whose descriptors or dimensions depend on the current render
@@ -459,6 +470,60 @@ impl RenderResourceGeneration {
                     DXGI_FORMAT_R16G16_FLOAT,
                     format!("代际 {id} DLSS RR dense specular motion"),
                 )?,
+                primary_surface_id: [
+                    create_uav_texture(
+                        device,
+                        output_extent,
+                        DXGI_FORMAT_R32_UINT,
+                        format!("代际 {id} RR stable primary surface ID 0"),
+                    )?,
+                    create_uav_texture(
+                        device,
+                        output_extent,
+                        DXGI_FORMAT_R32_UINT,
+                        format!("代际 {id} RR stable primary surface ID 1"),
+                    )?,
+                ],
+                primary_surface_meta: [
+                    create_uav_texture(
+                        device,
+                        output_extent,
+                        DXGI_FORMAT_R16G16B16A16_FLOAT,
+                        format!("代际 {id} RR stable primary surface meta 0"),
+                    )?,
+                    create_uav_texture(
+                        device,
+                        output_extent,
+                        DXGI_FORMAT_R16G16B16A16_FLOAT,
+                        format!("代际 {id} RR stable primary surface meta 1"),
+                    )?,
+                ],
+                primary_motion: create_uav_texture(
+                    device,
+                    output_extent,
+                    DXGI_FORMAT_R16G16_FLOAT,
+                    format!("代际 {id} RR stable primary output-pixel motion"),
+                )?,
+                boundary_history: [
+                    create_uav_texture(
+                        device,
+                        output_extent,
+                        DXGI_FORMAT_R16G16B16A16_FLOAT,
+                        format!("代际 {id} RR opaque boundary history 0"),
+                    )?,
+                    create_uav_texture(
+                        device,
+                        output_extent,
+                        DXGI_FORMAT_R16G16B16A16_FLOAT,
+                        format!("代际 {id} RR opaque boundary history 1"),
+                    )?,
+                ],
+                boundary_mask: create_uav_texture(
+                    device,
+                    output_extent,
+                    DXGI_FORMAT_R32_UINT,
+                    format!("代际 {id} RR opaque boundary mask"),
+                )?,
             })
         } else {
             None
@@ -627,11 +692,18 @@ impl RenderResourceGeneration {
             rejection_mask,
             last_used_fence: 0,
         };
-        unsafe { generation.write_shader_views(device, textures) };
+        unsafe { generation.write_shader_views(device, textures, acceleration_structures) };
         Ok(generation)
     }
 
-    unsafe fn write_shader_views(&mut self, device: &ID3D12Device, textures: &TextureSet) {
+    unsafe fn write_shader_views(
+        &mut self,
+        device: &ID3D12Device,
+        textures: &TextureSet,
+        acceleration_structures: &AccelerationStructures,
+    ) {
+        #[cfg(not(feature = "streamline-rr"))]
+        let _ = acceleration_structures;
         unsafe { textures.write_srvs(device, &self.shader_heap) };
         let raw_diffuse = &self.raw_diffuse;
         let raw_specular = &self.raw_specular;
@@ -1068,6 +1140,83 @@ impl RenderResourceGeneration {
         }
         #[cfg(feature = "streamline-rr")]
         if let Some(rr) = self.rr.as_ref() {
+            let instance_count = acceleration_structures.instance_count();
+            debug_assert!(instance_count > 0);
+            // The visibility pass reads the exact frame-local InstanceGpu
+            // upload selected by the render frame. Copying the immutable scene
+            // descriptors and creating one SRV per frame/phase prevents a
+            // resize or a later frame from overwriting a descriptor still in
+            // use by the GPU.
+            for frame_index in 0..super::FRAME_COUNT {
+                for history_index in 0..2 {
+                    let base = super::RR_PRIMARY_VISIBILITY_TABLE_BASE
+                        + (frame_index * 2 + history_index)
+                            * super::RR_PRIMARY_VISIBILITY_TABLE_STRIDE;
+                    unsafe {
+                        device.CopyDescriptorsSimple(
+                            1,
+                            self.shader_heap.cpu_handle(base),
+                            self.shader_heap.cpu_handle(0),
+                            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                        );
+                        device.CopyDescriptorsSimple(
+                            1,
+                            self.shader_heap.cpu_handle(base + 1),
+                            self.shader_heap.cpu_handle(1),
+                            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                        );
+                        device.CopyDescriptorsSimple(
+                            1,
+                            self.shader_heap.cpu_handle(base + 2),
+                            self.shader_heap.cpu_handle(2),
+                            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                        );
+                        create_structured_srv(
+                            device,
+                            &self.shader_heap,
+                            base + 3,
+                            acceleration_structures.instance_gpu_resource(frame_index),
+                            instance_count,
+                            64,
+                        );
+                        create_texture_uav(
+                            device,
+                            &self.shader_heap,
+                            base + 4,
+                            &rr.primary_surface_id[history_index],
+                        );
+                        create_texture_uav(
+                            device,
+                            &self.shader_heap,
+                            base + 5,
+                            &rr.primary_surface_meta[history_index],
+                        );
+                        create_texture_uav(device, &self.shader_heap, base + 6, &rr.primary_motion);
+                    }
+                }
+            }
+            for current_index in 0..2 {
+                let previous_index = 1 - current_index;
+                let srvs = [
+                    &rr.output_hdr,
+                    &rr.primary_surface_id[current_index],
+                    &rr.primary_surface_meta[current_index],
+                    &rr.primary_motion,
+                    &rr.primary_surface_id[previous_index],
+                    &rr.primary_surface_meta[previous_index],
+                    &rr.boundary_history[previous_index],
+                ];
+                let uavs = [&rr.boundary_history[current_index], &rr.boundary_mask];
+                unsafe {
+                    populate_texture_table(
+                        device,
+                        &self.shader_heap,
+                        super::RR_BOUNDARY_TABLE_BASES[current_index],
+                        &srvs,
+                        &uavs,
+                    )
+                };
+            }
             let input_srvs = [
                 reconstruction_normal_roughness,
                 reconstruction_noisy_hdr,
@@ -1101,7 +1250,7 @@ impl RenderResourceGeneration {
                 };
 
                 let rr_tonemap_srvs = [
-                    &rr.output_hdr,
+                    &rr.boundary_history[current_index],
                     // RR reconstructs the stochastic HDR lobes; directly
                     // visible emission is stabilized independently and added
                     // exactly once by ToneMap's RR-only composite path.
@@ -1111,11 +1260,11 @@ impl RenderResourceGeneration {
                     albedo,
                     normal,
                     depth,
-                    motion,
+                    &rr.primary_motion,
                     &self.histories[current_index].moments,
                     rejection,
                     &self.histories[current_index].length,
-                    id,
+                    &rr.primary_surface_id[current_index],
                     reconstruction_specular_hit_distance,
                     // t13 is NRD validation on conventional paths and the
                     // explicit reflected-geometry guide on RR. InputMode keeps

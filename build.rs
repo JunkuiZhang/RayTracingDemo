@@ -45,6 +45,16 @@ fn main() {
             "stage11_rr_emissive.dxil",
             "cs_6_6",
         ),
+        (
+            "shaders/stage11_rr_primary_visibility.hlsl",
+            "stage11_rr_primary_visibility.dxil",
+            "cs_6_6",
+        ),
+        (
+            "shaders/stage11_rr_boundary_resolve.hlsl",
+            "stage11_rr_boundary_resolve.dxil",
+            "cs_6_6",
+        ),
     ];
     for (source, _, _) in shaders {
         println!("cargo:rerun-if-changed={source}");

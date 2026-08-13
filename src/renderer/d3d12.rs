@@ -1067,7 +1067,7 @@ const SHADER_DESCRIPTOR_COUNT: usize = 363;
 #[cfg(all(feature = "streamline", not(feature = "streamline-rr")))]
 const SHADER_DESCRIPTOR_COUNT: usize = 386;
 #[cfg(feature = "streamline-rr")]
-const SHADER_DESCRIPTOR_COUNT: usize = 430;
+const SHADER_DESCRIPTOR_COUNT: usize = 490;
 const DXR_UAV_REGISTER_COUNT: usize = 32;
 const RECONSTRUCTION_DIFFUSE_HIT_DISTANCE_UAV_REGISTER: usize = 15;
 const RECONSTRUCTION_SPECULAR_HIT_DISTANCE_UAV_REGISTER: usize = 16;
@@ -1108,6 +1108,16 @@ const RR_INPUT_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage11
 #[cfg(feature = "streamline-rr")]
 const RR_EMISSIVE_SHADER: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/stage11_rr_emissive.dxil"));
+#[cfg(feature = "streamline-rr")]
+const RR_PRIMARY_VISIBILITY_SHADER: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/stage11_rr_primary_visibility.dxil"
+));
+#[cfg(feature = "streamline-rr")]
+const RR_BOUNDARY_RESOLVE_SHADER: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/stage11_rr_boundary_resolve.dxil"
+));
 
 const TONEMAP_INPUT_SVGF_SPLIT: u32 = 0;
 const TONEMAP_INPUT_NRD_SPLIT: u32 = 1;
@@ -1167,6 +1177,12 @@ const RR_INPUT_TABLE_BASE: usize = 386;
 const RR_EMISSIVE_TABLE_BASES: [usize; 2] = [392, 396];
 #[cfg(feature = "streamline-rr")]
 const RR_TONEMAP_TABLE_BASES: [usize; 2] = [400, 415];
+#[cfg(feature = "streamline-rr")]
+const RR_PRIMARY_VISIBILITY_TABLE_BASE: usize = 430;
+#[cfg(feature = "streamline-rr")]
+const RR_PRIMARY_VISIBILITY_TABLE_STRIDE: usize = 7;
+#[cfg(feature = "streamline-rr")]
+const RR_BOUNDARY_TABLE_BASES: [usize; 2] = [472, 481];
 
 #[cfg(feature = "nrd")]
 fn bridge_resource(resource: &TrackedResource) -> reconstruction::NrdBridgeResource {
@@ -1282,6 +1298,8 @@ fn active_gpu_passes(
         ReconstructionPath::DlssRayReconstruction => {
             active[GpuPass::RrInputAdapter as usize] = rr_active;
             active[GpuPass::RrEvaluate as usize] = rr_active;
+            active[GpuPass::RrPrimaryVisibility as usize] = rr_active;
+            active[GpuPass::RrBoundaryResolve as usize] = rr_active;
         }
     }
     if dlss_sr_active {
@@ -1328,6 +1346,15 @@ struct CameraConstants {
     dlss_guide_mode: u32,
     nrd_enabled: u32,
     reset_history: u32,
+}
+
+#[cfg(feature = "streamline-rr")]
+fn camera_constant_words(camera: &CameraConstants) -> [u32; 16] {
+    debug_assert_eq!(size_of::<CameraConstants>(), 16 * size_of::<u32>());
+    // CameraConstants is the existing 16-DWORD root ABI. The visibility pass
+    // deliberately receives the same block so its camera basis stays exactly
+    // aligned with the path tracer while it ignores jitter/frame state.
+    unsafe { std::ptr::read((camera as *const CameraConstants).cast::<[u32; 16]>()) }
 }
 
 /// 阶段 1 的最小 DX12 后端：三缓冲交换链、清屏和逐帧 Fence。
@@ -1395,6 +1422,10 @@ pub struct Dx12Renderer {
     rr_input_pipeline: ComputePipeline,
     #[cfg(feature = "streamline-rr")]
     rr_emissive_pipeline: ComputePipeline,
+    #[cfg(feature = "streamline-rr")]
+    rr_primary_visibility_pipeline: ComputePipeline,
+    #[cfg(feature = "streamline-rr")]
+    rr_boundary_resolve_pipeline: ComputePipeline,
     #[cfg(feature = "nrd")]
     nrd_prep_pipeline: ComputePipeline,
     #[cfg(feature = "nrd")]
@@ -1674,6 +1705,26 @@ impl Dx12Renderer {
                 "阶段 11 DLSS RR primary emissive 稳定层",
             )
             .map_err(|error| dx_error("创建 DLSS RR emissive 稳定管线", error))?;
+            #[cfg(feature = "streamline-rr")]
+            let rr_primary_visibility_pipeline = ComputePipeline::new(
+                &device,
+                RR_PRIMARY_VISIBILITY_SHADER,
+                4,
+                3,
+                16,
+                "阶段 11 RR stable primary visibility",
+            )
+            .map_err(|error| dx_error("创建 DLSS RR primary visibility 管线", error))?;
+            #[cfg(feature = "streamline-rr")]
+            let rr_boundary_resolve_pipeline = ComputePipeline::new(
+                &device,
+                RR_BOUNDARY_RESOLVE_SHADER,
+                7,
+                2,
+                1,
+                "阶段 11 RR opaque boundary resolve",
+            )
+            .map_err(|error| dx_error("创建 DLSS RR boundary resolve 管线", error))?;
             #[cfg(feature = "nrd")]
             let nrd_prep_pipeline = ComputePipeline::new(
                 &device,
@@ -1873,6 +1924,10 @@ impl Dx12Renderer {
                 rr_input_pipeline,
                 #[cfg(feature = "streamline-rr")]
                 rr_emissive_pipeline,
+                #[cfg(feature = "streamline-rr")]
+                rr_primary_visibility_pipeline,
+                #[cfg(feature = "streamline-rr")]
+                rr_boundary_resolve_pipeline,
                 #[cfg(feature = "nrd")]
                 nrd_prep_pipeline,
                 #[cfg(feature = "nrd")]
@@ -2201,6 +2256,74 @@ impl Dx12Renderer {
             let render_groups_y = render_extent.height.div_ceil(8);
             let output_groups_x = output_extent.width.div_ceil(8);
             let output_groups_y = output_extent.height.div_ceil(8);
+            #[cfg(feature = "streamline-rr")]
+            if rr_path {
+                {
+                    let rr = self
+                        .active_generation
+                        .rr
+                        .as_mut()
+                        .expect("DLSS RR generation validated above");
+                    rr.primary_surface_id[current_history].collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    );
+                    rr.primary_surface_meta[current_history].collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    );
+                    rr.primary_motion.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    );
+                }
+                self.submit_transition_batch(&mut command_recording_stats);
+
+                self.gpu_profiler.begin(
+                    &self.command_list,
+                    frame_index,
+                    GpuPass::RrPrimaryVisibility,
+                );
+                self.gpu_profiler
+                    .begin_event(&self.command_list, GpuPass::RrPrimaryVisibility);
+                let visibility_table = RR_PRIMARY_VISIBILITY_TABLE_BASE
+                    + (frame_index % FRAME_COUNT * 2 + current_history)
+                        * RR_PRIMARY_VISIBILITY_TABLE_STRIDE;
+                let camera_words = camera_constant_words(&camera);
+                self.rr_primary_visibility_pipeline.bind(
+                    &self.command_list,
+                    self.active_generation
+                        .shader_heap
+                        .gpu_handle(visibility_table),
+                    &camera_words,
+                );
+                self.command_list
+                    .Dispatch(output_groups_x, output_groups_y, 1);
+                self.gpu_profiler.end(
+                    &self.command_list,
+                    frame_index,
+                    GpuPass::RrPrimaryVisibility,
+                );
+                self.gpu_profiler.end_event(&self.command_list);
+                let rr = self
+                    .active_generation
+                    .rr
+                    .as_mut()
+                    .expect("DLSS RR generation validated above");
+                rr.primary_surface_id[current_history].collect_transition(
+                    &mut self.transition_batch,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                );
+                rr.primary_surface_meta[current_history].collect_transition(
+                    &mut self.transition_batch,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                );
+                rr.primary_motion.collect_transition(
+                    &mut self.transition_batch,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                );
+                self.submit_transition_batch(&mut command_recording_stats);
+            }
             #[cfg(feature = "nrd")]
             let use_nrd = self.denoiser == DenoiserBackend::NrdReblur;
             #[cfg(not(feature = "nrd"))]
@@ -2792,6 +2915,88 @@ impl Dx12Renderer {
                         &mut self.transition_batch,
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     );
+                self.submit_transition_batch(&mut command_recording_stats);
+            }
+
+            #[cfg(feature = "streamline-rr")]
+            if rr_active {
+                {
+                    let rr = self
+                        .active_generation
+                        .rr
+                        .as_mut()
+                        .expect("DLSS RR generation validated above");
+                    rr.output_hdr.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                    rr.primary_surface_id[current_history].collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                    rr.primary_surface_meta[current_history].collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                    rr.primary_motion.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                    rr.primary_surface_id[previous_history].collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                    rr.primary_surface_meta[previous_history].collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                    rr.boundary_history[previous_history].collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    );
+                    rr.boundary_history[current_history].collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    );
+                    rr.boundary_mask.collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    );
+                }
+                self.submit_transition_batch(&mut command_recording_stats);
+
+                self.gpu_profiler.begin(
+                    &self.command_list,
+                    frame_index,
+                    GpuPass::RrBoundaryResolve,
+                );
+                self.gpu_profiler
+                    .begin_event(&self.command_list, GpuPass::RrBoundaryResolve);
+                self.rr_boundary_resolve_pipeline.bind(
+                    &self.command_list,
+                    self.active_generation
+                        .shader_heap
+                        .gpu_handle(RR_BOUNDARY_TABLE_BASES[current_history]),
+                    &[u32::from(self.reset_history)],
+                );
+                self.command_list
+                    .Dispatch(output_groups_x, output_groups_y, 1);
+                self.gpu_profiler
+                    .end(&self.command_list, frame_index, GpuPass::RrBoundaryResolve);
+                self.gpu_profiler.end_event(&self.command_list);
+                let rr = self
+                    .active_generation
+                    .rr
+                    .as_mut()
+                    .expect("DLSS RR generation validated above");
+                rr.boundary_history[current_history].collect_transition(
+                    &mut self.transition_batch,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                );
+                rr.boundary_mask.collect_transition(
+                    &mut self.transition_batch,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                );
                 self.submit_transition_batch(&mut command_recording_stats);
             }
 
@@ -4511,6 +4716,8 @@ fn benchmark_json_line(
             "dlss_evaluate": gpu_pass_json(report.pass(GpuPass::DlssEvaluate)),
             "rr_input_adapter": gpu_pass_json(report.pass(GpuPass::RrInputAdapter)),
             "rr_evaluate": gpu_pass_json(report.pass(GpuPass::RrEvaluate)),
+            "rr_primary_visibility": gpu_pass_json(report.pass(GpuPass::RrPrimaryVisibility)),
+            "rr_boundary_resolve": gpu_pass_json(report.pass(GpuPass::RrBoundaryResolve)),
         },
         "memory": {
             "usage_bytes": memory.usage_bytes,
@@ -5109,6 +5316,24 @@ impl Dx12Renderer {
             3,
             "阶段 11 DLSS RR primary emissive 稳定层",
         )?;
+        #[cfg(feature = "streamline-rr")]
+        let rr_primary_visibility = ComputePipeline::new(
+            &self.device,
+            &shaders.rr_primary_visibility,
+            4,
+            3,
+            16,
+            "阶段 11 RR stable primary visibility",
+        )?;
+        #[cfg(feature = "streamline-rr")]
+        let rr_boundary_resolve = ComputePipeline::new(
+            &self.device,
+            &shaders.rr_boundary_resolve,
+            7,
+            2,
+            1,
+            "阶段 11 RR opaque boundary resolve",
+        )?;
         #[cfg(feature = "nrd")]
         let nrd_prep = ComputePipeline::new(
             &self.device,
@@ -5140,6 +5365,8 @@ impl Dx12Renderer {
         {
             self.rr_input_pipeline = rr_input;
             self.rr_emissive_pipeline = rr_emissive;
+            self.rr_primary_visibility_pipeline = rr_primary_visibility;
+            self.rr_boundary_resolve_pipeline = rr_boundary_resolve;
         }
         #[cfg(feature = "nrd")]
         {
@@ -5657,6 +5884,107 @@ mod tests {
         assert!(shader.contains("converged ? 1.0"));
     }
 
+    #[cfg(feature = "streamline-rr")]
+    #[test]
+    fn rr_primary_visibility_contract_is_output_centered_and_jitter_free() {
+        let shader = include_str!("../../shaders/stage11_rr_primary_visibility.hlsl");
+        assert!(shader.contains("Stage11PrimaryRayDirection"));
+        assert!(shader.contains("instanceData.stableSurfaceId"));
+        assert!(shader.contains("PrimaryMotion[pixel] = ResetHistory != 0u"));
+        assert!(shader.contains("query.CommittedWorldToObject3x4()"));
+        assert_eq!(shader.matches("JitterPadding").count(), 1);
+        assert_eq!(shader.matches("FrameIndex").count(), 1);
+        assert!(!shader.contains("CameraJitterPx"));
+        assert!(!shader.contains("SampleOwenSobol"));
+
+        let shared_camera = include_str!("../../shaders/stage11_camera.hlsli");
+        assert!(shared_camera.contains("float2(pixel) + 0.5"));
+        assert_eq!(
+            shared_camera.matches("STAGE11_CAMERA_FOCAL_LENGTH").count(),
+            4
+        );
+    }
+
+    #[cfg(feature = "streamline-rr")]
+    #[test]
+    fn rr_boundary_contract_filters_taps_before_interpolation() {
+        #[derive(Clone, Copy)]
+        struct Tap {
+            id: u32,
+            normal_dot: f32,
+            depth_delta: f32,
+            weight: f32,
+            history: f32,
+        }
+
+        fn valid_tap(tap: Tap) -> bool {
+            tap.id == 7
+                && tap.normal_dot >= 0.95
+                && tap.depth_delta <= 0.01
+                && tap.weight.is_finite()
+                && tap.history.is_finite()
+                && tap.history > 0.0
+        }
+
+        let taps = [
+            Tap {
+                id: 7,
+                normal_dot: 1.0,
+                depth_delta: 0.0,
+                weight: 0.25,
+                history: 4.0,
+            },
+            Tap {
+                id: 8,
+                normal_dot: 1.0,
+                depth_delta: 0.0,
+                weight: 0.25,
+                history: 32.0,
+            },
+            Tap {
+                id: 7,
+                normal_dot: 0.94,
+                depth_delta: 0.0,
+                weight: 0.25,
+                history: 32.0,
+            },
+            Tap {
+                id: 7,
+                normal_dot: 1.0,
+                depth_delta: 0.02,
+                weight: 0.25,
+                history: 32.0,
+            },
+        ];
+        let accepted_weight: f32 = taps
+            .into_iter()
+            .filter(|tap| valid_tap(*tap))
+            .map(|tap| tap.weight)
+            .sum();
+        let accepted_count: f32 = taps
+            .into_iter()
+            .filter(|tap| valid_tap(*tap))
+            .map(|tap| tap.weight * tap.history)
+            .sum::<f32>()
+            / accepted_weight;
+        assert_eq!(accepted_weight, 0.25);
+        assert_eq!(accepted_count, 4.0);
+
+        let current = [0.25_f32, 0.5, 0.75];
+        let non_boundary = current;
+        assert_eq!(non_boundary, current);
+
+        let boundary = include_str!("../../shaders/stage11_rr_boundary_resolve.hlsl");
+        assert!(boundary.contains("PreviousSurfaceId.Load"));
+        assert!(boundary.contains("weightSum < MIN_HISTORY_WEIGHT"));
+        assert!(boundary.contains("YCOCG_CLAMP_RELATIVE_EXPANSION"));
+        assert!(boundary.contains("SHADING_REJECTION_RELATIVE"));
+        assert!(boundary.contains("CurrentBoundaryHistory[pixel] = float4(currentColor, count)"));
+        assert!(boundary.contains("previousPosition = float2(pixel) + motion"));
+        assert!(boundary.contains("if (!boundary)"));
+        assert!(boundary.contains("WriteCurrent(pixel, currentColor, 0u, 1.0)"));
+    }
+
     #[test]
     fn tonemap_distinguishes_split_signals_from_composed_dlss_hdr() {
         assert_eq!(tonemap_input_mode(DenoiserBackend::Svgf, false), 0);
@@ -5743,6 +6071,16 @@ mod tests {
             }
             for base in RR_TONEMAP_TABLE_BASES {
                 ranges.push((base, base + 15));
+            }
+            for frame_index in 0..FRAME_COUNT {
+                for history_index in 0..2 {
+                    let base = RR_PRIMARY_VISIBILITY_TABLE_BASE
+                        + (frame_index * 2 + history_index) * RR_PRIMARY_VISIBILITY_TABLE_STRIDE;
+                    ranges.push((base, base + RR_PRIMARY_VISIBILITY_TABLE_STRIDE));
+                }
+            }
+            for base in RR_BOUNDARY_TABLE_BASES {
+                ranges.push((base, base + 9));
             }
         }
         ranges.sort_unstable();

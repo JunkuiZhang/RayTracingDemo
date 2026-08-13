@@ -27,9 +27,11 @@ pub enum GpuPass {
     DlssEvaluate = 14,
     RrInputAdapter = 15,
     RrEvaluate = 16,
+    RrPrimaryVisibility = 17,
+    RrBoundaryResolve = 18,
 }
 
-pub const PASS_COUNT: usize = 17;
+pub const PASS_COUNT: usize = 19;
 pub const TIMING_WINDOW_CAPACITY: usize = 240;
 const TIMESTAMPS_PER_FRAME: usize = PASS_COUNT * 2;
 const BENCHMARK_HISTOGRAM_RESOLUTION_MS: f64 = 0.01;
@@ -55,6 +57,8 @@ pub struct GpuTimingSample {
     pub dlss_evaluate_ms: f64,
     pub rr_input_adapter_ms: f64,
     pub rr_evaluate_ms: f64,
+    pub rr_primary_visibility_ms: f64,
+    pub rr_boundary_resolve_ms: f64,
     pub total_ms: f64,
     pub valid: bool,
 }
@@ -79,6 +83,8 @@ impl GpuTimingSample {
             GpuPass::DlssEvaluate => self.dlss_evaluate_ms,
             GpuPass::RrInputAdapter => self.rr_input_adapter_ms,
             GpuPass::RrEvaluate => self.rr_evaluate_ms,
+            GpuPass::RrPrimaryVisibility => self.rr_primary_visibility_ms,
+            GpuPass::RrBoundaryResolve => self.rr_boundary_resolve_ms,
         }
     }
 }
@@ -417,6 +423,8 @@ impl GpuProfiler {
             GpuPass::DlssEvaluate => b"Stage10 DLSS Evaluate\0",
             GpuPass::RrInputAdapter => b"Stage11 DLSS RR Input Adapter\0",
             GpuPass::RrEvaluate => b"Stage11 DLSS Ray Reconstruction\0",
+            GpuPass::RrPrimaryVisibility => b"Stage11 RR Primary Visibility\0",
+            GpuPass::RrBoundaryResolve => b"Stage11 RR Boundary Resolve\0",
             GpuPass::Total => b"Stage8 Total\0",
         };
         self.pix.begin(command_list, label);
@@ -549,6 +557,8 @@ impl GpuProfiler {
             dlss_evaluate_ms: values[GpuPass::DlssEvaluate as usize],
             rr_input_adapter_ms: values[GpuPass::RrInputAdapter as usize],
             rr_evaluate_ms: values[GpuPass::RrEvaluate as usize],
+            rr_primary_visibility_ms: values[GpuPass::RrPrimaryVisibility as usize],
+            rr_boundary_resolve_ms: values[GpuPass::RrBoundaryResolve as usize],
             total_ms: values[GpuPass::Total as usize],
             valid: true,
         };
@@ -680,6 +690,8 @@ mod tests {
             dlss_evaluate_ms: 10.0,
             rr_input_adapter_ms: 11.0,
             rr_evaluate_ms: 12.0,
+            rr_primary_visibility_ms: 13.0,
+            rr_boundary_resolve_ms: 14.0,
             total_ms: 30.0,
             valid: true,
         };

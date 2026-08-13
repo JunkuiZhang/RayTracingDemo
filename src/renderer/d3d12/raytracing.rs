@@ -900,6 +900,24 @@ impl AccelerationStructures {
         }
     }
 
+    /// Expose only the read-only frame-local upload resource used by the
+    /// visibility descriptor table. The mapped pointer stays private so a
+    /// generation can never accidentally write an in-flight frame's data.
+    #[cfg(feature = "streamline-rr")]
+    pub fn instance_gpu_resource(&self, frame_index: usize) -> &ID3D12Resource {
+        &self.frame_data[frame_index % FRAME_CONTEXT_COUNT]
+            .instance_gpu
+            .resource
+    }
+
+    #[cfg(feature = "streamline-rr")]
+    pub fn instance_count(&self) -> u32 {
+        self.frame_data
+            .first()
+            .map(|frame| (frame.instance_gpu.byte_size / size_of::<InstanceGpu>()) as u32)
+            .unwrap_or(0)
+    }
+
     pub fn release_build_resources(&mut self) {
         self.initialization_retirements.clear();
         if !self.tlas_update_enabled {

@@ -2,6 +2,7 @@
 // writes first-hit attributes. RawDiffuse is albedo-demodulated diffuse only;
 // RawSpecular is the unmodulated specular + emissive signal. Temporal
 // reconstruction and spatial filtering are deliberately separate dispatches.
+#include "stage11_camera.hlsli"
 RaytracingAccelerationStructure Scene : register(t0);
 
 struct Vertex
@@ -249,47 +250,27 @@ float Schlick(float cosine, float etaRatio)
 
 void CameraBasis(float yaw, float pitch, out float3 forward, out float3 right, out float3 up)
 {
-    forward = normalize(float3(sin(yaw) * cos(pitch), sin(pitch), cos(yaw) * cos(pitch)));
-    right = normalize(cross(float3(0, 1, 0), forward));
-    up = cross(forward, right);
+    Stage11CameraBasis(yaw, pitch, forward, right, up);
 }
 
 float2 ProjectToPreviousUv(float3 worldPosition, uint2 size)
 {
-    const float focalLength = 2.747477419;
-    float3 forward;
-    float3 right;
-    float3 up;
-    CameraBasis(PreviousCameraYaw, PreviousCameraPitch, forward, right, up);
-    float3 relative = worldPosition - PreviousCameraPosition;
-    float forwardDistance = dot(relative, forward);
-    if (forwardDistance <= 0.0001)
-        return float2(-2.0, -2.0);
-
-    float aspect = float(size.x) / float(size.y);
-    float2 screen;
-    screen.x = focalLength * dot(relative, right) / forwardDistance;
-    screen.y = -focalLength * dot(relative, up) / forwardDistance;
-    return float2(screen.x / aspect, screen.y) * 0.5 + 0.5;
+    return Stage11ProjectToUv(
+        worldPosition,
+        PreviousCameraPosition,
+        PreviousCameraYaw,
+        PreviousCameraPitch,
+        size);
 }
 
 float2 ProjectToCurrentUv(float3 worldPosition, uint2 size)
 {
-    const float focalLength = 2.747477419;
-    float3 forward;
-    float3 right;
-    float3 up;
-    CameraBasis(CameraYaw, CameraPitch, forward, right, up);
-    float3 relative = worldPosition - CameraPosition;
-    float forwardDistance = dot(relative, forward);
-    if (forwardDistance <= 0.0001)
-        return float2(-2.0, -2.0);
-
-    float aspect = float(size.x) / float(size.y);
-    float2 screen;
-    screen.x = focalLength * dot(relative, right) / forwardDistance;
-    screen.y = -focalLength * dot(relative, up) / forwardDistance;
-    return float2(screen.x / aspect, screen.y) * 0.5 + 0.5;
+    return Stage11ProjectToUv(
+        worldPosition,
+        CameraPosition,
+        CameraYaw,
+        CameraPitch,
+        size);
 }
 
 float DlssDeviceDepth(float3 worldPosition)
@@ -811,7 +792,8 @@ void RayGen()
 
     RayDesc ray;
     ray.Origin = CameraPosition;
-    ray.Direction = normalize(forward * 2.747477419 + right * screen.x - up * screen.y);
+    ray.Direction = normalize(
+        forward * STAGE11_CAMERA_FOCAL_LENGTH + right * screen.x - up * screen.y);
     ray.TMin = 0.001;
     ray.TMax = 1000.0;
 
