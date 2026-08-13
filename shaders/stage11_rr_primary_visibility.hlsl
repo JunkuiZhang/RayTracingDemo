@@ -4,6 +4,7 @@
 // shading quality. In particular, neither frame index nor projection jitter
 // participates in this ray construction.
 #include "stage11_camera.hlsli"
+#include "stage11_path_space.hlsli"
 
 RaytracingAccelerationStructure Scene : register(t0);
 

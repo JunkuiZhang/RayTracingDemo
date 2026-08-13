@@ -3,6 +3,7 @@
 // RawSpecular is the unmodulated specular + emissive signal. Temporal
 // reconstruction and spatial filtering are deliberately separate dispatches.
 #include "stage11_camera.hlsli"
+#include "stage11_path_space.hlsli"
 RaytracingAccelerationStructure Scene : register(t0);
 
 struct Vertex

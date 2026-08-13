@@ -11,6 +11,8 @@ mod data;
 mod debug_view;
 mod entity;
 mod material;
+#[allow(dead_code)] // P2 consumes this tested CPU/HLSL identity contract.
+mod path_space;
 mod realtime;
 // 9A keeps the ABI/guide structs available for the staged 9B/9C integration;
 // some fields are intentionally not consumed until the optional backend exists.
