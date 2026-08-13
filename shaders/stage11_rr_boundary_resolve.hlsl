@@ -1,7 +1,7 @@
-// Resolve real opaque boundaries plus stable virtual surfaces unfolded from a
-// static pure mirror. Ordinary non-boundary pixels are copied from the current
-// RR HDR value exactly; this remains a guide-limited reflection resolve rather
-// than a full-screen temporal blend across unrelated materials.
+// Resolve real opaque boundaries plus stable virtual surfaces produced by a
+// static pure mirror or a static principal glass transmission. Ordinary non-
+// boundary pixels are copied from current RR HDR exactly; this remains a
+// guide-limited resolve rather than a full-screen blend across materials.
 
 Texture2D<float4> CurrentRrHdr : register(t0);
 Texture2D<uint> CurrentSurfaceId : register(t1);
@@ -213,10 +213,10 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
         return;
     }
 
-    // A planar-mirror PSR guide is stable across the complete reflected hit,
-    // so accumulate that virtual surface rather than just its two-pixel edge.
-    // Motion, ID, depth, normal, neighborhood clamp and shading guards below
-    // still reject reflected-object motion and disocclusion.
+    // A planar-mirror PSR or static principal-transmission guide is stable
+    // across the complete virtual hit, so accumulate that surface rather than
+    // just its two-pixel edge. Motion, ID, depth, normal, neighborhood clamp
+    // and shading guards still reject object motion and disocclusion.
     uint mask = (boundary ? BOUNDARY_MASK_EDGE : 0u)
         | (virtualSurface ? BOUNDARY_MASK_VIRTUAL_SURFACE : 0u);
     if (ResetHistory != 0u || currentId == INVALID_SURFACE_ID

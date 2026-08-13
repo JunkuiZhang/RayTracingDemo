@@ -67,10 +67,11 @@ cbuffer CameraConstants : register(b0)
 };
 
 static const uint INVALID_SURFACE_ID = 0xFFFFFFFFu;
-// Scene stable IDs reserve the high bit for this pass. Marking a reflected
-// hit keeps the physical floor distinct from that floor seen through a mirror
-// while the remaining bits retain the reflected surface identity.
+// Scene stable IDs reserve the high bit for this pass. Marking a virtual hit
+// keeps a physical surface distinct from the same surface seen through a
+// mirror or glass while the remaining bits retain the hit surface identity.
 static const uint VIRTUAL_SURFACE_BIT = 0x80000000u;
+static const uint MATERIAL_FLAG_LEGACY_DIELECTRIC = 4u;
 static const uint MATERIAL_FLAG_LEGACY_METAL = 8u;
 static const float INVALID_VIEW_Z = 1001.0;
 static const float PURE_MIRROR_ROUGHNESS = 0.08;
@@ -105,6 +106,193 @@ float3 ReflectPointAcrossPlane(float4 plane, float3 position)
 float3 ReflectVectorAcrossPlane(float4 plane, float3 direction)
 {
     return direction - 2.0 * dot(plane.xyz, direction) * plane.xyz;
+}
+
+bool MakeTransmissionVirtualSurface(
+    uint instanceIndex,
+    uint primitive,
+    float2 committedBarycentrics,
+    float3x4 objectToWorld,
+    float3x4 worldToObject,
+    float3 rayDirection,
+    out uint virtualSurfaceId,
+    out float4 virtualSurfaceMeta)
+{
+    InstanceGpu instanceData = Instances[instanceIndex];
+    uint3 triangleIndices = uint3(
+        Indices[instanceData.indexOffset + primitive * 3u],
+        Indices[instanceData.indexOffset + primitive * 3u + 1u],
+        Indices[instanceData.indexOffset + primitive * 3u + 2u]);
+    float3 barycentrics = float3(
+        1.0 - committedBarycentrics.x - committedBarycentrics.y,
+        committedBarycentrics.x,
+        committedBarycentrics.y);
+    Vertex vertex0 = Vertices[instanceData.vertexOffset + triangleIndices.x];
+    Vertex vertex1 = Vertices[instanceData.vertexOffset + triangleIndices.y];
+    Vertex vertex2 = Vertices[instanceData.vertexOffset + triangleIndices.z];
+    float3 localPosition = vertex0.position * barycentrics.x
+        + vertex1.position * barycentrics.y
+        + vertex2.position * barycentrics.z;
+    float3 localNormal = vertex0.normal * barycentrics.x
+        + vertex1.normal * barycentrics.y
+        + vertex2.normal * barycentrics.z;
+    float3 worldPosition = mul(objectToWorld, float4(localPosition, 1.0));
+    float3 previousWorldPosition = PreviousWorldPosition(
+        localPosition,
+        instanceData);
+    float3 worldNormal = normalize(mul(
+        localNormal,
+        (float3x3)worldToObject));
+    if (!FiniteNormal(worldNormal))
+        return false;
+    if (dot(worldNormal, rayDirection) > 0.0)
+        worldNormal = -worldNormal;
+
+    float currentViewZ = Stage11ViewZ(
+        worldPosition,
+        CameraPosition,
+        CameraYaw,
+        CameraPitch);
+    float previousViewZ = Stage11ViewZ(
+        previousWorldPosition,
+        PreviousCameraPosition,
+        PreviousCameraYaw,
+        PreviousCameraPitch);
+    if (!isfinite(currentViewZ) || !isfinite(previousViewZ)
+        || currentViewZ <= 0.0 || previousViewZ <= 0.0)
+        return false;
+
+    virtualSurfaceId = VIRTUAL_SURFACE_BIT | instanceData.stableSurfaceId;
+    virtualSurfaceMeta = float4(
+        Stage11OctEncode(worldNormal),
+        currentViewZ,
+        previousViewZ);
+    return true;
+}
+
+bool TraceStaticGlassVirtualSurface(
+    RayDesc primaryRay,
+    float3 entryPosition,
+    float3 entryNormal,
+    float ior,
+    out uint virtualSurfaceId,
+    out float4 virtualSurfaceMeta)
+{
+    virtualSurfaceId = INVALID_SURFACE_ID;
+    virtualSurfaceMeta = float4(0.5, 0.5, INVALID_VIEW_Z, INVALID_VIEW_Z);
+
+    // Trace the principal transmitted path through one closed dielectric.
+    // Fresnel reflection stays in RR's main signal; this guide identifies the
+    // dominant image seen through the glass and never contributes radiance.
+    float3 insideDirection = refract(
+        primaryRay.Direction,
+        entryNormal,
+        1.0 / max(ior, 1.0001));
+    if (!FiniteNormal(insideDirection))
+        return false;
+    insideDirection = normalize(insideDirection);
+
+    RayDesc exitRay;
+    exitRay.Origin = entryPosition + insideDirection * 0.002;
+    exitRay.Direction = insideDirection;
+    exitRay.TMin = 0.001;
+    exitRay.TMax = 1000.0;
+    // The first inside hit is either the dielectric exit or an opaque shared
+    // contact interface (the Cornell floor intersects the hidden box bottom).
+    // Accepting both avoids fabricating a second medium boundary behind the
+    // actually visible opaque contact surface.
+    RayQuery<RAY_FLAG_FORCE_OPAQUE> exitQuery;
+    exitQuery.TraceRayInline(Scene, RAY_FLAG_NONE, 0xFF, exitRay);
+    while (exitQuery.Proceed())
+    {
+    }
+    if (exitQuery.CommittedStatus() != COMMITTED_TRIANGLE_HIT)
+        return false;
+
+    uint exitInstanceIndex = exitQuery.CommittedInstanceID();
+    InstanceGpu exitInstance = Instances[exitInstanceIndex];
+    Material exitMaterial = Materials[exitInstance.materialIndex];
+    uint exitPrimitive = exitQuery.CommittedPrimitiveIndex();
+    float2 exitCommittedBarycentrics = exitQuery.CommittedTriangleBarycentrics();
+    if ((exitMaterial.flags & MATERIAL_FLAG_LEGACY_DIELECTRIC) == 0u)
+    {
+        return MakeTransmissionVirtualSurface(
+            exitInstanceIndex,
+            exitPrimitive,
+            exitCommittedBarycentrics,
+            exitQuery.CommittedObjectToWorld3x4(),
+            exitQuery.CommittedWorldToObject3x4(),
+            insideDirection,
+            virtualSurfaceId,
+            virtualSurfaceMeta);
+    }
+    uint3 exitIndices = uint3(
+        Indices[exitInstance.indexOffset + exitPrimitive * 3u],
+        Indices[exitInstance.indexOffset + exitPrimitive * 3u + 1u],
+        Indices[exitInstance.indexOffset + exitPrimitive * 3u + 2u]);
+    float3 exitBarycentrics = float3(
+        1.0 - exitCommittedBarycentrics.x - exitCommittedBarycentrics.y,
+        exitCommittedBarycentrics.x,
+        exitCommittedBarycentrics.y);
+    Vertex exitVertex0 = Vertices[exitInstance.vertexOffset + exitIndices.x];
+    Vertex exitVertex1 = Vertices[exitInstance.vertexOffset + exitIndices.y];
+    Vertex exitVertex2 = Vertices[exitInstance.vertexOffset + exitIndices.z];
+    float3 exitLocalPosition = exitVertex0.position * exitBarycentrics.x
+        + exitVertex1.position * exitBarycentrics.y
+        + exitVertex2.position * exitBarycentrics.z;
+    float3 exitLocalNormal = exitVertex0.normal * exitBarycentrics.x
+        + exitVertex1.normal * exitBarycentrics.y
+        + exitVertex2.normal * exitBarycentrics.z;
+    float3 exitPosition = mul(
+        exitQuery.CommittedObjectToWorld3x4(),
+        float4(exitLocalPosition, 1.0));
+    float3 exitNormal = normalize(mul(
+        exitLocalNormal,
+        (float3x3)exitQuery.CommittedWorldToObject3x4()));
+    if (!FiniteNormal(exitNormal))
+        return false;
+    // HLSL refract expects N against the incident direction. At a volume exit
+    // the outward geometric normal points with the ray and must be flipped.
+    if (dot(exitNormal, insideDirection) > 0.0)
+        exitNormal = -exitNormal;
+    float3 outsideDirection = refract(
+        insideDirection,
+        exitNormal,
+        max(exitMaterial.ior, 1.0001));
+    if (!FiniteNormal(outsideDirection))
+        return false;
+    outsideDirection = normalize(outsideDirection);
+
+    RayDesc transmittedRay;
+    transmittedRay.Origin = exitPosition + outsideDirection * 0.002;
+    transmittedRay.Direction = outsideDirection;
+    transmittedRay.TMin = 0.001;
+    transmittedRay.TMax = 1000.0;
+    RayQuery<RAY_FLAG_CULL_BACK_FACING_TRIANGLES | RAY_FLAG_FORCE_OPAQUE>
+        transmittedQuery;
+    transmittedQuery.TraceRayInline(Scene, RAY_FLAG_NONE, 0xFF, transmittedRay);
+    while (transmittedQuery.Proceed())
+    {
+    }
+    if (transmittedQuery.CommittedStatus() != COMMITTED_TRIANGLE_HIT)
+        return false;
+
+    uint transmittedInstanceIndex = transmittedQuery.CommittedInstanceID();
+    InstanceGpu transmittedInstance = Instances[transmittedInstanceIndex];
+    Material transmittedMaterial = Materials[transmittedInstance.materialIndex];
+    // One entry/exit pair is the supported real-time contract. Nested glass
+    // needs another explicit layer and must conservatively keep the physical ID.
+    if ((transmittedMaterial.flags & MATERIAL_FLAG_LEGACY_DIELECTRIC) != 0u)
+        return false;
+    return MakeTransmissionVirtualSurface(
+        transmittedInstanceIndex,
+        transmittedQuery.CommittedPrimitiveIndex(),
+        transmittedQuery.CommittedTriangleBarycentrics(),
+        transmittedQuery.CommittedObjectToWorld3x4(),
+        transmittedQuery.CommittedWorldToObject3x4(),
+        outsideDirection,
+        virtualSurfaceId,
+        virtualSurfaceMeta);
 }
 
 [numthreads(8, 8, 1)]
@@ -211,22 +399,49 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
         : (previousUv - currentUv) * float2(size);
 
     Material primaryMaterial = Materials[instanceData.materialIndex];
+    bool legacyGlass =
+        (primaryMaterial.flags & MATERIAL_FLAG_LEGACY_DIELECTRIC) != 0u;
     bool pureLegacyMirror =
         (primaryMaterial.flags & MATERIAL_FLAG_LEGACY_METAL) != 0u
         && primaryMaterial.roughnessFactor <= PURE_MIRROR_ROUGHNESS;
-    // Primary Surface Replacement needs a previous mirror plane to reproject
-    // correctly. InstanceGpu intentionally carries no previous inverse normal
-    // transform, so limit this boundary guide to mirrors whose complete rigid
-    // transform is static. Animated mirrors retain the conservative physical-
-    // surface guide instead of receiving plausible but wrong virtual motion.
-    bool staticMirror =
+    // Virtual reflection/refraction guides need previous interface geometry.
+    // InstanceGpu intentionally carries no previous inverse normal transform,
+    // so limit them to interfaces whose complete rigid transform is static.
+    bool staticPrimarySurface =
         all(abs(currentObjectToWorld[0]
             - instanceData.previousObjectToWorldRow0) <= 1.0e-5)
         && all(abs(currentObjectToWorld[1]
             - instanceData.previousObjectToWorldRow1) <= 1.0e-5)
         && all(abs(currentObjectToWorld[2]
             - instanceData.previousObjectToWorldRow2) <= 1.0e-5);
-    if (!pureLegacyMirror || !staticMirror)
+    bool staticCamera =
+        all(abs(CameraPosition - PreviousCameraPosition) <= 1.0e-5)
+        && abs(CameraYaw - PreviousCameraYaw) <= 1.0e-5
+        && abs(CameraPitch - PreviousCameraPitch) <= 1.0e-5;
+
+    if (legacyGlass && staticPrimarySurface && staticCamera)
+    {
+        uint transmittedSurfaceId;
+        float4 transmittedSurfaceMeta;
+        if (TraceStaticGlassVirtualSurface(
+                ray,
+                currentWorldPosition,
+                worldNormal,
+                primaryMaterial.ior,
+                transmittedSurfaceId,
+                transmittedSurfaceMeta))
+        {
+            // A static refractive image has zero output-pixel motion. The
+            // transmitted hit's ID/normal/depth let the existing bounded RR
+            // history reject real boundaries without blurring the whole frame.
+            PrimarySurfaceId[pixel] = transmittedSurfaceId;
+            PrimarySurfaceMeta[pixel] = transmittedSurfaceMeta;
+            PrimaryMotion[pixel] = 0.0;
+        }
+        return;
+    }
+
+    if (!pureLegacyMirror || !staticPrimarySurface)
         return;
 
     float3 reflectedDirection = normalize(reflect(ray.Direction, worldNormal));

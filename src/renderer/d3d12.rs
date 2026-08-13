@@ -6219,6 +6219,28 @@ mod tests {
     }
 
     #[test]
+    fn rr_glass_uses_deterministic_virtual_transmission_contract() {
+        let shader = include_str!("../../shaders/stage3_triangle.hlsl");
+        assert!(
+            shader.contains(
+                "bool layeredTransmissionEnabled = NrdEnabled != 0u || DlssGuideMode == 2u"
+            )
+        );
+        assert!(shader.contains("bool deterministicGlass = layeredTransmissionEnabled"));
+        assert!(shader.contains("ReconstructionNoisyHdr[glassPixel] = float4(payload.radiance"));
+        assert!(shader.contains("if (NrdEnabled != 0u && isTransmissionSurface)"));
+
+        let visibility = include_str!("../../shaders/stage11_rr_primary_visibility.hlsl");
+        assert!(visibility.contains("bool TraceStaticGlassVirtualSurface"));
+        assert!(visibility.contains("RayQuery<RAY_FLAG_FORCE_OPAQUE> exitQuery"));
+        assert!(visibility.contains("MakeTransmissionVirtualSurface"));
+        assert!(visibility.contains("legacyGlass && staticPrimarySurface && staticCamera"));
+        assert!(visibility.contains("VIRTUAL_SURFACE_BIT | instanceData.stableSurfaceId"));
+        assert!(visibility.contains("PrimaryMotion[pixel] = 0.0"));
+
+    }
+
+    #[test]
     fn nrd_lobes_and_rr_motion_use_separate_reconstruction_contracts() {
         let bridge = include_str!("../../native/nrd_bridge/src/nrd_bridge.cpp");
         assert!(bridge.contains(
