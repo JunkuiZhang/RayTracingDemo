@@ -257,8 +257,17 @@ function Invoke-RecordedProcess(
                 & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
                 $process.WaitForExit(5000)
             }
+            $process.Refresh()
+            if (-not $process.HasExited -and $timedOut) {
+                # A stale Process object can miss the tree-kill transition.
+                # Kill the exact Start-Process child as a second bounded step;
+                # this cannot target an unrelated user process.
+                try { $process.Kill() } catch { }
+                $process.WaitForExit(5000)
+                $process.Refresh()
+            }
             if ($process.HasExited) {
-                $exitCode = $process.ExitCode
+                $exitCode = [int]$process.ExitCode
             } else {
                 $exitCode = -1
             }
