@@ -22,7 +22,7 @@
 | `44a56cf` | 使无有效样本的 GPU pass 序列化为 `null`，并在 reset/resize/hot reload 时清理旧世代诊断累积。 |
 | `6bc0ecd` | 新增有界 `stage11_stable_planes_acceptance.ps1` runner 与 SelfTest。 |
 | `8864725` | 加强 runner timeout 后的子进程刷新、精确 child kill 和退出码记录。 |
-| 待提交 | 本验收记录。 |
+| `bb029fc` | 本验收记录。 |
 
 未实现、未切换：`--path-space-mode auto` 默认切换、Frame Generation、ReSTIR、透明层重构。
 
