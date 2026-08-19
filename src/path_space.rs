@@ -315,7 +315,7 @@ mod tests {
             .expect("reference dielectric must have a reflection identity");
         let transmitted_id = advance_stable_branch(current.branch_id, 2);
         let fresnel = fresnel.clamp(0.0, 1.0);
-        let reflected = ReferenceBranch {
+        let mut reflected = ReferenceBranch {
             branch_id: reflected_id,
             throughput: current.throughput * fresnel,
             next_junction: current.next_junction + 1,
@@ -324,6 +324,7 @@ mod tests {
         if !transmission_valid || transmitted_id.is_none() {
             // Invalid medium state has no legal transmission. Reflection is
             // the sole deterministic fallback and remains the current path.
+            reflected.primary = current.primary;
             return reflected;
         }
 
@@ -618,6 +619,23 @@ mod tests {
                 vec![advance_stable_branch(STABLE_BRANCH_ROOT, 1).unwrap()]
             );
         }
+    }
+
+    #[test]
+    fn invalid_transmission_keeps_reflection_as_current_continuation() {
+        let result = run_reference_scheduler(&[
+            ReferenceJunction::Dielectric {
+                fresnel: 0.2,
+                transmission_valid: false,
+            },
+            ReferenceJunction::Base,
+        ]);
+        let reflected = advance_stable_branch(STABLE_BRANCH_ROOT, 1).unwrap();
+
+        assert_eq!(result.forks_enqueued, 0);
+        assert_eq!(result.queue_overflow, 0);
+        assert_eq!(result.primary_continuation_ids, vec![reflected]);
+        assert_eq!(result.primary_base_ids, vec![reflected]);
     }
 
     #[test]
