@@ -3575,11 +3575,7 @@ impl Dx12Renderer {
                     dlss_active,
                     rr_active,
                     rr_active && self.active_path_space == ActivePathSpace::Legacy,
-                    self.active_path_space.uses_stable_planes()
-                        && matches!(
-                            self.denoiser,
-                            DenoiserBackend::NrdReblur | DenoiserBackend::DlssRayReconstruction
-                        ),
+                    self.active_path_space.uses_stable_planes(),
                 ),
             );
             self.command_list.Close()?;
@@ -3627,11 +3623,7 @@ impl Dx12Renderer {
                 dlss_active,
                 rr_active,
                 rr_active && self.active_path_space == ActivePathSpace::Legacy,
-                self.active_path_space.uses_stable_planes()
-                    && matches!(
-                        self.denoiser,
-                        DenoiserBackend::NrdReblur | DenoiserBackend::DlssRayReconstruction
-                    ),
+                self.active_path_space.uses_stable_planes(),
             );
             self.frames[frame_index].stable_counter_pending =
                 self.active_path_space.uses_stable_planes();
@@ -6939,6 +6931,21 @@ mod tests {
     #[test]
     fn camera_constants_match_the_sixteen_dword_root_constant_contract() {
         assert_eq!(size_of::<CameraConstants>(), 16 * size_of::<u32>());
+    }
+
+    #[test]
+    fn explicit_stable_svgf_reports_its_diagnostic_gpu_passes() {
+        let active = active_gpu_passes(ReconstructionPath::Svgf, false, false, false, true);
+        for pass in [
+            GpuPass::StablePlaneBuild,
+            GpuPass::StablePlaneFill0,
+            GpuPass::StablePlaneFill1,
+            GpuPass::StablePlaneFill2,
+        ] {
+            assert!(active[pass as usize]);
+        }
+        assert!(!active[GpuPass::RrStableMerge as usize]);
+        assert!(!active[GpuPass::NrdStablePrep0 as usize]);
     }
 
     #[test]
