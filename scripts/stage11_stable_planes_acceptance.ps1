@@ -376,18 +376,38 @@ function Test-CounterContract([object]$Json, [System.Collections.Generic.List[st
     if (-not (Test-U32 $counters.completed_frames) -or [uint64]$counters.completed_frames -eq 0) {
         Add-Failure $Failures "stable counter completed_frames must be a positive integer"
     }
-    $means = @($counters.mean)
+    if (-not (Test-Finite $counters.pixels_traced) -or
+        [double]$counters.pixels_traced -lt 1 -or
+        [math]::Floor([double]$counters.pixels_traced) -ne [double]$counters.pixels_traced) {
+        Add-Failure $Failures "pixels_traced must be a positive integer"
+    }
+    if (-not (Test-Finite $counters.active_planes_mean) -or
+        [double]$counters.active_planes_mean -lt 0 -or
+        [double]$counters.active_planes_mean -gt 3) {
+        Add-Failure $Failures "active_planes_mean is outside [0,3]"
+    }
+    $histogram = @($counters.plane_count_histogram)
+    if ($histogram.Count -ne 4 -or
+        @($histogram | Where-Object { -not (Test-U32 $_) }).Count -gt 0) {
+        Add-Failure $Failures "plane_count_histogram must contain four uint32 values"
+    } else {
+        $histogramSum = [uint64]0
+        foreach ($bucket in $histogram) { $histogramSum += [uint64]$bucket }
+        if (Test-Finite $counters.pixels_traced) {
+            if ($histogramSum -ne [uint64]$counters.pixels_traced) {
+                Add-Failure $Failures "plane_count_histogram sum does not equal pixels_traced"
+            }
+        }
+    }
+    $means = @($counters.per_frame_mean)
     if ($means.Count -ne $counterSchema.Count) {
-        Add-Failure $Failures "stable counter mean length mismatch"
+        Add-Failure $Failures "stable counter per_frame_mean length mismatch"
     } else {
         foreach ($mean in $means) {
             if (-not (Test-Finite $mean) -or [double]$mean -lt 0) {
-                Add-Failure $Failures "stable counter mean is non-finite or negative"
+                Add-Failure $Failures "stable counter per_frame_mean is non-finite or negative"
                 break
             }
-        }
-        if (([double]$means[1] -lt 0) -or ([double]$means[1] -gt 3)) {
-            Add-Failure $Failures "active_planes_mean is outside [0,3]"
         }
     }
     $lastValues = @(Get-PropertyPath $counters "last.values")
@@ -395,9 +415,37 @@ function Test-CounterContract([object]$Json, [System.Collections.Generic.List[st
         @($lastValues | Where-Object { -not (Test-U32 $_) }).Count -gt 0) {
         Add-Failure $Failures "last counter values must be twelve uint32 values"
     }
-    if ($means.Count -eq $counterSchema.Count -and
-        (([double]$means[8] -ne 0) -or ([double]$means[11] -ne 0))) {
+    if ($lastValues.Count -eq $counterSchema.Count -and
+        (Test-U32 $Json.render_width) -and (Test-U32 $Json.render_height) -and
+        [uint64]$lastValues[0] -ne ([uint64]$Json.render_width * [uint64]$Json.render_height)) {
+        Add-Failure $Failures "last pixels_traced does not equal the render pixel count"
+    }
+    if ((Test-Finite $counters.interior_overflow_events) -and
+        (Test-Finite $counters.invalid_medium_exit_events) -and
+        (([double]$counters.interior_overflow_events -ne 0) -or
+         ([double]$counters.invalid_medium_exit_events -ne 0))) {
         Add-Failure $Failures "interior or invalid medium exit counter is non-zero"
+    }
+}
+
+function Test-LegacyPassContract(
+    [object]$Json,
+    [System.Collections.Generic.List[string]]$Failures
+) {
+    if ($null -ne (Get-PropertyPath $Json "path_space.counters")) {
+        Add-Failure $Failures "legacy path must not expose stable counter telemetry"
+    }
+    if ($null -ne (Get-PropertyPath $Json "passes.stable_plane.build")) {
+        Add-Failure $Failures "legacy path must not run stable_plane.build"
+    }
+    foreach ($path in @("passes.stable_plane.fill", "passes.nrd_stable.prep", "passes.nrd_stable.denoise", "passes.nrd_stable.compose")) {
+        $items = @(Get-PropertyPath $Json $path)
+        if (@($items | Where-Object { $null -ne $_ }).Count -gt 0) {
+            Add-Failure $Failures "$path must be inactive for the legacy path"
+        }
+    }
+    if ($null -ne (Get-PropertyPath $Json "passes.rr_stable_merge")) {
+        Add-Failure $Failures "legacy path must not run rr_stable_merge"
     }
 }
 
@@ -448,8 +496,12 @@ function Test-BenchmarkContract(
         [string]$json.path_space.consumer -ne [string]$Case.consumer) {
         Add-Failure $Failures "path-space consumer mismatch"
     }
-    Test-ActivePassContract $json ([string]$Case.consumer) $Failures
-    Test-CounterContract $json $Failures
+    if ([string]$Case.consumer -eq "legacy") {
+        Test-LegacyPassContract $json $Failures
+    } else {
+        Test-ActivePassContract $json ([string]$Case.consumer) $Failures
+        Test-CounterContract $json $Failures
+    }
     if ([string]$Case.feature -eq "nrd" -and $json.denoiser.nrd_compiled -ne $true) {
         Add-Failure $Failures "NRD executable does not report nrd compiled"
     }
@@ -466,7 +518,7 @@ function Test-BenchmarkContract(
         if ([string]$json.gpu_name -notmatch "RTX 4060 Laptop") {
             Add-Failure $Failures "GPU is not identified as RTX 4060 Laptop"
         }
-        if ([uint64]$json.path_space.allocated_bytes -le 0) {
+        if ([string]$Case.consumer -ne "legacy" -and [uint64]$json.path_space.allocated_bytes -le 0) {
             Add-Failure $Failures "stable-plane allocation is not reported"
         }
         if ([string]$json.memory.status -ne "available" -or [uint64]$json.memory.budget_bytes -eq 0) {
@@ -495,9 +547,42 @@ function Test-CaptureContract(
     if ([int]$json.output_width -ne [int]$Case.width -or [int]$json.output_height -ne [int]$Case.height) {
         Add-Failure $Failures "capture output extent mismatch"
     }
-    if ([string]$json.path_space.active -ne "stable-planes" -or
+    $expectedPathSpace = if ([string]$Case.consumer -eq "legacy") { "legacy" } else { "stable-planes" }
+    if ([string]$json.path_space.active -ne $expectedPathSpace -or
         [string]$json.path_space.consumer -ne [string]$Case.consumer) {
         Add-Failure $Failures "capture path-space consumer mismatch"
+    }
+}
+
+function Test-ImageDiffContract(
+    [object]$Record,
+    [int]$Width,
+    [int]$Height,
+    [object]$ExpectedRoi,
+    [System.Collections.Generic.List[string]]$Failures
+) {
+    if ($Record.exit_code -ne 0 -or $Record.timed_out -or
+        $Record.stdout_nonempty_lines -ne 1 -or $null -eq $Record.json) {
+        Add-Failure $Failures "image_diff did not produce one valid JSON line: $($Record.json_error)"
+        return
+    }
+    $json = $Record.json
+    if ([int]$json.width -ne $Width -or [int]$json.height -ne $Height) {
+        Add-Failure $Failures "image_diff source extent mismatch"
+    }
+    $expected = if ($null -eq $ExpectedRoi) {
+        [ordered]@{ x = 0; y = 0; width = $Width; height = $Height }
+    } else { $ExpectedRoi }
+    foreach ($field in @("x", "y", "width", "height")) {
+        if ([int](Get-PropertyPath $json "roi.$field") -ne [int]$expected[$field]) {
+            Add-Failure $Failures "image_diff ROI mismatch for $field"
+        }
+    }
+    foreach ($field in @("changed_rgb_pixels", "rgb_pixels_over_2", "alpha_mismatch_count", "max_channel_abs_diff", "mean_max_channel_abs_diff", "mae", "rmse")) {
+        $value = Get-PropertyPath $json $field
+        if (-not (Test-Finite $value) -or [double]$value -lt 0) {
+            Add-Failure $Failures "image_diff metric $field is non-finite or negative"
+        }
     }
 }
 
@@ -586,7 +671,15 @@ function Invoke-SelfTest {
         gpu_name = "NVIDIA GeForce RTX 4060 Laptop GPU"
         gpu_idle_wait_count = 0
         path_space = @{ active = "stable-planes"; consumer = "rr-stable-planes"; allocated_bytes = 1
-            counters = @{ schema = $counterSchema; completed_frames = 1; mean = @(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); last = @{ values = @(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) } } }
+            counters = @{
+                schema = $counterSchema; completed_frames = 1; pixels_traced = 57600
+                active_planes_mean = 1.0; plane_count_histogram = @(0, 57600, 0, 0)
+                plane_overflow_pixels = 0; branch_queue_overflow_events = 0
+                interior_overflow_events = 0; false_intersection_rejections = 0
+                total_internal_reflection_events = 0; invalid_medium_exit_events = 0
+                per_frame_mean = @(57600, 57600, 0, 57600, 0, 0, 0, 0, 0, 0, 0, 0)
+                last = @{ values = @(57600, 57600, 0, 57600, 0, 0, 0, 0, 0, 0, 0, 0) }
+            } }
         denoiser = @{ nrd_compiled = $false }
         dlss_rr = @{ compiled = $true }
         passes = @{ total = @{ p95_ms = 1 }; stable_plane = @{ build = @{ p95_ms = 1 }; fill = @(@{}, @{}, @{}) }
@@ -601,7 +694,8 @@ function Invoke-SelfTest {
     Assert-Reject "RR profile mismatch" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.path_space.consumer = "nrd-stable-planes"; Test-BenchmarkContract ([pscustomobject]@{ exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1; json = $bad; json_error = $null }) $case $f }
     Assert-Reject "missing active RR pass" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.passes.rr_stable_merge = $null; Test-BenchmarkContract ([pscustomobject]@{ exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1; json = $bad; json_error = $null }) $case $f }
     Assert-Reject "hidden NRD cost" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.passes.nrd_stable.prep = @(@{}, @{}, @{}); Test-BenchmarkContract ([pscustomobject]@{ exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1; json = $bad; json_error = $null }) $case $f }
-    Assert-Reject "nonzero gpu idle wait" { param($f) if (0 -eq 1) { Add-Failure $f "unreachable" } else { Add-Failure $f "gpu_idle_wait_count must be zero" } }
+    Assert-Reject "bad histogram sum" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.path_space.counters.plane_count_histogram[1] = 1; Test-CounterContract $bad $f }
+    Assert-Reject "nonzero gpu idle wait" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.gpu_idle_wait_count = 1; Test-BenchmarkContract ([pscustomobject]@{ exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1; json = $bad; json_error = $null }) $case $f }
     Assert-Reject "wrong optimal extent" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.upscaler.dlss_optimal.optimal_render_width = 160; Test-OptimalExtent $bad $f }
     Assert-Reject "Reflex Present accounting" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.reflex.present_common_count = 2; Test-ReflexAccounting $bad $f }
     Assert-Reject "timeout" { param($f) $record = [pscustomobject]@{ exit_code = -1; timed_out = $true; stdout_nonempty_lines = 0; json = $null; json_error = "timeout" }; Test-BenchmarkContract $record $case $f }
@@ -611,6 +705,63 @@ function Invoke-SelfTest {
     if ($roi.x -lt 0 -or $roi.y -lt 0 -or $roi.x + $roi.width -gt 320 -or $roi.y + $roi.height -gt 180) {
         $script:SelfTestFailed.Add("ROI normalization bounds")
     } else { $script:SelfTestPassed++ }
+
+    # A legacy capture is valid evidence, but must identify itself as legacy.
+    $legacyCase = New-Case "legacy-selftest" "nrd" "nrd-reblur" "native" 320 180 "cornell" "legacy" 1
+    $legacyCapture = [pscustomobject]@{
+        exit_code = 0; timed_out = $false
+        json = [pscustomobject]@{
+            png_path = $PSCommandPath; output_width = 320; output_height = 180
+            path_space = [pscustomobject]@{ active = "legacy"; consumer = "legacy" }
+        }
+    }
+    $legacyFailures = [System.Collections.Generic.List[string]]::new()
+    Test-CaptureContract $legacyCapture $legacyCase $legacyFailures
+    if ($legacyFailures.Count -gt 0) {
+        $script:SelfTestFailed.Add("legacy capture contract: $($legacyFailures -join ', ')")
+    } else { $script:SelfTestPassed++ }
+
+    $legacyJson = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json
+    $legacyJson.path_space.active = "legacy"
+    $legacyJson.path_space.consumer = "legacy"
+    $legacyJson.path_space.counters = $null
+    $legacyJson.denoiser.nrd_compiled = $true
+    $legacyJson.dlss_rr.compiled = $false
+    $legacyJson.passes.stable_plane.build = $null
+    $legacyJson.passes.stable_plane.fill = @($null, $null, $null)
+    $legacyJson.passes.nrd_stable.prep = @($null, $null, $null)
+    $legacyJson.passes.nrd_stable.denoise = @($null, $null, $null)
+    $legacyJson.passes.nrd_stable.compose = @($null, $null, $null)
+    $legacyJson.passes.rr_stable_merge = $null
+    $legacyBenchmarkFailures = [System.Collections.Generic.List[string]]::new()
+    $legacyBenchmarkRecord = [pscustomobject]@{
+        exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1
+        json = $legacyJson; json_error = $null
+    }
+    Test-BenchmarkContract $legacyBenchmarkRecord $legacyCase $legacyBenchmarkFailures
+    if ($legacyBenchmarkFailures.Count -gt 0) {
+        $script:SelfTestFailed.Add("legacy benchmark contract: $($legacyBenchmarkFailures -join ', ')")
+    } else { $script:SelfTestPassed++ }
+
+    $diffRecord = [pscustomobject]@{
+        exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1; json_error = $null
+        json = [pscustomobject]@{
+            width = 320; height = 180; roi = [pscustomobject]@{ x = 0; y = 0; width = 320; height = 180 }
+            changed_rgb_pixels = 1; rgb_pixels_over_2 = 0; alpha_mismatch_count = 0
+            max_channel_abs_diff = 1; mean_max_channel_abs_diff = 0.1; mae = 0.01; rmse = 0.02
+        }
+    }
+    $diffFailures = [System.Collections.Generic.List[string]]::new()
+    Test-ImageDiffContract $diffRecord 320 180 $null $diffFailures
+    if ($diffFailures.Count -gt 0) {
+        $script:SelfTestFailed.Add("image diff contract: $($diffFailures -join ', ')")
+    } else { $script:SelfTestPassed++ }
+    Assert-Reject "wrong image diff ROI" {
+        param($f)
+        $bad = $diffRecord | ConvertTo-Json -Depth 20 -Compress | ConvertFrom-Json
+        $bad.json.roi.width = 319
+        Test-ImageDiffContract $bad 320 180 $null $f
+    }
 
     if ($failed.Count -gt 0) {
         throw "SelfTest failed: $($failed -join '; ')"
@@ -630,6 +781,8 @@ $environment = Get-EnvironmentEvidence
 $records = [System.Collections.Generic.List[object]]::new()
 $caseSummaries = [System.Collections.Generic.List[object]]::new()
 $suiteFailures = [System.Collections.Generic.List[string]]::new()
+$capturePaths = @{}
+$qualityDiffs = [System.Collections.Generic.List[object]]::new()
 $cases = @(Get-SuiteCases $Suite)
 $effectiveTimeout = if ($Suite -eq "Smoke") { [math]::Min(30, $TimeoutSeconds) } else { $TimeoutSeconds }
 $imageDiffExe = Resolve-OptionalPath "target/release/image_diff.exe"
@@ -647,12 +800,12 @@ foreach ($case in $cases) {
         $args = New-RendererArguments $case "lifecycle" ""
         $record = Invoke-RecordedProcess $exe ($args | Where-Object { $_ -notin @("--capture-output", "", "--capture-after-spp", "0") }) $caseRoot "lifecycle" ([math]::Min(15, $effectiveTimeout))
         $records.Add($record)
-        if ($record.timed_out -or $record.exit_code -eq 0) {
+        if ($record.timed_out) {
             # No benchmark JSON is expected from a deliberately observed GUI.
             # The visual stability and input interactions remain manual evidence.
             $status = "PENDING_MANUAL"
         } else {
-            Add-Failure $caseFailures "lifecycle process exited before observation: $($record.exit_code)"
+            Add-Failure $caseFailures "lifecycle process exited before the observation timeout: $($record.exit_code)"
             $status = "FAIL"
         }
         $caseSummaries.Add([ordered]@{ label = $case.label; status = $status; gates = @($caseFailures) })
@@ -666,6 +819,9 @@ foreach ($case in $cases) {
         $captureRecord = Invoke-RecordedProcess $exe $captureArgs $captureRoot "capture" $effectiveTimeout
         $records.Add($captureRecord)
         Test-CaptureContract $captureRecord $case $caseFailures
+        if ($caseFailures.Count -eq 0 -and $null -ne $captureRecord.json) {
+            $capturePaths[[string]$case.label] = [string]$captureRecord.json.png_path
+        }
     }
 
     if ($Suite -eq "Smoke" -or $Suite -eq "Gate") {
@@ -675,22 +831,74 @@ foreach ($case in $cases) {
         Test-BenchmarkContract $benchmarkRecord $case $caseFailures -Gate:($Suite -eq "Gate")
     }
 
-    if ($Suite -eq "Quality") {
-        if ($imageDiffExe -eq $null) {
-            Add-Failure $caseFailures "image_diff executable is unavailable; ROI diff is PENDING_MANUAL"
-        } else {
-            $roiEvidence = [System.Collections.Generic.List[object]]::new()
-            foreach ($roiName in $roiTable.Keys) {
-                $roi = Convert-NormalizedRoi $roiTable[$roiName] $case.width $case.height
-                $roiEvidence.Add([ordered]@{ name = $roiName; normalized = $roiTable[$roiName]; pixels = $roi; status = "PENDING_MANUAL" })
-            }
-            $roiEvidence | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $caseRoot "roi.json") -Encoding UTF8
-        }
-    }
-
     $status = if ($caseFailures.Count -eq 0) { "PASS" } else { "FAIL" }
     $caseSummaries.Add([ordered]@{ label = $case.label; status = $status; gates = @($caseFailures) })
     foreach ($failure in $caseFailures) { Add-Failure $suiteFailures "$($case.label): $failure" }
+}
+
+if ($Suite -eq "Quality") {
+    $qualityFailures = [System.Collections.Generic.List[string]]::new()
+    # Temporal pairs expose residual motion; convergence pairs expose sampling
+    # sensitivity; stable-vs-legacy is characterization rather than a winner gate.
+    $pairSpecs = @(
+        [ordered]@{ label = "nrd_temporal_127_128"; left = "cornell_nrd_spp127"; right = "cornell_nrd_spp128" },
+        [ordered]@{ label = "rr_temporal_127_128"; left = "cornell_rr_spp127"; right = "cornell_rr_spp128" },
+        [ordered]@{ label = "legacy_temporal_127_128"; left = "cornell_legacy_spp127"; right = "cornell_legacy_spp128" },
+        [ordered]@{ label = "nrd_convergence_64_128"; left = "cornell_nrd_spp64"; right = "cornell_nrd_spp128" },
+        [ordered]@{ label = "rr_convergence_64_128"; left = "cornell_rr_spp64"; right = "cornell_rr_spp128" },
+        [ordered]@{ label = "nrd_stable_vs_legacy_128"; left = "cornell_nrd_spp128"; right = "cornell_legacy_spp128" }
+    )
+    if ($null -eq $imageDiffExe) {
+        Add-Failure $qualityFailures "image_diff executable is unavailable"
+    } else {
+        foreach ($pair in $pairSpecs) {
+            $pairFailures = [System.Collections.Generic.List[string]]::new()
+            if (-not $capturePaths.ContainsKey([string]$pair.left) -or
+                -not $capturePaths.ContainsKey([string]$pair.right)) {
+                Add-Failure $pairFailures "one or both source captures are unavailable"
+            } else {
+                $pairRoot = Join-Path $runRoot (Join-Path "quality-diffs" ([string]$pair.label))
+                $leftPath = [string]$capturePaths[[string]$pair.left]
+                $rightPath = [string]$capturePaths[[string]$pair.right]
+                $fullRecord = Invoke-RecordedProcess $imageDiffExe @($leftPath, $rightPath) (Join-Path $pairRoot "full") "diff" ([math]::Min(30, $effectiveTimeout))
+                $records.Add($fullRecord)
+                Test-ImageDiffContract $fullRecord 1280 720 $null $pairFailures
+                $roiResults = [System.Collections.Generic.List[object]]::new()
+                foreach ($roiName in $roiTable.Keys) {
+                    $roi = Convert-NormalizedRoi $roiTable[$roiName] 1280 720
+                    $roiArgument = "{0},{1},{2},{3}" -f $roi.x, $roi.y, $roi.width, $roi.height
+                    $roiRecord = Invoke-RecordedProcess $imageDiffExe @($leftPath, $rightPath, "--roi", $roiArgument) (Join-Path $pairRoot ([string]$roiName)) "diff" ([math]::Min(30, $effectiveTimeout))
+                    $records.Add($roiRecord)
+                    Test-ImageDiffContract $roiRecord 1280 720 $roi $pairFailures
+                    $roiResults.Add([ordered]@{
+                        name = $roiName
+                        normalized = $roiTable[$roiName]
+                        pixels = $roi
+                        metrics = $roiRecord.json
+                    })
+                }
+                $qualityDiffs.Add([ordered]@{
+                    label = $pair.label
+                    left = $pair.left
+                    right = $pair.right
+                    full = $fullRecord.json
+                    rois = $roiResults
+                    status = if ($pairFailures.Count -eq 0) { "PENDING_MANUAL" } else { "FAIL" }
+                    failures = @($pairFailures)
+                })
+            }
+            foreach ($failure in $pairFailures) {
+                Add-Failure $qualityFailures "$($pair.label): $failure"
+            }
+        }
+    }
+    $qualityStatus = if ($qualityFailures.Count -eq 0) { "PENDING_MANUAL" } else { "FAIL" }
+    $caseSummaries.Add([ordered]@{
+        label = "quality_image_diffs"
+        status = $qualityStatus
+        gates = @($qualityFailures)
+    })
+    foreach ($failure in $qualityFailures) { Add-Failure $suiteFailures "quality_image_diffs: $failure" }
 }
 
 $skippedCount = @($caseSummaries | Where-Object { $_.status -eq "SKIPPED" }).Count
@@ -698,7 +906,7 @@ $failedCount = @($caseSummaries | Where-Object { $_.status -eq "FAIL" }).Count
 $pendingCount = @($caseSummaries | Where-Object { $_.status -eq "PENDING_MANUAL" }).Count
 $overall = if ($failedCount -gt 0) { "FAIL" } elseif ($caseSummaries.Count -eq 0 -or $skippedCount -eq $caseSummaries.Count) { "SKIPPED" } elseif ($pendingCount -gt 0) { "PENDING_MANUAL" } else { "PASS" }
 $summary = [ordered]@{
-    schema_version = 1
+    schema_version = 2
     suite = $Suite
     run_id = $run.id
     overall = $overall
@@ -709,6 +917,7 @@ $summary = [ordered]@{
     roi_table = $roiTable
     cases = $caseSummaries
     process_records = $records
+    quality_diffs = $qualityDiffs
     gate_failures = $suiteFailures
     manual = @("PENDING_MANUAL: static image quality, water ripple, seam motion, lamp-edge stability, resize/minimize/recovery and shader hot reload require human observation")
     constraints = [ordered]@{ default_path_switched = $false; frame_generation_implemented = $false; long_tests_run = $false }
