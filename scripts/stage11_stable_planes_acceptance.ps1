@@ -495,10 +495,10 @@ function Test-BenchmarkContract(
     if ([int]$json.output_width -ne [int]$Case.width -or [int]$json.output_height -ne [int]$Case.height) {
         Add-Failure $Failures "output extent mismatch"
     }
-    $expectedPathSpace = if ([string]$Case.consumer -eq "legacy") { "legacy" } else { "stable-planes" }
-    if ([string]$json.path_space.active -ne $expectedPathSpace -or
+    if ([string]$json.path_space.requested -ne [string]$Case.expected_requested -or
+        [string]$json.path_space.active -ne [string]$Case.expected_active -or
         [string]$json.path_space.consumer -ne [string]$Case.consumer) {
-        Add-Failure $Failures "path-space consumer mismatch"
+        Add-Failure $Failures "requested/active path-space contract mismatch"
     }
     if ([string]$Case.consumer -eq "legacy") {
         Test-LegacyPassContract $json $Failures
@@ -551,10 +551,10 @@ function Test-CaptureContract(
     if ([int]$json.output_width -ne [int]$Case.width -or [int]$json.output_height -ne [int]$Case.height) {
         Add-Failure $Failures "capture output extent mismatch"
     }
-    $expectedPathSpace = if ([string]$Case.consumer -eq "legacy") { "legacy" } else { "stable-planes" }
-    if ([string]$json.path_space.active -ne $expectedPathSpace -or
+    if ([string]$json.path_space.requested -ne [string]$Case.expected_requested -or
+        [string]$json.path_space.active -ne [string]$Case.expected_active -or
         [string]$json.path_space.consumer -ne [string]$Case.consumer) {
-        Add-Failure $Failures "capture path-space consumer mismatch"
+        Add-Failure $Failures "capture requested/active path-space contract mismatch"
     }
 }
 
@@ -591,17 +591,20 @@ function Test-ImageDiffContract(
 }
 
 function New-RendererArguments([hashtable]$Case, [string]$Mode, [string]$OutputPath) {
-    $pathSpaceMode = if ([string]$Case.consumer -eq "legacy") { "legacy" } else { "stable-planes" }
     $arguments = @(
         "--output-size", ("{0}x{1}" -f $Case.width, $Case.height),
         "--scene", [string]$Case.scene,
-        "--path-space-mode", $pathSpaceMode,
         "--denoiser", [string]$Case.denoiser,
         "--upscaler", [string]$Case.upscaler,
         "--atrous-mode", "baseline",
         "--command-recording-mode", "optimized",
         "--acceleration-structure-mode", "baseline"
     )
+    # `default` deliberately omits the flag so the executable's real CLI
+    # default is tested rather than reconstructed inside the runner.
+    if ([string]$Case.path_space_argument -ne "default") {
+        $arguments += @("--path-space-mode", [string]$Case.path_space_argument)
+    }
     if ($Mode -eq "benchmark") {
         $arguments += @("--benchmark-seconds", "1")
     } else {
@@ -615,10 +618,16 @@ function Get-ExecutableForCase([hashtable]$Case) {
     return (Resolve-OptionalPath $RrExe)
 }
 
-function New-Case([string]$Label, [string]$Feature, [string]$Denoiser, [string]$Upscaler, [int]$Width, [int]$Height, [string]$Scene, [string]$Consumer, [int]$Spp) {
+function New-Case([string]$Label, [string]$Feature, [string]$Denoiser, [string]$Upscaler, [int]$Width, [int]$Height, [string]$Scene, [string]$Consumer, [int]$Spp, [string]$PathSpaceArgument = "") {
+    if ([string]::IsNullOrWhiteSpace($PathSpaceArgument)) {
+        $PathSpaceArgument = if ($Consumer -eq "legacy") { "legacy" } else { "stable-planes" }
+    }
     return @{
         label = $Label; feature = $Feature; denoiser = $Denoiser; upscaler = $Upscaler
         width = $Width; height = $Height; scene = $Scene; consumer = $Consumer; spp = $Spp
+        path_space_argument = $PathSpaceArgument
+        expected_requested = if ($PathSpaceArgument -eq "default") { "auto" } else { $PathSpaceArgument }
+        expected_active = if ($Consumer -eq "legacy") { "legacy" } else { "stable-planes" }
     }
 }
 
@@ -631,7 +640,13 @@ function Get-SuiteCases([string]$SelectedSuite) {
     if ($SelectedSuite -eq "Smoke") {
         return @(
             (New-Case "cornell_nrd_smoke" "nrd" "nrd-reblur" "native" 320 180 "cornell" "nrd-stable-planes" 8),
-            (New-Case "cornell_rr_smoke" "streamline-rr" "dlss-rr" "dlss-quality" 320 180 "cornell" "rr-stable-planes" 8)
+            (New-Case "cornell_rr_smoke" "streamline-rr" "dlss-rr" "dlss-quality" 320 180 "cornell" "rr-stable-planes" 8),
+            (New-Case "cornell_svgf_auto_smoke" "nrd" "svgf" "native" 320 180 "cornell" "legacy" 8 "default"),
+            (New-Case "cornell_nrd_auto_smoke" "nrd" "nrd-reblur" "native" 320 180 "cornell" "nrd-stable-planes" 8 "default"),
+            (New-Case "cornell_rr_auto_smoke" "streamline-rr" "dlss-rr" "dlss-quality" 320 180 "cornell" "rr-stable-planes" 8 "default"),
+            (New-Case "cornell_nrd_legacy_smoke" "nrd" "nrd-reblur" "native" 320 180 "cornell" "legacy" 8 "legacy"),
+            (New-Case "cornell_rr_legacy_smoke" "streamline-rr" "dlss-rr" "dlss-quality" 320 180 "cornell" "legacy" 8 "legacy"),
+            (New-Case "cornell_svgf_stable_smoke" "nrd" "svgf" "native" 320 180 "cornell" "diagnostic-only" 8 "stable-planes")
         )
     }
     if ($SelectedSuite -eq "Gate") {
@@ -679,7 +694,7 @@ function Invoke-SelfTest {
         output_width = 320; output_height = 180; render_width = 320; render_height = 180
         gpu_name = "NVIDIA GeForce RTX 4060 Laptop GPU"
         gpu_idle_wait_count = 0
-        path_space = @{ active = "stable-planes"; consumer = "rr-stable-planes"; allocated_bytes = 1
+        path_space = @{ requested = "stable-planes"; active = "stable-planes"; consumer = "rr-stable-planes"; allocated_bytes = 1
             counters = @{
                 schema = $counterSchema; completed_frames = 1; pixels_traced = 57600
                 active_planes_mean = 1.0; plane_count_histogram = @(0, 57600, 0, 0)
@@ -701,6 +716,7 @@ function Invoke-SelfTest {
     $case = New-Case "selftest" "streamline-rr" "dlss-rr" "dlss-quality" 320 180 "cornell" "rr-stable-planes" 0
 
     Assert-Reject "RR profile mismatch" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.path_space.consumer = "nrd-stable-planes"; Test-BenchmarkContract ([pscustomobject]@{ exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1; json = $bad; json_error = $null }) $case $f }
+    Assert-Reject "requested path-space mismatch" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.path_space.requested = "auto"; Test-BenchmarkContract ([pscustomobject]@{ exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1; json = $bad; json_error = $null }) $case $f }
     Assert-Reject "missing active RR pass" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.passes.rr_stable_merge = $null; Test-BenchmarkContract ([pscustomobject]@{ exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1; json = $bad; json_error = $null }) $case $f }
     Assert-Reject "hidden NRD cost" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.passes.nrd_stable.prep = @(@{}, @{}, @{}); Test-BenchmarkContract ([pscustomobject]@{ exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1; json = $bad; json_error = $null }) $case $f }
     Assert-Reject "missing nested benchmark counters" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.path_space.counters = $null; Test-BenchmarkContract ([pscustomobject]@{ exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1; json = $bad; json_error = $null }) $case $f }
@@ -745,7 +761,7 @@ function Invoke-SelfTest {
         exit_code = 0; timed_out = $false
         json = [pscustomobject]@{
             png_path = $PSCommandPath; output_width = 320; output_height = 180
-            path_space = [pscustomobject]@{ active = "legacy"; consumer = "legacy" }
+            path_space = [pscustomobject]@{ requested = "legacy"; active = "legacy"; consumer = "legacy" }
         }
     }
     $legacyFailures = [System.Collections.Generic.List[string]]::new()
@@ -755,6 +771,7 @@ function Invoke-SelfTest {
     } else { $script:SelfTestPassed++ }
 
     $legacyJson = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json
+    $legacyJson.path_space.requested = "legacy"
     $legacyJson.path_space.active = "legacy"
     $legacyJson.path_space.consumer = "legacy"
     $legacyJson.path_space.counters = $null
@@ -811,13 +828,21 @@ function Invoke-SelfTest {
         $script:SelfTestPassed++
     }
 
+    $autoCases = @(Get-SuiteCases "Smoke" | Where-Object { $_.path_space_argument -eq "default" })
+    if ($autoCases.Count -ne 3 -or
+        @($autoCases | Where-Object { (New-RendererArguments $_ "benchmark" "") -contains "--path-space-mode" }).Count -ne 0) {
+        $script:SelfTestFailed.Add("auto smoke cases must omit --path-space-mode")
+    } else {
+        $script:SelfTestPassed++
+    }
+
     $nestedCase = $nestedQualityCases[0]
     $captureFailures = [System.Collections.Generic.List[string]]::new()
     Test-CaptureContract ([pscustomobject]@{
             exit_code = 0; timed_out = $false
             json = [pscustomobject]@{
                 png_path = $PSCommandPath; output_width = 1280; output_height = 720
-                path_space = [pscustomobject]@{ active = "stable-planes"; consumer = "nrd-stable-planes" }
+                path_space = [pscustomobject]@{ requested = "stable-planes"; active = "stable-planes"; consumer = "nrd-stable-planes" }
             }
         }) $nestedCase $captureFailures
     $benchmarkFailures = [System.Collections.Generic.List[string]]::new()
