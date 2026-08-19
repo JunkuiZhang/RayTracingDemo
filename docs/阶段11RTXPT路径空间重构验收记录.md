@@ -113,6 +113,10 @@ A/B 对照时只把 `stable-planes` 改成 `legacy`。默认值在最终验收�
 
 ## 7. 最终准入清单
 
+具体实现顺序、JSON/counter ABI、嵌套介质夹具和有界 runner 契约见
+[`阶段11RTXPT稳定平面准生产验收执行方案.md`](阶段11RTXPT稳定平面准生产验收执行方案.md)。
+该方案明确禁止 Luna 在证据 review 前自行切换默认路径。
+
 以下项目完成前不得切换默认值：
 
 1. 给 BuildStablePlanes、每层 FillStablePlanes、NRD layer/compose 和 RR merge 增加独立 GPU
