@@ -5058,6 +5058,32 @@ fn benchmark_json_line(
             "rr_evaluate": gpu_pass_json(report.pass(GpuPass::RrEvaluate)),
             "rr_primary_visibility": gpu_pass_json(report.pass(GpuPass::RrPrimaryVisibility)),
             "rr_boundary_resolve": gpu_pass_json(report.pass(GpuPass::RrBoundaryResolve)),
+            "stable_plane": {
+                "build": gpu_pass_json(report.pass(GpuPass::StablePlaneBuild)),
+                "fill": [
+                    gpu_pass_json(report.pass(GpuPass::StablePlaneFill0)),
+                    gpu_pass_json(report.pass(GpuPass::StablePlaneFill1)),
+                    gpu_pass_json(report.pass(GpuPass::StablePlaneFill2)),
+                ],
+            },
+            "nrd_stable": {
+                "prep": [
+                    gpu_pass_json(report.pass(GpuPass::NrdStablePrep0)),
+                    gpu_pass_json(report.pass(GpuPass::NrdStablePrep1)),
+                    gpu_pass_json(report.pass(GpuPass::NrdStablePrep2)),
+                ],
+                "denoise": [
+                    gpu_pass_json(report.pass(GpuPass::NrdStableDenoise0)),
+                    gpu_pass_json(report.pass(GpuPass::NrdStableDenoise1)),
+                    gpu_pass_json(report.pass(GpuPass::NrdStableDenoise2)),
+                ],
+                "compose": [
+                    gpu_pass_json(report.pass(GpuPass::NrdStableCompose0)),
+                    gpu_pass_json(report.pass(GpuPass::NrdStableCompose1)),
+                    gpu_pass_json(report.pass(GpuPass::NrdStableCompose2)),
+                ],
+            },
+            "rr_stable_merge": gpu_pass_json(report.pass(GpuPass::RrStableMerge)),
         },
         "memory": {
             "usage_bytes": memory.usage_bytes,

@@ -1,8 +1,8 @@
 use std::{cmp::Ordering, ffi::c_void};
 
 use windows::{
-    Win32::Graphics::{Direct3D12::*, Dxgi::Common::*},
     core::Result,
+    Win32::Graphics::{Direct3D12::*, Dxgi::Common::*},
 };
 
 use super::pix::PixEventRuntime;
@@ -29,9 +29,23 @@ pub enum GpuPass {
     RrEvaluate = 16,
     RrPrimaryVisibility = 17,
     RrBoundaryResolve = 18,
+    StablePlaneBuild = 19,
+    StablePlaneFill0 = 20,
+    StablePlaneFill1 = 21,
+    StablePlaneFill2 = 22,
+    NrdStablePrep0 = 23,
+    NrdStablePrep1 = 24,
+    NrdStablePrep2 = 25,
+    NrdStableDenoise0 = 26,
+    NrdStableDenoise1 = 27,
+    NrdStableDenoise2 = 28,
+    NrdStableCompose0 = 29,
+    NrdStableCompose1 = 30,
+    NrdStableCompose2 = 31,
+    RrStableMerge = 32,
 }
 
-pub const PASS_COUNT: usize = 19;
+pub const PASS_COUNT: usize = 33;
 pub const TIMING_WINDOW_CAPACITY: usize = 240;
 const TIMESTAMPS_PER_FRAME: usize = PASS_COUNT * 2;
 const BENCHMARK_HISTOGRAM_RESOLUTION_MS: f64 = 0.01;
@@ -59,6 +73,12 @@ pub struct GpuTimingSample {
     pub rr_evaluate_ms: f64,
     pub rr_primary_visibility_ms: f64,
     pub rr_boundary_resolve_ms: f64,
+    pub stable_plane_build_ms: f64,
+    pub stable_plane_fill_ms: [f64; 3],
+    pub nrd_stable_prep_ms: [f64; 3],
+    pub nrd_stable_denoise_ms: [f64; 3],
+    pub nrd_stable_compose_ms: [f64; 3],
+    pub rr_stable_merge_ms: f64,
     pub total_ms: f64,
     pub valid: bool,
 }
@@ -85,6 +105,20 @@ impl GpuTimingSample {
             GpuPass::RrEvaluate => self.rr_evaluate_ms,
             GpuPass::RrPrimaryVisibility => self.rr_primary_visibility_ms,
             GpuPass::RrBoundaryResolve => self.rr_boundary_resolve_ms,
+            GpuPass::StablePlaneBuild => self.stable_plane_build_ms,
+            GpuPass::StablePlaneFill0 => self.stable_plane_fill_ms[0],
+            GpuPass::StablePlaneFill1 => self.stable_plane_fill_ms[1],
+            GpuPass::StablePlaneFill2 => self.stable_plane_fill_ms[2],
+            GpuPass::NrdStablePrep0 => self.nrd_stable_prep_ms[0],
+            GpuPass::NrdStablePrep1 => self.nrd_stable_prep_ms[1],
+            GpuPass::NrdStablePrep2 => self.nrd_stable_prep_ms[2],
+            GpuPass::NrdStableDenoise0 => self.nrd_stable_denoise_ms[0],
+            GpuPass::NrdStableDenoise1 => self.nrd_stable_denoise_ms[1],
+            GpuPass::NrdStableDenoise2 => self.nrd_stable_denoise_ms[2],
+            GpuPass::NrdStableCompose0 => self.nrd_stable_compose_ms[0],
+            GpuPass::NrdStableCompose1 => self.nrd_stable_compose_ms[1],
+            GpuPass::NrdStableCompose2 => self.nrd_stable_compose_ms[2],
+            GpuPass::RrStableMerge => self.rr_stable_merge_ms,
         }
     }
 }
@@ -96,9 +130,17 @@ pub struct GpuTimingStats {
     pub valid_samples: usize,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GpuTimingReport {
     pub passes: [GpuTimingStats; PASS_COUNT],
+}
+
+impl Default for GpuTimingReport {
+    fn default() -> Self {
+        Self {
+            passes: std::array::from_fn(|_| GpuTimingStats::default()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -425,6 +467,20 @@ impl GpuProfiler {
             GpuPass::RrEvaluate => b"Stage11 DLSS Ray Reconstruction\0",
             GpuPass::RrPrimaryVisibility => b"Stage11 RR Primary Visibility\0",
             GpuPass::RrBoundaryResolve => b"Stage11 RR Boundary Resolve\0",
+            GpuPass::StablePlaneBuild => b"Stage11 Stable Plane Build\0",
+            GpuPass::StablePlaneFill0 => b"Stage11 Stable Plane Fill 0\0",
+            GpuPass::StablePlaneFill1 => b"Stage11 Stable Plane Fill 1\0",
+            GpuPass::StablePlaneFill2 => b"Stage11 Stable Plane Fill 2\0",
+            GpuPass::NrdStablePrep0 => b"Stage11 NRD Stable Prep 0\0",
+            GpuPass::NrdStablePrep1 => b"Stage11 NRD Stable Prep 1\0",
+            GpuPass::NrdStablePrep2 => b"Stage11 NRD Stable Prep 2\0",
+            GpuPass::NrdStableDenoise0 => b"Stage11 NRD Stable Denoise 0\0",
+            GpuPass::NrdStableDenoise1 => b"Stage11 NRD Stable Denoise 1\0",
+            GpuPass::NrdStableDenoise2 => b"Stage11 NRD Stable Denoise 2\0",
+            GpuPass::NrdStableCompose0 => b"Stage11 NRD Stable Compose 0\0",
+            GpuPass::NrdStableCompose1 => b"Stage11 NRD Stable Compose 1\0",
+            GpuPass::NrdStableCompose2 => b"Stage11 NRD Stable Compose 2\0",
+            GpuPass::RrStableMerge => b"Stage11 RR Stable Merge\0",
             GpuPass::Total => b"Stage8 Total\0",
         };
         self.pix.begin(command_list, label);
@@ -559,6 +615,28 @@ impl GpuProfiler {
             rr_evaluate_ms: values[GpuPass::RrEvaluate as usize],
             rr_primary_visibility_ms: values[GpuPass::RrPrimaryVisibility as usize],
             rr_boundary_resolve_ms: values[GpuPass::RrBoundaryResolve as usize],
+            stable_plane_build_ms: values[GpuPass::StablePlaneBuild as usize],
+            stable_plane_fill_ms: [
+                values[GpuPass::StablePlaneFill0 as usize],
+                values[GpuPass::StablePlaneFill1 as usize],
+                values[GpuPass::StablePlaneFill2 as usize],
+            ],
+            nrd_stable_prep_ms: [
+                values[GpuPass::NrdStablePrep0 as usize],
+                values[GpuPass::NrdStablePrep1 as usize],
+                values[GpuPass::NrdStablePrep2 as usize],
+            ],
+            nrd_stable_denoise_ms: [
+                values[GpuPass::NrdStableDenoise0 as usize],
+                values[GpuPass::NrdStableDenoise1 as usize],
+                values[GpuPass::NrdStableDenoise2 as usize],
+            ],
+            nrd_stable_compose_ms: [
+                values[GpuPass::NrdStableCompose0 as usize],
+                values[GpuPass::NrdStableCompose1 as usize],
+                values[GpuPass::NrdStableCompose2 as usize],
+            ],
+            rr_stable_merge_ms: values[GpuPass::RrStableMerge as usize],
             total_ms: values[GpuPass::Total as usize],
             valid: true,
         };
@@ -692,6 +770,12 @@ mod tests {
             rr_evaluate_ms: 12.0,
             rr_primary_visibility_ms: 13.0,
             rr_boundary_resolve_ms: 14.0,
+            stable_plane_build_ms: 15.0,
+            stable_plane_fill_ms: [16.0, 17.0, 18.0],
+            nrd_stable_prep_ms: [19.0, 20.0, 21.0],
+            nrd_stable_denoise_ms: [22.0, 23.0, 24.0],
+            nrd_stable_compose_ms: [25.0, 26.0, 27.0],
+            rr_stable_merge_ms: 28.0,
             total_ms: 30.0,
             valid: true,
         };
