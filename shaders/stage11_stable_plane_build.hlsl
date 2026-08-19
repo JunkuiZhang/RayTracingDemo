@@ -213,12 +213,6 @@ void ProcessStablePlanePixel(uint2 pixel, uint2 extent)
                     EncodeStableDirection(StablePrimaryRayDirection(pixel, extent)));
                 StablePlaneRecords[address] = record;
                 StablePlaneHeaders[uint3(pixel, planeCount)] = state.branchId;
-                InterlockedAdd(
-                    StablePlaneGroupCounters[STABLE_COUNTER_ACTIVE_PLANE_SLOTS],
-                    1u);
-                InterlockedAdd(
-                    StablePlaneGroupCounters[STABLE_COUNTER_PLANE_COUNT_0 + planeCount],
-                    1u);
                 float weight = AverageThroughput(state.throughput);
                 if (weight > dominantWeight)
                 {
@@ -314,6 +308,16 @@ void ProcessStablePlanePixel(uint2 pixel, uint2 extent)
 
     if (head < tail && planeCount >= STABLE_PLANE_COUNT)
         InterlockedAdd(StablePlaneGroupCounters[STABLE_COUNTER_PLANE_OVERFLOW_PIXELS], 1u);
+
+    // These are final per-pixel classifications. Updating the histogram while
+    // discovering planes would make a three-plane pixel appear once in each
+    // of the 0/1/2 buckets and would leave the 3 bucket permanently empty.
+    InterlockedAdd(
+        StablePlaneGroupCounters[STABLE_COUNTER_ACTIVE_PLANE_SLOTS],
+        planeCount);
+    InterlockedAdd(
+        StablePlaneGroupCounters[STABLE_COUNTER_PLANE_COUNT_0 + planeCount],
+        1u);
 
     // Alpha carries only an exact small integer and is not radiance. P3/P4 use
     // it to select the primary guide after all planes have been filled.

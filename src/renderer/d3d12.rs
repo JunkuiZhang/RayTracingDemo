@@ -1084,9 +1084,17 @@ const STABLE_BUILD_TABLE_BASE: usize = 391;
     not(feature = "nrd")
 ))]
 const SHADER_DESCRIPTOR_COUNT: usize = 401;
-#[cfg(all(feature = "streamline", not(feature = "streamline-rr"), feature = "nrd"))]
+#[cfg(all(
+    feature = "streamline",
+    not(feature = "streamline-rr"),
+    feature = "nrd"
+))]
 const STABLE_BUILD_TABLE_BASE: usize = 391;
-#[cfg(all(feature = "streamline", not(feature = "streamline-rr"), feature = "nrd"))]
+#[cfg(all(
+    feature = "streamline",
+    not(feature = "streamline-rr"),
+    feature = "nrd"
+))]
 const SHADER_DESCRIPTOR_COUNT: usize = 458;
 #[cfg(all(feature = "streamline-rr", not(feature = "nrd")))]
 const STABLE_BUILD_TABLE_BASE: usize = 501;
@@ -1131,35 +1139,27 @@ const ATROUS_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage6_at
 const ATROUS_SHARED_SHADER: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/stage8_atrous_shared.dxil"));
 const TONEMAP_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage6_tonemap.dxil"));
-const STABLE_PLANE_BUILD_SHADER: &[u8] = include_bytes!(concat!(
-    env!("OUT_DIR"),
-    "/stage11_stable_plane_build.dxil"
-));
+const STABLE_PLANE_BUILD_SHADER: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/stage11_stable_plane_build.dxil"));
 #[cfg(feature = "nrd")]
 const NRD_PREP_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage9_nrd_prep.dxil"));
 #[cfg(feature = "nrd")]
 const NRD_COMPOSE_SHADER: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/stage9_nrd_compose.dxil"));
 #[cfg(feature = "nrd")]
-const NRD_STABLE_PREP_SHADER: &[u8] = include_bytes!(concat!(
-    env!("OUT_DIR"),
-    "/stage11_nrd_stable_prep.dxil"
-));
+const NRD_STABLE_PREP_SHADER: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/stage11_nrd_stable_prep.dxil"));
 #[cfg(feature = "nrd")]
-const NRD_STABLE_COMPOSE_SHADER: &[u8] = include_bytes!(concat!(
-    env!("OUT_DIR"),
-    "/stage11_nrd_stable_compose.dxil"
-));
+const NRD_STABLE_COMPOSE_SHADER: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/stage11_nrd_stable_compose.dxil"));
 #[cfg(feature = "streamline")]
 const DLSS_COMPOSE_SHADER: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/stage10_dlss_input.dxil"));
 #[cfg(feature = "streamline-rr")]
 const RR_INPUT_SHADER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stage11_rr_input.dxil"));
 #[cfg(feature = "streamline-rr")]
-const RR_STABLE_INPUT_SHADER: &[u8] = include_bytes!(concat!(
-    env!("OUT_DIR"),
-    "/stage11_rr_stable_input.dxil"
-));
+const RR_STABLE_INPUT_SHADER: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/stage11_rr_stable_input.dxil"));
 #[cfg(feature = "streamline-rr")]
 const RR_EMISSIVE_SHADER: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/stage11_rr_emissive.dxil"));
@@ -1643,7 +1643,9 @@ impl Dx12Renderer {
                 .is_ok()
             {
                 values.copy_from_slice(std::slice::from_raw_parts(
-                    mapped.cast::<u32>().add(frame_index * crate::path_space::STABLE_PLANE_COUNTER_COUNT),
+                    mapped
+                        .cast::<u32>()
+                        .add(frame_index * crate::path_space::STABLE_PLANE_COUNTER_COUNT),
                     crate::path_space::STABLE_PLANE_COUNTER_COUNT,
                 ));
                 self.stable_plane_counter_readback
@@ -1656,7 +1658,10 @@ impl Dx12Renderer {
                 let _ = self.stable_plane_counter_telemetry.accept(
                     snapshot,
                     self.active_generation.id,
-                    [self.active_generation.render_extent.width, self.active_generation.render_extent.height],
+                    [
+                        self.active_generation.render_extent.width,
+                        self.active_generation.render_extent.height,
+                    ],
                     sample_valid,
                 );
             }
@@ -1789,7 +1794,10 @@ impl Dx12Renderer {
                     stable_counter_pending: false,
                     stable_counter_valid: false,
                     stable_counter_generation_id: 0,
-                    stable_counter_extent: Extent2D { width: 0, height: 0 },
+                    stable_counter_extent: Extent2D {
+                        width: 0,
+                        height: 0,
+                    },
                 });
             }
             let command_list: ID3D12GraphicsCommandList = device.CreateCommandList(
@@ -2560,9 +2568,8 @@ impl Dx12Renderer {
                 self.submit_transition_batch(&mut command_recording_stats);
                 self.command_list.CopyBufferRegion(
                     &self.stable_plane_counter_readback,
-                    (frame_index
-                        * crate::path_space::STABLE_PLANE_COUNTER_COUNT
-                        * size_of::<u32>()) as u64,
+                    (frame_index * crate::path_space::STABLE_PLANE_COUNTER_COUNT * size_of::<u32>())
+                        as u64,
                     &counter_resource,
                     0,
                     (crate::path_space::STABLE_PLANE_COUNTER_COUNT * size_of::<u32>()) as u64,
@@ -2598,8 +2605,7 @@ impl Dx12Renderer {
                     self._acceleration_structures
                         .instance_gpu_address(frame_index),
                 );
-                command_list4
-                    .SetComputeRootDescriptorTable(3, self._sampler_heap.gpu_handle(0));
+                command_list4.SetComputeRootDescriptorTable(3, self._sampler_heap.gpu_handle(0));
                 command_list4.SetPipelineState1(&self.raytracing_pipeline.state_object);
 
                 // Reverse plane order matches the later denoiser/compositor
@@ -2610,7 +2616,8 @@ impl Dx12Renderer {
                         1 => GpuPass::StablePlaneFill1,
                         _ => GpuPass::StablePlaneFill2,
                     };
-                    self.gpu_profiler.begin(&self.command_list, frame_index, fill_pass);
+                    self.gpu_profiler
+                        .begin(&self.command_list, frame_index, fill_pass);
                     self.gpu_profiler.begin_event(&self.command_list, fill_pass);
                     let pass_constants = [1u32, plane_index as u32];
                     command_list4.SetComputeRoot32BitConstants(
@@ -2623,14 +2630,14 @@ impl Dx12Renderer {
                         RayGenerationShaderRecord: self.raytracing_pipeline.stable_fill_raygen,
                         MissShaderTable: self.raytracing_pipeline.miss,
                         HitGroupTable: self.raytracing_pipeline.hit_group,
-                        CallableShaderTable:
-                            D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE::default(),
+                        CallableShaderTable: D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE::default(),
                         Width: render_extent.width,
                         Height: render_extent.height,
                         Depth: 1,
                     };
                     command_list4.DispatchRays(&fill_dispatch);
-                    self.gpu_profiler.end(&self.command_list, frame_index, fill_pass);
+                    self.gpu_profiler
+                        .end(&self.command_list, frame_index, fill_pass);
                     self.gpu_profiler.end_event(&self.command_list);
                     submit_global_uav_barrier(&self.command_list);
                 }
@@ -3146,11 +3153,7 @@ impl Dx12Renderer {
                                 &mut self.transition_batch,
                                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                             );
-                        for resource in [
-                            &mut rr.depth,
-                            &mut rr.motion,
-                            &mut rr.specular_motion,
-                        ] {
+                        for resource in [&mut rr.depth, &mut rr.motion, &mut rr.specular_motion] {
                             resource.collect_transition(
                                 &mut self.transition_batch,
                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -3206,8 +3209,11 @@ impl Dx12Renderer {
                 self.gpu_profiler
                     .begin_event(&self.command_list, GpuPass::RrInputAdapter);
                 if self.path_space_mode == PathSpaceMode::StablePlanes {
-                    self.gpu_profiler
-                        .begin(&self.command_list, frame_index, GpuPass::RrStableMerge);
+                    self.gpu_profiler.begin(
+                        &self.command_list,
+                        frame_index,
+                        GpuPass::RrStableMerge,
+                    );
                     self.gpu_profiler
                         .begin_event(&self.command_list, GpuPass::RrStableMerge);
                 }
@@ -3328,18 +3334,8 @@ impl Dx12Renderer {
                     [
                         streamline_resource_tag(&rr.input_hdr, 3, 0, render_extent),
                         streamline_resource_tag(&rr.output_hdr, 4, 0, output_extent),
-                        streamline_resource_tag(
-                            diffuse_albedo,
-                            7,
-                            0,
-                            render_extent,
-                        ),
-                        streamline_resource_tag(
-                            specular_albedo,
-                            8,
-                            0,
-                            render_extent,
-                        ),
+                        streamline_resource_tag(diffuse_albedo, 7, 0, render_extent),
+                        streamline_resource_tag(specular_albedo, 8, 0, render_extent),
                         streamline_resource_tag(&rr.normal_roughness, 14, 0, render_extent),
                         streamline_resource_tag(&rr.motion, 1, 0, render_extent),
                         streamline_resource_tag(&rr.depth, 0, 1, render_extent),
@@ -3573,8 +3569,7 @@ impl Dx12Renderer {
                     self.path_space_mode == PathSpaceMode::StablePlanes
                         && matches!(
                             self.denoiser,
-                            DenoiserBackend::NrdReblur
-                                | DenoiserBackend::DlssRayReconstruction
+                            DenoiserBackend::NrdReblur | DenoiserBackend::DlssRayReconstruction
                         ),
                 ),
             );
@@ -3631,8 +3626,8 @@ impl Dx12Renderer {
             );
             self.frames[frame_index].stable_counter_pending =
                 self.path_space_mode == PathSpaceMode::StablePlanes;
-            self.frames[frame_index].stable_counter_valid = !self.reset_history
-                && self.path_space_mode == PathSpaceMode::StablePlanes;
+            self.frames[frame_index].stable_counter_valid =
+                !self.reset_history && self.path_space_mode == PathSpaceMode::StablePlanes;
             self.frames[frame_index].stable_counter_generation_id = self.active_generation.id;
             self.frames[frame_index].stable_counter_extent = render_extent;
             self.active_generation.last_used_fence = fence_value;
@@ -3940,7 +3935,10 @@ impl Dx12Renderer {
                 frame.stable_counter_pending = false;
                 frame.stable_counter_valid = false;
                 frame.stable_counter_generation_id = 0;
-                frame.stable_counter_extent = Extent2D { width: 0, height: 0 };
+                frame.stable_counter_extent = Extent2D {
+                    width: 0,
+                    height: 0,
+                };
             }
             self.width = width;
             self.height = height;
@@ -4609,7 +4607,12 @@ impl Dx12Renderer {
         // epoch when their fences complete later.
         for frame in &mut self.frames {
             frame.timing_valid = false;
+            // A fence-complete warm-up counter is still numerically valid, so
+            // explicitly detach every pending slice from the new measurement
+            // epoch just as we do for timestamp queries.
+            frame.stable_counter_valid = false;
         }
+        self.stable_plane_counter_telemetry = Default::default();
         self.gpu_profiler.begin_benchmark_measurement();
         self.memory_telemetry.begin_benchmark_measurement();
         self.benchmark_history_reset_baseline = self.history_reset_count;
@@ -5360,8 +5363,8 @@ fn gpu_pass_json(stats: profiler::GpuTimingStats) -> serde_json::Value {
 fn stable_plane_counter_json(
     telemetry: &crate::path_space::StablePlaneCounterTelemetry,
 ) -> serde_json::Value {
-    let means = (0..crate::path_space::STABLE_PLANE_COUNTER_COUNT)
-        .map(|index| telemetry.mean(index))
+    let per_frame_means = (0..crate::path_space::STABLE_PLANE_COUNTER_COUNT)
+        .map(|index| telemetry.per_frame_mean(index))
         .collect::<Vec<_>>();
     let schema = crate::path_space::STABLE_PLANE_COUNTER_NAMES.to_vec();
     let last = telemetry.last.map(|snapshot| {
@@ -5375,7 +5378,16 @@ fn stable_plane_counter_json(
     serde_json::json!({
         "schema": schema,
         "completed_frames": telemetry.completed_frames,
-        "mean": means,
+        "pixels_traced": telemetry.sum(0),
+        "active_planes_mean": telemetry.active_planes_mean(),
+        "plane_count_histogram": telemetry.plane_count_histogram(),
+        "plane_overflow_pixels": telemetry.sum(6),
+        "branch_queue_overflow_events": telemetry.sum(7),
+        "interior_overflow_events": telemetry.sum(8),
+        "false_intersection_rejections": telemetry.sum(9),
+        "total_internal_reflection_events": telemetry.sum(10),
+        "invalid_medium_exit_events": telemetry.sum(11),
+        "per_frame_mean": per_frame_means,
         "last": last,
     })
 }
@@ -5886,7 +5898,8 @@ impl Dx12Renderer {
                 1 => GpuPass::NrdStablePrep1,
                 _ => GpuPass::NrdStablePrep2,
             };
-            self.gpu_profiler.begin(&self.command_list, frame_index, prep_pass);
+            self.gpu_profiler
+                .begin(&self.command_list, frame_index, prep_pass);
             self.gpu_profiler.begin_event(&self.command_list, prep_pass);
             self.nrd_stable_prep_pipeline.bind(
                 &self.command_list,
@@ -5899,7 +5912,8 @@ impl Dx12Renderer {
                 self.command_list
                     .Dispatch(render_groups_x, render_groups_y, 1);
             }
-            self.gpu_profiler.end(&self.command_list, frame_index, prep_pass);
+            self.gpu_profiler
+                .end(&self.command_list, frame_index, prep_pass);
             self.gpu_profiler.end_event(&self.command_list);
         }
         self.gpu_profiler
@@ -5993,7 +6007,8 @@ impl Dx12Renderer {
                 };
                 self.gpu_profiler
                     .begin(&self.command_list, frame_index, denoise_pass);
-                self.gpu_profiler.begin_event(&self.command_list, denoise_pass);
+                self.gpu_profiler
+                    .begin_event(&self.command_list, denoise_pass);
                 let result = unsafe {
                     layer.backend.denoise(
                         &frame_state,
@@ -6195,7 +6210,10 @@ impl Dx12Renderer {
             frame.stable_counter_pending = false;
             frame.stable_counter_valid = false;
             frame.stable_counter_generation_id = 0;
-            frame.stable_counter_extent = Extent2D { width: 0, height: 0 };
+            frame.stable_counter_extent = Extent2D {
+                width: 0,
+                height: 0,
+            };
         }
         let raytracing = RaytracingPipeline::new(&self.device, &shaders.raytracing)?;
         let temporal = ComputePipeline::new(
@@ -6367,6 +6385,11 @@ impl Dx12Renderer {
             self.history_reset_count = self.history_reset_count.saturating_add(1);
         }
         self.stable_plane_counter_telemetry = Default::default();
+        for frame in &mut self.frames {
+            // History resets do not necessarily create a render generation.
+            // Mark same-generation pending slices stale before they complete.
+            frame.stable_counter_valid = false;
+        }
         self.reset_history = true;
     }
 
@@ -6396,10 +6419,7 @@ impl Dx12Renderer {
     }
 }
 
-fn create_readback_buffer(
-    device: &ID3D12Device,
-    byte_size: u64,
-) -> Result<ID3D12Resource> {
+fn create_readback_buffer(device: &ID3D12Device, byte_size: u64) -> Result<ID3D12Resource> {
     let heap_properties = D3D12_HEAP_PROPERTIES {
         Type: D3D12_HEAP_TYPE_READBACK,
         ..Default::default()
@@ -6411,7 +6431,10 @@ fn create_readback_buffer(
         DepthOrArraySize: 1,
         MipLevels: 1,
         Format: DXGI_FORMAT_UNKNOWN,
-        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
         Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
         ..Default::default()
     };
@@ -7205,10 +7228,7 @@ mod tests {
         #[cfg(feature = "streamline-rr")]
         {
             ranges.push((RR_INPUT_TABLE_BASE, RR_INPUT_TABLE_BASE + 6));
-            ranges.push((
-                RR_STABLE_INPUT_TABLE_BASE,
-                RR_STABLE_INPUT_TABLE_BASE + 13,
-            ));
+            ranges.push((RR_STABLE_INPUT_TABLE_BASE, RR_STABLE_INPUT_TABLE_BASE + 13));
             for base in RR_EMISSIVE_TABLE_BASES {
                 ranges.push((base, base + 4));
             }
@@ -7347,7 +7367,6 @@ mod tests {
         assert!(visibility.contains("legacyGlass && staticPrimarySurface && staticCamera"));
         assert!(visibility.contains("VIRTUAL_SURFACE_BIT | instanceData.stableSurfaceId"));
         assert!(visibility.contains("PrimaryMotion[pixel] = 0.0"));
-
     }
 
     #[test]

@@ -67,9 +67,24 @@ impl StablePlaneCounterTelemetry {
         true
     }
 
-    pub(crate) fn mean(&self, index: usize) -> Option<f64> {
+    pub(crate) fn per_frame_mean(&self, index: usize) -> Option<f64> {
         (index < STABLE_PLANE_COUNTER_COUNT && self.completed_frames > 0)
             .then(|| self.sums[index] as f64 / self.completed_frames as f64)
+    }
+
+    pub(crate) fn sum(&self, index: usize) -> Option<u64> {
+        (index < STABLE_PLANE_COUNTER_COUNT).then(|| self.sums[index])
+    }
+
+    /// Plane slots normalized by traced pixels, not by frame count. This is
+    /// the only active-plane metric whose valid range is [0, 3].
+    pub(crate) fn active_planes_mean(&self) -> Option<f64> {
+        let pixels = self.sums[0];
+        (pixels > 0).then(|| self.sums[1] as f64 / pixels as f64)
+    }
+
+    pub(crate) fn plane_count_histogram(&self) -> [u64; 4] {
+        [self.sums[2], self.sums[3], self.sums[4], self.sums[5]]
     }
 }
 
@@ -352,8 +367,27 @@ mod tests {
         assert_eq!(telemetry.completed_frames, 0);
         assert!(telemetry.accept(snapshot, 7, [320, 180], true));
         assert_eq!(telemetry.completed_frames, 1);
-        assert_eq!(telemetry.mean(0), Some(1.0));
-        assert_eq!(telemetry.mean(STABLE_PLANE_COUNTER_COUNT), None);
+        assert_eq!(telemetry.per_frame_mean(0), Some(1.0));
+        assert_eq!(telemetry.per_frame_mean(STABLE_PLANE_COUNTER_COUNT), None);
+        assert_eq!(telemetry.sum(0), Some(1));
+        assert_eq!(telemetry.active_planes_mean(), Some(1.0));
+        assert_eq!(telemetry.plane_count_histogram(), [1; 4]);
+    }
+
+    #[test]
+    fn stable_counter_active_mean_uses_pixels_and_histogram_uses_final_buckets() {
+        let mut telemetry = StablePlaneCounterTelemetry::default();
+        let snapshot = StablePlaneCounterSnapshot {
+            generation_id: 3,
+            extent: [4, 2],
+            // Eight pixels own a total of twelve active slots. Exactly one
+            // final histogram bucket is populated per pixel.
+            values: [8, 12, 1, 3, 3, 1, 0, 0, 0, 2, 0, 0],
+        };
+        assert!(telemetry.accept(snapshot, 3, [4, 2], true));
+        assert_eq!(telemetry.active_planes_mean(), Some(1.5));
+        assert_eq!(telemetry.plane_count_histogram(), [1, 3, 3, 1]);
+        assert_eq!(telemetry.plane_count_histogram().iter().sum::<u64>(), 8);
     }
 
     #[test]
@@ -364,5 +398,6 @@ mod tests {
         assert!(shader.contains("GroupMemoryBarrierWithGroupSync();"));
         assert!(shader.contains("if (inBounds)"));
         assert!(shader.contains("InterlockedAdd(StablePlaneCounters[linearThread]"));
+        assert!(shader.contains("STABLE_COUNTER_PLANE_COUNT_0 + planeCount"));
     }
 }
