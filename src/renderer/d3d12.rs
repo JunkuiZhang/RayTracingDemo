@@ -38,7 +38,7 @@ use crate::upscaler::DlssFrameInput;
 use crate::{
     as_policy::AccelerationStructureStats,
     debug_view::DebugView,
-    path_space::PathSpaceMode,
+    path_space::{ActivePathSpace, PathSpaceMode, resolve_path_space},
     realtime::{AtrousMode, CommandRecordingMode, RealtimeConfig, ReflexMode},
     reconstruction::{
         CameraPose, DenoiserBackend, NRD_COMMIT_PREFIX, NRD_VERSION,
@@ -1586,7 +1586,8 @@ pub struct Dx12Renderer {
     animate_model: bool,
     atrous_mode: AtrousMode,
     command_recording_mode: CommandRecordingMode,
-    path_space_mode: PathSpaceMode,
+    requested_path_space: PathSpaceMode,
+    active_path_space: ActivePathSpace,
     denoiser: DenoiserBackend,
     denoiser_switch_count: u64,
     animation_start: Instant,
@@ -2065,6 +2066,7 @@ impl Dx12Renderer {
                     reset: true,
                     delta_time_ms: 0.0,
                 });
+            let active_path_space = resolve_path_space(config.path_space_mode, config.denoiser);
             let active_generation = RenderResourceGeneration::new(
                 &device,
                 &texture_set,
@@ -2078,7 +2080,7 @@ impl Dx12Renderer {
                     with_dlss_sr: !config.upscaler.is_native()
                         && config.denoiser != DenoiserBackend::DlssRayReconstruction,
                     with_dlss_rr: config.denoiser == DenoiserBackend::DlssRayReconstruction,
-                    with_stable_planes: config.path_space_mode == PathSpaceMode::StablePlanes,
+                    with_stable_planes: active_path_space.uses_stable_planes(),
                 },
             )
             .map_err(|error| dx_error("创建初始渲染资源代际", error))?;
@@ -2216,7 +2218,8 @@ impl Dx12Renderer {
                 animate_model: config.animate_model,
                 atrous_mode: config.atrous_mode,
                 command_recording_mode: config.command_recording_mode,
-                path_space_mode: config.path_space_mode,
+                requested_path_space: config.path_space_mode,
+                active_path_space,
                 denoiser: config.denoiser,
                 denoiser_switch_count: 0,
                 animation_start: Instant::now(),
@@ -2346,6 +2349,11 @@ impl Dx12Renderer {
             // for non-final debug views instead of silently falling back to an
             // unrelated native path.
             let rr_active = rr_path;
+            debug_assert_eq!(
+                self.active_generation.stable_planes.is_some(),
+                self.active_path_space.uses_stable_planes(),
+                "active path-space must match its render generation resources"
+            );
             #[cfg(feature = "streamline")]
             let dlss_frame_input = if dlss_active || rr_active {
                 Some(DlssFrameInput::from_cameras(
@@ -2500,9 +2508,10 @@ impl Dx12Renderer {
             // RTXPT-style stable planes use two separate phases. The compute
             // pass first follows only deterministic delta chains and records
             // restart points. Each DXR fill then resumes one recorded branch.
-            // The legacy raygen still runs last during P2 so enabling the
-            // diagnostic path cannot alter the displayed reconstruction yet.
-            if self.path_space_mode == PathSpaceMode::StablePlanes {
+            // A stable NRD/RR consumer skips the monolithic raygen below.
+            // Explicit stable-planes + SVGF still runs it after this pass so
+            // the stable resources remain diagnostic-only for that override.
+            if self.active_path_space.uses_stable_planes() {
                 self.command_list.ClearUnorderedAccessViewUint(
                     self.active_generation
                         .shader_heap
@@ -2654,7 +2663,7 @@ impl Dx12Renderer {
                 0,
             );
             command_list4.SetPipelineState1(&self.raytracing_pipeline.state_object);
-            let stable_consumer_active = self.path_space_mode == PathSpaceMode::StablePlanes
+            let stable_consumer_active = self.active_path_space.uses_stable_planes()
                 && matches!(
                     self.denoiser,
                     DenoiserBackend::NrdReblur | DenoiserBackend::DlssRayReconstruction
@@ -2682,7 +2691,7 @@ impl Dx12Renderer {
             let output_groups_x = output_extent.width.div_ceil(8);
             let output_groups_y = output_extent.height.div_ceil(8);
             #[cfg(feature = "streamline-rr")]
-            if rr_path && self.path_space_mode == PathSpaceMode::Legacy {
+            if rr_path && self.active_path_space == ActivePathSpace::Legacy {
                 {
                     let rr = self
                         .active_generation
@@ -3144,7 +3153,7 @@ impl Dx12Renderer {
                             crate::streamline::STATUS_NOT_INITIALIZED,
                         )
                     })?;
-                    if self.path_space_mode == PathSpaceMode::StablePlanes {
+                    if self.active_path_space.uses_stable_planes() {
                         generation
                             .stable_planes
                             .as_mut()
@@ -3187,7 +3196,7 @@ impl Dx12Renderer {
                         &mut self.transition_batch,
                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     );
-                    if self.path_space_mode == PathSpaceMode::Legacy {
+                    if self.active_path_space == ActivePathSpace::Legacy {
                         rr.motion.collect_transition(
                             &mut self.transition_batch,
                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -3208,7 +3217,7 @@ impl Dx12Renderer {
                     .begin(&self.command_list, frame_index, GpuPass::RrInputAdapter);
                 self.gpu_profiler
                     .begin_event(&self.command_list, GpuPass::RrInputAdapter);
-                if self.path_space_mode == PathSpaceMode::StablePlanes {
+                if self.active_path_space.uses_stable_planes() {
                     self.gpu_profiler.begin(
                         &self.command_list,
                         frame_index,
@@ -3217,7 +3226,7 @@ impl Dx12Renderer {
                     self.gpu_profiler
                         .begin_event(&self.command_list, GpuPass::RrStableMerge);
                 }
-                if self.path_space_mode == PathSpaceMode::StablePlanes {
+                if self.active_path_space.uses_stable_planes() {
                     self.rr_stable_input_pipeline.bind(
                         &self.command_list,
                         self.active_generation
@@ -3249,7 +3258,7 @@ impl Dx12Renderer {
                         &mut self.transition_batch,
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     );
-                if self.path_space_mode == PathSpaceMode::StablePlanes {
+                if self.active_path_space.uses_stable_planes() {
                     let rr = self
                         .active_generation
                         .rr
@@ -3282,7 +3291,7 @@ impl Dx12Renderer {
                 );
                 self.command_list
                     .Dispatch(output_groups_x, output_groups_y, 1);
-                if self.path_space_mode == PathSpaceMode::StablePlanes {
+                if self.active_path_space.uses_stable_planes() {
                     self.gpu_profiler
                         .end(&self.command_list, frame_index, GpuPass::RrStableMerge);
                     self.gpu_profiler.end_event(&self.command_list);
@@ -3299,7 +3308,7 @@ impl Dx12Renderer {
                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     );
                     let (diffuse_albedo, specular_albedo) =
-                        if self.path_space_mode == PathSpaceMode::StablePlanes {
+                        if self.active_path_space.uses_stable_planes() {
                             let stable = generation
                                 .stable_planes
                                 .as_ref()
@@ -3399,7 +3408,7 @@ impl Dx12Renderer {
             }
 
             #[cfg(feature = "streamline-rr")]
-            if rr_active && self.path_space_mode == PathSpaceMode::Legacy {
+            if rr_active && self.active_path_space == ActivePathSpace::Legacy {
                 {
                     let rr = self
                         .active_generation
@@ -3565,8 +3574,8 @@ impl Dx12Renderer {
                     ReconstructionPath::from_backend(self.denoiser),
                     dlss_active,
                     rr_active,
-                    rr_active && self.path_space_mode == PathSpaceMode::Legacy,
-                    self.path_space_mode == PathSpaceMode::StablePlanes
+                    rr_active && self.active_path_space == ActivePathSpace::Legacy,
+                    self.active_path_space.uses_stable_planes()
                         && matches!(
                             self.denoiser,
                             DenoiserBackend::NrdReblur | DenoiserBackend::DlssRayReconstruction
@@ -3617,17 +3626,17 @@ impl Dx12Renderer {
                 ReconstructionPath::from_backend(self.denoiser),
                 dlss_active,
                 rr_active,
-                rr_active && self.path_space_mode == PathSpaceMode::Legacy,
-                self.path_space_mode == PathSpaceMode::StablePlanes
+                rr_active && self.active_path_space == ActivePathSpace::Legacy,
+                self.active_path_space.uses_stable_planes()
                     && matches!(
                         self.denoiser,
                         DenoiserBackend::NrdReblur | DenoiserBackend::DlssRayReconstruction
                     ),
             );
             self.frames[frame_index].stable_counter_pending =
-                self.path_space_mode == PathSpaceMode::StablePlanes;
+                self.active_path_space.uses_stable_planes();
             self.frames[frame_index].stable_counter_valid =
-                !self.reset_history && self.path_space_mode == PathSpaceMode::StablePlanes;
+                !self.reset_history && self.active_path_space.uses_stable_planes();
             self.frames[frame_index].stable_counter_generation_id = self.active_generation.id;
             self.frames[frame_index].stable_counter_extent = render_extent;
             self.active_generation.last_used_fence = fence_value;
@@ -3804,7 +3813,8 @@ impl Dx12Renderer {
                     .mode
                     .as_str()
                     .to_string(),
-                path_space_mode: self.path_space_mode.as_str().to_string(),
+                requested_path_space: self.requested_path_space.as_str().to_string(),
+                active_path_space: self.active_path_space.as_str().to_string(),
                 path_space_consumer: self.path_space_consumer().to_string(),
                 stable_plane_allocated_bytes: self
                     .active_generation
@@ -3991,7 +4001,7 @@ impl Dx12Renderer {
                     with_dlss_sr: !self.upscaler.is_native()
                         && self.denoiser != DenoiserBackend::DlssRayReconstruction,
                     with_dlss_rr: self.denoiser == DenoiserBackend::DlssRayReconstruction,
-                    with_stable_planes: self.path_space_mode == PathSpaceMode::StablePlanes,
+                    with_stable_planes: self.active_path_space.uses_stable_planes(),
                 },
             )?;
             self.next_generation_id = self.next_generation_id.saturating_add(1);
@@ -4160,7 +4170,7 @@ impl Dx12Renderer {
                 with_dlss_sr: !self.upscaler.is_native()
                     && self.denoiser != DenoiserBackend::DlssRayReconstruction,
                 with_dlss_rr: self.denoiser == DenoiserBackend::DlssRayReconstruction,
-                with_stable_planes: self.path_space_mode == PathSpaceMode::StablePlanes,
+                with_stable_planes: self.active_path_space.uses_stable_planes(),
             },
         )
         .map_err(|error| {
@@ -4294,7 +4304,7 @@ impl Dx12Renderer {
                     with_dlss_sr: next.uses_streamline()
                         && self.denoiser != DenoiserBackend::DlssRayReconstruction,
                     with_dlss_rr: self.denoiser == DenoiserBackend::DlssRayReconstruction,
-                    with_stable_planes: self.path_space_mode == PathSpaceMode::StablePlanes,
+                    with_stable_planes: self.active_path_space.uses_stable_planes(),
                 },
             )
             .map_err(|error| {
@@ -4368,26 +4378,27 @@ impl Dx12Renderer {
                     "F3 没有可用的重建后端；请启用 nrd，或从 dlss-rr 会话进行 RR/SVGF A/B",
                 )
             })?;
+        let next_active_path_space = resolve_path_space(self.requested_path_space, next);
         let output_extent = self.active_generation.output_extent;
 
         // A Streamline viewport owns feature-specific persistent state. Build
         // a fresh viewport for the destination backend and later fence-retire
         // the old viewport together with the generation that last used it.
         #[cfg(feature = "streamline")]
+        let destination_viewport_id = self.next_streamline_viewport_id;
+        #[cfg(feature = "streamline")]
         let new_streamline_viewport = if self.upscaler.uses_streamline() {
             let runtime = self.streamline.as_ref().ok_or_else(|| {
                 streamline_error("DLSS runtime", crate::streamline::STATUS_NOT_INITIALIZED)
             })?;
-            let viewport_id = self.next_streamline_viewport_id;
             let viewport = unsafe {
                 runtime.create_reconstruction_viewport(
                     next,
                     self.upscaler,
                     output_extent,
-                    viewport_id,
+                    destination_viewport_id,
                 )
             }?;
-            self.next_streamline_viewport_id = viewport_id.saturating_add(1);
             Some(viewport)
         } else {
             None
@@ -4414,7 +4425,7 @@ impl Dx12Renderer {
                 with_dlss_sr: !self.upscaler.is_native()
                     && next != DenoiserBackend::DlssRayReconstruction,
                 with_dlss_rr: next == DenoiserBackend::DlssRayReconstruction,
-                with_stable_planes: self.path_space_mode == PathSpaceMode::StablePlanes,
+                with_stable_planes: next_active_path_space.uses_stable_planes(),
             },
         )
         .map_err(|error| {
@@ -4429,7 +4440,10 @@ impl Dx12Renderer {
             )
         })?;
         let old_name = self.denoiser.as_str();
+        let old_active_path_space = self.active_path_space;
         let previous = std::mem::replace(&mut self.active_generation, new_generation);
+        #[cfg(feature = "streamline")]
+        let destination_viewport_created = new_streamline_viewport.is_some();
         #[cfg(feature = "streamline")]
         let previous_streamline_viewport = std::mem::replace(
             &mut self.active_streamline_viewport,
@@ -4442,10 +4456,16 @@ impl Dx12Renderer {
             previous_streamline_viewport,
         );
         self.next_generation_id = self.next_generation_id.saturating_add(1);
+        #[cfg(feature = "streamline")]
+        if destination_viewport_created {
+            self.next_streamline_viewport_id = destination_viewport_id.saturating_add(1);
+        }
         self.render_generation_create_count = self.render_generation_create_count.saturating_add(1);
         self.render_generation_switch_count = self.render_generation_switch_count.saturating_add(1);
         self.denoiser = next;
+        self.active_path_space = next_active_path_space;
         self.denoiser_switch_count = self.denoiser_switch_count.saturating_add(1);
+        self.stable_plane_counter_telemetry = Default::default();
         self.history_index = 0;
         self.accumulated_frames = 0;
         self.previous_camera_position = self.camera_position;
@@ -4460,8 +4480,11 @@ impl Dx12Renderer {
         }
         self.reclaim_retired_generations();
         eprintln!(
-            "denoiser_switch from={old_name} to={} generation={} history_reset=1 idle_waits=0 retire_fence={}",
+            "denoiser_switch from={old_name} to={} path_space_requested={} path_space_active={}->{} generation={} history_reset=1 idle_waits=0 retire_fence={}",
             next.as_str(),
+            self.requested_path_space.as_str(),
+            old_active_path_space.as_str(),
+            self.active_path_space.as_str(),
             self.active_generation.id,
             retire_fence
         );
@@ -4564,6 +4587,10 @@ impl Dx12Renderer {
 
     pub fn denoiser_name(&self) -> &'static str {
         self.denoiser.as_str()
+    }
+
+    pub fn active_path_space_name(&self) -> &'static str {
+        self.active_path_space.as_str()
     }
 
     pub fn upscaler_name(&self) -> &'static str {
@@ -4785,7 +4812,8 @@ impl Dx12Renderer {
                     .saturating_sub(self.benchmark_extent_change_baseline),
                 atrous_mode: self.atrous_mode.as_str(),
                 command_recording_mode: self.command_recording_mode.as_str(),
-                path_space_mode: self.path_space_mode.as_str(),
+                requested_path_space: self.requested_path_space.as_str(),
+                active_path_space: self.active_path_space.as_str(),
                 path_space_consumer: self.path_space_consumer(),
                 stable_plane_allocated_bytes: self
                     .active_generation
@@ -4827,7 +4855,7 @@ impl Dx12Renderer {
     }
 
     fn path_space_consumer(&self) -> &'static str {
-        if self.path_space_mode == PathSpaceMode::Legacy {
+        if self.active_path_space == ActivePathSpace::Legacy {
             "legacy"
         } else if self.denoiser == DenoiserBackend::NrdReblur {
             "nrd-stable-planes"
@@ -5083,7 +5111,8 @@ struct BenchmarkJsonContext<'a> {
     render_extent_change_count: u64,
     atrous_mode: &'a str,
     command_recording_mode: &'a str,
-    path_space_mode: &'a str,
+    requested_path_space: &'a str,
+    active_path_space: &'a str,
     path_space_consumer: &'a str,
     stable_plane_allocated_bytes: u64,
     stable_plane_counters: &'a crate::path_space::StablePlaneCounterTelemetry,
@@ -5131,7 +5160,8 @@ fn benchmark_json_line(
         render_extent_change_count,
         atrous_mode,
         command_recording_mode,
-        path_space_mode,
+        requested_path_space,
+        active_path_space,
         path_space_consumer,
         stable_plane_allocated_bytes,
         stable_plane_counters,
@@ -5166,7 +5196,7 @@ fn benchmark_json_line(
         })
         .collect::<Vec<_>>();
     serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "reconstruction_contract_version": RECONSTRUCTION_CONTRACT_VERSION,
         "build": {
             "git_head": env!("RAY_TRACING_BUILD_GIT_HEAD"),
@@ -5200,12 +5230,12 @@ fn benchmark_json_line(
         "render_scale_quantized_noop_count": render_scale_quantized_noop_count,
         "dynamic_resolution": dynamic_resolution,
         "path_space": {
-            "requested": path_space_mode,
-            "active": path_space_mode,
-            "plane_count": if path_space_mode == "stable-planes" { crate::path_space::STABLE_PLANE_COUNT } else { 0 },
+            "requested": requested_path_space,
+            "active": active_path_space,
+            "plane_count": if active_path_space == "stable-planes" { crate::path_space::STABLE_PLANE_COUNT } else { 0 },
             "consumer": path_space_consumer,
             "allocated_bytes": stable_plane_allocated_bytes,
-            "counters": if path_space_mode == "stable-planes" {
+            "counters": if active_path_space == "stable-planes" {
                 stable_plane_counter_json(stable_plane_counters)
             } else {
                 serde_json::Value::Null
@@ -5565,7 +5595,7 @@ impl Dx12Renderer {
         render_groups_y: u32,
         command_recording_stats: &mut CommandRecordingFrameStats,
     ) -> Result<()> {
-        if self.path_space_mode == PathSpaceMode::StablePlanes {
+        if self.active_path_space.uses_stable_planes() {
             return self.record_nrd_stable_path(
                 frame_index,
                 render_groups_x,
@@ -7458,7 +7488,8 @@ mod tests {
                 render_extent_change_count: 1,
                 atrous_mode: "shared",
                 command_recording_mode: "optimized",
-                path_space_mode: "stable-planes",
+                requested_path_space: "auto",
+                active_path_space: "stable-planes",
                 path_space_consumer: "nrd-stable-planes",
                 stable_plane_allocated_bytes: 228_556_800,
                 stable_plane_counters: &crate::path_space::StablePlaneCounterTelemetry::default(),
@@ -7502,11 +7533,13 @@ mod tests {
         );
         assert!(!json.contains(['\r', '\n']));
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["schema_version"], 2);
         assert_eq!(value["reconstruction_contract_version"], 1);
         assert_eq!(value["gpu_name"], "RTX 4060 \"Laptop\"");
         assert_eq!(value["resolution_mode"], "fixed");
         assert_eq!(value["path_space"]["plane_count"], 3);
+        assert_eq!(value["path_space"]["requested"], "auto");
+        assert_eq!(value["path_space"]["active"], "stable-planes");
         assert_eq!(value["path_space"]["consumer"], "nrd-stable-planes");
         assert!(value["dynamic_resolution"].is_null());
         assert_eq!(value["render_scale_requested"], 1.0);

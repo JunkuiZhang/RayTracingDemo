@@ -6,7 +6,7 @@ use std::{
 
 use crate::debug_view::DebugView;
 
-pub const CAPTURE_SCHEMA_VERSION: u32 = 1;
+pub const CAPTURE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CaptureMetadata {
@@ -25,7 +25,8 @@ pub struct CaptureMetadata {
     pub atrous_mode: String,
     pub command_recording_mode: String,
     pub acceleration_structure_mode: String,
-    pub path_space_mode: String,
+    pub requested_path_space: String,
+    pub active_path_space: String,
     pub path_space_consumer: String,
     pub stable_plane_allocated_bytes: u64,
     pub denoiser_backend: String,
@@ -185,11 +186,9 @@ pub fn capture_json_line(metadata: &CaptureMetadata, png_bytes: u64) -> String {
             "reflex": metadata.reflex_mode,
         },
         "path_space": {
-            "requested": metadata.path_space_mode,
-            "active": metadata.path_space_mode,
-            "plane_count": if metadata.path_space_mode == "stable-planes" { 3 } else { 0 },
-            // P2 deliberately leaves the displayed reconstruction on the
-            // legacy raygen until NRD/RR can consume every plane coherently.
+            "requested": metadata.requested_path_space,
+            "active": metadata.active_path_space,
+            "plane_count": if metadata.active_path_space == "stable-planes" { 3 } else { 0 },
             "consumer": metadata.path_space_consumer,
             "allocated_bytes": metadata.stable_plane_allocated_bytes,
         },
@@ -251,7 +250,8 @@ mod tests {
             atrous_mode: "baseline".to_string(),
             command_recording_mode: "optimized".to_string(),
             acceleration_structure_mode: "baseline".to_string(),
-            path_space_mode: "stable-planes".to_string(),
+            requested_path_space: "auto".to_string(),
+            active_path_space: "stable-planes".to_string(),
             path_space_consumer: "nrd-stable-planes".to_string(),
             stable_plane_allocated_bytes: 123_456,
             denoiser_backend: "svgf".to_string(),
@@ -263,6 +263,8 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&capture_json_line(&metadata, 256)).unwrap();
         assert_eq!(value["schema_version"], CAPTURE_SCHEMA_VERSION);
+        assert_eq!(value["path_space"]["requested"], "auto");
+        assert_eq!(value["path_space"]["active"], "stable-planes");
         assert_eq!(value["debug_view"]["index"], 8);
         assert_eq!(value["modes"]["command_recording"], "optimized");
         assert_eq!(value["modes"]["denoiser"], "svgf");

@@ -102,7 +102,7 @@ impl ApplicationHandler for RealtimeApplication {
 
         let output_size = self.config.output_size.unwrap_or((1280, 720));
         let attributes = Window::default_attributes()
-            .with_title("RayTracingDemo - DX12 阶段 8")
+            .with_title("RayTracingDemo - DX12 阶段 11")
             // 这里故意使用物理像素。若使用 LogicalSize，200% DPI 会把默认
             // DX12 工作尺寸隐式放大为 2560x1440，Debug Validation 成本也随之变成约 4 倍。
             .with_inner_size(PhysicalSize::new(output_size.0, output_size.1))
@@ -200,8 +200,9 @@ impl ApplicationHandler for RealtimeApplication {
                     if elapsed >= Duration::from_millis(500) {
                         let fps = self.frames_since_stats as f64 / elapsed.as_secs_f64();
                         window.set_title(&format!(
-                            "RayTracingDemo - 阶段 10 | {} | Upscaler {} | Reflex {} | Cmd {} | FPS {:.0} | GPU {:.2} ms (p95 {:.2}) | DLSS {:.2} ms | 输出 {}x{} | 内部 {}x{} [{}] | Gen {} / retired {} | VRAM {} | AS {:.2} PT {:.2} T {:.2} A {:.2} ({}) | SPP {} | 视图 {} | {} | {}",
+                            "RayTracingDemo - 阶段 11 | {} | Path {} | Upscaler {} | Reflex {} | Cmd {} | FPS {:.0} | GPU {:.2} ms (p95 {:.2}) | DLSS {:.2} ms | 输出 {}x{} | 内部 {}x{} [{}] | Gen {} / retired {} | VRAM {} | AS {:.2} PT {:.2} T {:.2} A {:.2} ({}) | SPP {} | 视图 {} | {} | {}",
                             renderer.denoiser_name(),
+                            renderer.active_path_space_name(),
                             renderer.upscaler_name(),
                             renderer.reflex_mode_name(),
                             renderer.command_recording_mode_name(),

@@ -4,6 +4,8 @@
 //! Rust model gives us deterministic tests for the bit packing before those
 //! values become persistent temporal-history identities on the GPU.
 
+use crate::reconstruction::DenoiserBackend;
+
 pub(crate) const STABLE_PLANE_COUNT: usize = 3;
 pub(crate) const STABLE_BRANCH_ROOT: u32 = 1;
 pub(crate) const STABLE_BRANCH_JUST_STARTED: u32 = 0;
@@ -88,9 +90,12 @@ impl StablePlaneCounterTelemetry {
     }
 }
 
+/// User-facing policy. `Auto` is resolved only at generation boundaries and
+/// must never become a shader/runtime resource branch.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum PathSpaceMode {
     #[default]
+    Auto,
     Legacy,
     StablePlanes,
 }
@@ -98,9 +103,50 @@ pub(crate) enum PathSpaceMode {
 impl PathSpaceMode {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
+            Self::Auto => "auto",
             Self::Legacy => "legacy",
             Self::StablePlanes => "stable-planes",
         }
+    }
+}
+
+/// Concrete path-space implementation owned by an active render generation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum ActivePathSpace {
+    #[default]
+    Legacy,
+    StablePlanes,
+}
+
+impl ActivePathSpace {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::StablePlanes => "stable-planes",
+        }
+    }
+
+    pub(crate) const fn uses_stable_planes(self) -> bool {
+        matches!(self, Self::StablePlanes)
+    }
+}
+
+/// Resolve policy once for the destination denoiser. Explicit user choices
+/// always win; automatic mode enables stable planes only for denoisers that
+/// consume the layered path-space contract.
+pub(crate) const fn resolve_path_space(
+    requested: PathSpaceMode,
+    denoiser: DenoiserBackend,
+) -> ActivePathSpace {
+    match requested {
+        PathSpaceMode::Legacy => ActivePathSpace::Legacy,
+        PathSpaceMode::StablePlanes => ActivePathSpace::StablePlanes,
+        PathSpaceMode::Auto => match denoiser {
+            DenoiserBackend::Svgf => ActivePathSpace::Legacy,
+            DenoiserBackend::NrdReblur | DenoiserBackend::DlssRayReconstruction => {
+                ActivePathSpace::StablePlanes
+            }
+        },
     }
 }
 
@@ -254,6 +300,44 @@ mod tests {
     const REFERENCE_QUEUE_CAPACITY: usize = 6;
     const REFERENCE_LOW_ENERGY: f32 = 1.0e-5;
     const REFERENCE_MAX_BUILD_STEPS: usize = 16;
+
+    #[test]
+    fn automatic_path_space_resolves_once_for_each_denoiser() {
+        assert_eq!(
+            resolve_path_space(PathSpaceMode::Auto, DenoiserBackend::Svgf),
+            ActivePathSpace::Legacy
+        );
+        assert_eq!(
+            resolve_path_space(PathSpaceMode::Auto, DenoiserBackend::NrdReblur),
+            ActivePathSpace::StablePlanes
+        );
+        assert_eq!(
+            resolve_path_space(
+                PathSpaceMode::Auto,
+                DenoiserBackend::DlssRayReconstruction
+            ),
+            ActivePathSpace::StablePlanes
+        );
+    }
+
+    #[test]
+    fn explicit_path_space_overrides_every_denoiser() {
+        let denoisers = [
+            DenoiserBackend::Svgf,
+            DenoiserBackend::NrdReblur,
+            DenoiserBackend::DlssRayReconstruction,
+        ];
+        for denoiser in denoisers {
+            assert_eq!(
+                resolve_path_space(PathSpaceMode::Legacy, denoiser),
+                ActivePathSpace::Legacy
+            );
+            assert_eq!(
+                resolve_path_space(PathSpaceMode::StablePlanes, denoiser),
+                ActivePathSpace::StablePlanes
+            );
+        }
+    }
 
     #[derive(Clone, Copy)]
     enum ReferenceJunction {
