@@ -87,13 +87,16 @@ bool EnqueueBranch(
     inout uint tail,
     BuildBranchState branch)
 {
+    if (AverageThroughput(branch.throughput) < 1.0e-5)
+        return false;
+    // Low-energy pruning is an intentional lobe decision, not queue pressure.
+    // It must happen before the bounded-capacity check so the counter only
+    // reports a real fork that could not be retained.
     if (tail >= MAX_BUILD_QUEUE)
     {
         InterlockedAdd(StablePlaneGroupCounters[STABLE_COUNTER_BRANCH_QUEUE_OVERFLOW], 1u);
         return false;
     }
-    if (AverageThroughput(branch.throughput) < 1.0e-5)
-        return false;
     queue[tail++] = branch;
     return true;
 }
@@ -236,8 +239,11 @@ void ProcessStablePlanePixel(uint2 pixel, uint2 extent)
             if (mirror)
             {
                 reflected.throughput *= max(material.baseColorFactor.xyz, 0.0.xxx);
-                EnqueueBranch(queue, tail, reflected);
-                break;
+                // A mirror has no competing lobe. Continuing in the current
+                // state avoids spending fork capacity on a path whose only
+                // legal continuation is already known.
+                state = reflected;
+                continue;
             }
 
             float incidentIor = currentMaterial == NO_INTERIOR_MATERIAL
@@ -284,25 +290,42 @@ void ProcessStablePlanePixel(uint2 pixel, uint2 extent)
             if (totalInternalReflection)
                 InterlockedAdd(StablePlaneGroupCounters[STABLE_COUNTER_TIR], 1u);
             reflected.throughput *= totalInternalReflection ? 1.0 : fresnel;
-            EnqueueBranch(queue, tail, reflected);
-
-            if (!totalInternalReflection && mediumUpdateValid)
+            if (totalInternalReflection)
             {
-                uint transmittedBranchId;
-                if (AdvanceStableBranch(state.branchId, 2u, transmittedBranchId))
-                {
-                    BuildBranchState transmitted = state;
-                    transmitted.origin = hitPosition + normalize(refractionDirection) * 0.002;
-                    transmitted.direction = normalize(refractionDirection);
-                    transmitted.throughput *= 1.0 - fresnel;
-                    transmitted.sceneLength += hitT;
-                    transmitted.branchId = transmittedBranchId;
-                    transmitted.depth = state.depth + 1u;
-                    transmitted.interiorSlots = transmittedInterior.slots;
-                    EnqueueBranch(queue, tail, transmitted);
-                }
+                // TIR has one legal lobe. It is an in-place continuation, not
+                // a fork, so nested glass cannot lose its only path to queue
+                // pressure.
+                state = reflected;
+                continue;
             }
-            break;
+
+            uint transmittedBranchId;
+            if (!mediumUpdateValid
+                || !AdvanceStableBranch(state.branchId, 2u, transmittedBranchId))
+            {
+                // An invalid medium transition must never fabricate a
+                // transmitted interior list. Reflection is the only legal
+                // fallback and remains the current state rather than a fork.
+                state = reflected;
+                continue;
+            }
+
+            BuildBranchState transmitted = state;
+            transmitted.origin = hitPosition + normalize(refractionDirection) * 0.002;
+            transmitted.direction = normalize(refractionDirection);
+            transmitted.throughput *= 1.0 - fresnel;
+            transmitted.sceneLength += hitT;
+            transmitted.branchId = transmittedBranchId;
+            transmitted.depth = state.depth + 1u;
+            transmitted.interiorSlots = transmittedInterior.slots;
+
+            // Keep the lobe order fixed across pixels: reflection is the
+            // bounded fork, while transmission preserves the current path's
+            // branch identity. Throughput sorting would swap plane identities
+            // around Fresnel crossings and create denoiser spatial seams.
+            EnqueueBranch(queue, tail, reflected);
+            state = transmitted;
+            continue;
         }
     }
 
