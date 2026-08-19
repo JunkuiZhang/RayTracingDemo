@@ -248,14 +248,18 @@ function Invoke-RecordedProcess(
         try {
             # Start-Process is intentional: it gives every evidence record a
             # PID and makes the timeout/kill boundary independent of the host shell.
+            # Acceptance runs are non-interactive, so keep their window hidden;
+            # RR shutdown must not depend on focus or visible-window transitions.
             $process = Start-Process -FilePath $Executable -ArgumentList $Arguments -WorkingDirectory $repoRoot `
-                -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -NoNewWindow -PassThru
+                -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -WindowStyle Hidden -PassThru
             if (-not $process.WaitForExit($Timeout * 1000)) {
                 $timedOut = $true
                 # The renderer may load helper processes; /T makes timeout
                 # evidence cover the entire child process tree.
                 & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
-                $process.WaitForExit(5000)
+                # WaitForExit returns a Boolean. Consume it so this function
+                # still returns exactly one process record on the timeout path.
+                $null = $process.WaitForExit(5000)
             }
             $process.Refresh()
             if (-not $process.HasExited -and $timedOut) {
@@ -263,7 +267,7 @@ function Invoke-RecordedProcess(
                 # Kill the exact Start-Process child as a second bounded step;
                 # this cannot target an unrelated user process.
                 try { $process.Kill() } catch { }
-                $process.WaitForExit(5000)
+                $null = $process.WaitForExit(5000)
                 $process.Refresh()
             }
             if ($process.HasExited) {
@@ -707,6 +711,29 @@ function Invoke-SelfTest {
     Assert-Reject "timeout" { param($f) $record = [pscustomobject]@{ exit_code = -1; timed_out = $true; stdout_nonempty_lines = 0; json = $null; json_error = "timeout" }; Test-BenchmarkContract $record $case $f }
     Assert-Reject "multiple JSON lines" { param($f) $record = [pscustomobject]@{ exit_code = 0; timed_out = $false; stdout_nonempty_lines = 2; json = $null; json_error = "two lines" }; Test-BenchmarkContract $record $case $f }
     Assert-Reject "PENDING_MANUAL cannot pass" { param($f) $status = "PENDING_MANUAL"; if ($status -eq "PENDING_MANUAL") { Add-Failure $f "manual status is not PASS" } }
+
+    # Exercise the real timeout path. A synthetic record cannot detect leaked
+    # WaitForExit Boolean output turning one process record into an array.
+    $timeoutRoot = Join-Path ([IO.Path]::GetTempPath()) ("stage11-acceptance-selftest-" + [guid]::NewGuid().ToString("N"))
+    try {
+        $hostExecutable = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $timeoutRecords = @(Invoke-RecordedProcess $hostExecutable `
+                @("-NoProfile", "-Command", "Start-Sleep", "-Seconds", "5") `
+                $timeoutRoot "timeout" 1)
+        if ($timeoutRecords.Count -ne 1 -or
+            $timeoutRecords[0].timed_out -ne $true -or
+            $null -ne $timeoutRecords[0].json) {
+            $script:SelfTestFailed.Add("real timeout must return exactly one failed process record")
+        } else {
+            $script:SelfTestPassed++
+        }
+    } finally {
+        foreach ($name in @("timeout.args.txt", "timeout.stdout.txt", "timeout.stderr.txt", "timeout.exit.json")) {
+            Remove-Item -LiteralPath (Join-Path $timeoutRoot $name) -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $timeoutRoot -Force -ErrorAction SilentlyContinue
+    }
+
     $roi = Convert-NormalizedRoi $roiTable.lamp_edge 320 180
     if ($roi.x -lt 0 -or $roi.y -lt 0 -or $roi.x + $roi.width -gt 320 -or $roi.y + $roi.height -gt 180) {
         $script:SelfTestFailed.Add("ROI normalization bounds")
