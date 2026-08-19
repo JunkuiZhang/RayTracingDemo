@@ -5,8 +5,17 @@ use super::{
 };
 
 pub const NESTED_DIELECTRIC_MIN_GAP: f32 = 0.05;
+pub const NESTED_DIELECTRIC_OUTER_MIN: [f32; 3] = [0.10, -1.005, 0.35];
+pub const NESTED_DIELECTRIC_OUTER_MAX: [f32; 3] = [0.72, -0.35, 1.05];
+pub const NESTED_DIELECTRIC_INNER_MIN: [f32; 3] = [0.20, -0.88, 0.47];
+pub const NESTED_DIELECTRIC_INNER_MAX: [f32; 3] = [0.62, -0.45, 0.93];
+const NESTED_DIELECTRIC_ROTATION: f32 = 5.0_f32.to_radians();
 
 pub fn create() -> SceneAsset {
+    create_cornell(true)
+}
+
+fn create_cornell(include_right_glass: bool) -> SceneAsset {
     let materials = vec![
         MaterialAsset::opaque("Cornell white", [0.75, 0.75, 0.75, 1.0]),
         MaterialAsset::opaque("Cornell red", [0.65, 0.05, 0.05, 1.0]),
@@ -182,18 +191,20 @@ pub fn create() -> SceneAsset {
         (-10.0_f32).to_radians(),
         4,
     );
-    add_box(
-        &mut add,
-        "glass box",
-        // Keep the closed dielectric bottom below the Cornell floor. A
-        // coplanar bottom is an ambiguous zero-thickness medium boundary,
-        // while lifting the box exposes a real bright gap. A slight embed
-        // removes both cases and keeps the visible side/floor contact closed.
-        [0.16666667, -1.005, 0.4],
-        [0.6666667, -0.5, 0.9],
-        5.0_f32.to_radians(),
-        5,
-    );
+    if include_right_glass {
+        add_box(
+            &mut add,
+            "glass box",
+            // Keep the closed dielectric bottom below the Cornell floor. A
+            // coplanar bottom is an ambiguous zero-thickness medium boundary,
+            // while lifting the box exposes a real bright gap. A slight embed
+            // removes both cases and keeps the visible side/floor contact closed.
+            [0.16666667, -1.005, 0.4],
+            [0.6666667, -0.5, 0.9],
+            5.0_f32.to_radians(),
+            5,
+        );
+    }
 
     SceneAsset {
         primitives,
@@ -205,12 +216,15 @@ pub fn create() -> SceneAsset {
     }
 }
 
-/// Cornell plus two independently closed, slightly rotated volumes. The
-/// inner liquid is inset from the outer glass by more than the declared gap;
-/// different rigid rotations keep coincident faces from becoming an invalid
-/// zero-thickness medium boundary while both volumes remain camera-visible.
+/// Cornell plus two independently closed, jointly rotated volumes. The inner
+/// liquid is inset from the outer glass by more than the declared gap. Using
+/// one rigid rotation preserves a directly testable containment relation while
+/// keeping every pair of medium boundaries non-coplanar and camera-visible.
 pub fn nested_dielectric() -> SceneAsset {
-    let mut scene = create();
+    // Start without Cornell's original right glass box. Appending the fixture
+    // to the complete scene would overlap three unrelated solids (metal, old
+    // glass and the new container), making medium diagnostics meaningless.
+    let mut scene = create_cornell(false);
     let glass_material = scene.materials.len();
     scene.materials.push(MaterialAsset {
         name: "Nested outer glass".to_string(),
@@ -283,17 +297,17 @@ pub fn nested_dielectric() -> SceneAsset {
     add_box(
         &mut add,
         "nested outer glass",
-        [-0.45, -1.005, 0.65],
-        [0.45, -0.25, 1.55],
-        7.0_f32.to_radians(),
+        NESTED_DIELECTRIC_OUTER_MIN,
+        NESTED_DIELECTRIC_OUTER_MAX,
+        NESTED_DIELECTRIC_ROTATION,
         glass_material,
     );
     add_box(
         &mut add,
         "nested inner liquid",
-        [-0.28, -0.82, 0.84],
-        [0.28, -0.36, 1.36],
-        -4.0_f32.to_radians(),
+        NESTED_DIELECTRIC_INNER_MIN,
+        NESTED_DIELECTRIC_INNER_MAX,
+        NESTED_DIELECTRIC_ROTATION,
         liquid_material,
     );
     scene

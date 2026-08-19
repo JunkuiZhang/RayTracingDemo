@@ -545,6 +545,10 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(outer.len(), 6);
         assert_eq!(inner.len(), 6);
+        assert!(!scene
+            .primitives
+            .iter()
+            .any(|primitive| primitive.name.starts_with("glass box face")));
         let outer_material = scene
             .materials
             .iter()
@@ -562,24 +566,33 @@ mod tests {
         assert!(outer_material.absorption_coefficient.iter().any(|v| *v > 0.0));
         assert!(inner_material.absorption_coefficient.iter().any(|v| *v > 0.0));
 
-        let outer_normals = outer
-            .iter()
-            .map(|primitive| primitive.vertices[0].normal)
-            .collect::<Vec<_>>();
-        let inner_normals = inner
-            .iter()
-            .map(|primitive| primitive.vertices[0].normal)
-            .collect::<Vec<_>>();
-        assert!(outer_normals.iter().any(|outer_normal| {
-            inner_normals.iter().any(|inner_normal| {
-                let dot = outer_normal[0] * inner_normal[0]
-                    + outer_normal[1] * inner_normal[1]
-                    + outer_normal[2] * inner_normal[2];
-                dot.abs() < 0.999
-            })
-        }));
+        for primitive in outer.iter().chain(&inner) {
+            let normal = glam::Vec3::from_array(primitive.vertices[0].normal);
+            let edge0 = glam::Vec3::from_array(primitive.vertices[1].position)
+                - glam::Vec3::from_array(primitive.vertices[0].position);
+            let edge1 = glam::Vec3::from_array(primitive.vertices[2].position)
+                - glam::Vec3::from_array(primitive.vertices[0].position);
+            assert!(normal.is_finite());
+            assert!((normal.length() - 1.0).abs() < 1.0e-5);
+            // Cornell's established index convention has the stored outward
+            // normal opposite the first triangle cross product on every face.
+            assert!(edge0.cross(edge1).normalize().dot(normal) < -0.999);
+        }
 
-        let span = |primitives: &[&MeshPrimitive]| {
+        for axis in 0..3 {
+            assert!(
+                cornell::NESTED_DIELECTRIC_INNER_MIN[axis]
+                    - cornell::NESTED_DIELECTRIC_OUTER_MIN[axis]
+                    > cornell::NESTED_DIELECTRIC_MIN_GAP
+            );
+            assert!(
+                cornell::NESTED_DIELECTRIC_OUTER_MAX[axis]
+                    - cornell::NESTED_DIELECTRIC_INNER_MAX[axis]
+                    > cornell::NESTED_DIELECTRIC_MIN_GAP
+            );
+        }
+
+        let bounds = |primitives: &[&MeshPrimitive]| {
             let mut minimum = [f32::INFINITY; 3];
             let mut maximum = [f32::NEG_INFINITY; 3];
             for vertex in primitives.iter().flat_map(|primitive| primitive.vertices.iter()) {
@@ -588,18 +601,17 @@ mod tests {
                     maximum[axis] = maximum[axis].max(vertex.position[axis]);
                 }
             }
-            [
-                maximum[0] - minimum[0],
-                maximum[1] - minimum[1],
-                maximum[2] - minimum[2],
-            ]
+            (minimum, maximum)
         };
-        let outer_span = span(&outer);
-        let inner_span = span(&inner);
-        assert!(outer_span
+        let metal = scene
+            .primitives
             .iter()
-            .zip(inner_span)
-            .all(|(outer, inner)| *outer - inner > cornell::NESTED_DIELECTRIC_MIN_GAP));
+            .filter(|primitive| primitive.name.starts_with("metal box face"))
+            .collect::<Vec<_>>();
+        let (metal_min, metal_max) = bounds(&metal);
+        let (outer_min, outer_max) = bounds(&outer);
+        assert!(outer_min[0] - metal_max[0] > cornell::NESTED_DIELECTRIC_MIN_GAP);
+        assert!(metal_min[0] < metal_max[0] && outer_min[0] < outer_max[0]);
     }
 
     #[test]
