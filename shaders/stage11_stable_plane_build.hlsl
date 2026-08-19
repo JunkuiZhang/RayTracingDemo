@@ -14,6 +14,7 @@ RWTexture2DArray<uint> StablePlaneHeaders : register(u1);
 RWTexture2DArray<float4> StablePlaneNoisyDiffuse : register(u2);
 RWTexture2DArray<float4> StablePlaneNoisySpecular : register(u3);
 RWTexture2D<float4> StableRadiance : register(u4);
+RWStructuredBuffer<uint> StablePlaneCounters : register(u5);
 
 cbuffer FrameConstants : register(b0)
 {
@@ -33,6 +34,17 @@ cbuffer FrameConstants : register(b0)
 static const uint MAX_BUILD_QUEUE = 6u;
 static const uint MAX_BUILD_STEPS = 16u;
 static const uint MAX_FALSE_INTERSECTIONS = 8u;
+static const uint STABLE_COUNTER_PIXELS_TRACED = 0u;
+static const uint STABLE_COUNTER_ACTIVE_PLANE_SLOTS = 1u;
+static const uint STABLE_COUNTER_PLANE_COUNT_0 = 2u;
+static const uint STABLE_COUNTER_PLANE_OVERFLOW_PIXELS = 6u;
+static const uint STABLE_COUNTER_BRANCH_QUEUE_OVERFLOW = 7u;
+static const uint STABLE_COUNTER_INTERIOR_OVERFLOW = 8u;
+static const uint STABLE_COUNTER_FALSE_INTERSECTION = 9u;
+static const uint STABLE_COUNTER_TIR = 10u;
+static const uint STABLE_COUNTER_INVALID_MEDIUM_EXIT = 11u;
+
+groupshared uint StablePlaneGroupCounters[12];
 
 struct BuildBranchState
 {
@@ -75,22 +87,20 @@ bool EnqueueBranch(
     inout uint tail,
     BuildBranchState branch)
 {
-    if (tail >= MAX_BUILD_QUEUE || AverageThroughput(branch.throughput) < 1.0e-5)
+    if (tail >= MAX_BUILD_QUEUE)
+    {
+        InterlockedAdd(StablePlaneGroupCounters[STABLE_COUNTER_BRANCH_QUEUE_OVERFLOW], 1u);
+        return false;
+    }
+    if (AverageThroughput(branch.throughput) < 1.0e-5)
         return false;
     queue[tail++] = branch;
     return true;
 }
 
-[numthreads(8, 8, 1)]
-void main(uint3 dispatchId : SV_DispatchThreadID)
+void ProcessStablePlanePixel(uint2 pixel, uint2 extent)
 {
-    uint width;
-    uint height;
-    StableRadiance.GetDimensions(width, height);
-    uint2 extent = uint2(width, height);
-    uint2 pixel = dispatchId.xy;
-    if (any(pixel >= extent))
-        return;
+    InterlockedAdd(StablePlaneGroupCounters[STABLE_COUNTER_PIXELS_TRACED], 1u);
 
     [unroll]
     for (uint plane = 0u; plane < STABLE_PLANE_COUNT; ++plane)
@@ -180,6 +190,9 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
             if (dielectric && !MaterialIsThinSurface(material)
                 && !interior.IsTrueIntersection(MaterialNestedPriority(material)))
             {
+                InterlockedAdd(
+                    StablePlaneGroupCounters[STABLE_COUNTER_FALSE_INTERSECTION],
+                    1u);
                 if (++rejectedIntersections > MAX_FALSE_INTERSECTIONS)
                     break;
                 state.origin = hitPosition + state.direction * 0.002;
@@ -200,6 +213,12 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
                     EncodeStableDirection(StablePrimaryRayDirection(pixel, extent)));
                 StablePlaneRecords[address] = record;
                 StablePlaneHeaders[uint3(pixel, planeCount)] = state.branchId;
+                InterlockedAdd(
+                    StablePlaneGroupCounters[STABLE_COUNTER_ACTIVE_PLANE_SLOTS],
+                    1u);
+                InterlockedAdd(
+                    StablePlaneGroupCounters[STABLE_COUNTER_PLANE_COUNT_0 + planeCount],
+                    1u);
                 float weight = AverageThroughput(state.throughput);
                 if (weight > dominantWeight)
                 {
@@ -243,10 +262,18 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
                 mediumUpdateValid = transmittedInterior.Enter(
                     materialIndex,
                     MaterialNestedPriority(material));
+                if (!mediumUpdateValid)
+                    InterlockedAdd(
+                        StablePlaneGroupCounters[STABLE_COUNTER_INTERIOR_OVERFLOW],
+                        1u);
             }
             else
             {
                 mediumUpdateValid = transmittedInterior.Exit(materialIndex);
+                if (!mediumUpdateValid)
+                    InterlockedAdd(
+                        StablePlaneGroupCounters[STABLE_COUNTER_INVALID_MEDIUM_EXIT],
+                        1u);
                 uint outerMaterial = transmittedInterior.TopMaterial();
                 transmittedIor = outerMaterial == NO_INTERIOR_MATERIAL
                     ? 1.0
@@ -260,6 +287,8 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
                 ? state.direction
                 : refract(state.direction, normal, eta);
             bool totalInternalReflection = length(refractionDirection) < 1.0e-4;
+            if (totalInternalReflection)
+                InterlockedAdd(StablePlaneGroupCounters[STABLE_COUNTER_TIR], 1u);
             reflected.throughput *= totalInternalReflection ? 1.0 : fresnel;
             EnqueueBranch(queue, tail, reflected);
 
@@ -283,7 +312,33 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
         }
     }
 
+    if (head < tail && planeCount >= STABLE_PLANE_COUNT)
+        InterlockedAdd(StablePlaneGroupCounters[STABLE_COUNTER_PLANE_OVERFLOW_PIXELS], 1u);
+
     // Alpha carries only an exact small integer and is not radiance. P3/P4 use
     // it to select the primary guide after all planes have been filled.
     StableRadiance[pixel] = float4(0.0, 0.0, 0.0, float(dominantPlane));
+}
+
+[numthreads(8, 8, 1)]
+void main(uint3 dispatchId : SV_DispatchThreadID, uint3 groupThreadId : SV_GroupThreadID)
+{
+    uint width;
+    uint height;
+    StableRadiance.GetDimensions(width, height);
+    uint2 extent = uint2(width, height);
+    uint linearThread = groupThreadId.y * 8u + groupThreadId.x;
+    if (linearThread < 12u)
+        StablePlaneGroupCounters[linearThread] = 0u;
+
+    // Out-of-bounds threads participate in both barriers. Returning before
+    // the first barrier would leave in-bounds lanes waiting forever on a
+    // partially filled thread group at non-8-aligned render extents.
+    GroupMemoryBarrierWithGroupSync();
+    bool inBounds = all(dispatchId.xy < extent);
+    if (inBounds)
+        ProcessStablePlanePixel(dispatchId.xy, extent);
+    GroupMemoryBarrierWithGroupSync();
+    if (linearThread < 12u)
+        InterlockedAdd(StablePlaneCounters[linearThread], StablePlaneGroupCounters[linearThread]);
 }

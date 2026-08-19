@@ -12,6 +12,66 @@ pub(crate) const STABLE_BRANCH_INVALID: u32 = u32::MAX;
 pub(crate) const MAX_STABLE_DELTA_VERTICES: u32 = 15;
 pub(crate) const DELTA_LOBE_COUNT: u32 = 4;
 pub(crate) const STABLE_PLANE_RECORD_STRIDE: usize = 64;
+pub(crate) const STABLE_PLANE_COUNTER_COUNT: usize = 12;
+pub(crate) const STABLE_PLANE_COUNTER_NAMES: [&str; STABLE_PLANE_COUNTER_COUNT] = [
+    "pixels_traced",
+    "active_plane_slots",
+    "plane_count_0",
+    "plane_count_1",
+    "plane_count_2",
+    "plane_count_3",
+    "plane_overflow_pixels",
+    "branch_queue_overflow_events",
+    "interior_overflow_events",
+    "false_intersection_rejections",
+    "total_internal_reflection_events",
+    "invalid_medium_exit_events",
+];
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct StablePlaneCounterSnapshot {
+    pub(crate) generation_id: u64,
+    pub(crate) extent: [u32; 2],
+    pub(crate) values: [u32; STABLE_PLANE_COUNTER_COUNT],
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StablePlaneCounterTelemetry {
+    pub(crate) completed_frames: u64,
+    sums: [u64; STABLE_PLANE_COUNTER_COUNT],
+    pub(crate) last: Option<StablePlaneCounterSnapshot>,
+}
+
+impl StablePlaneCounterTelemetry {
+    /// Accept only a fence-complete, same-generation sample. The renderer
+    /// supplies the epoch and extent because a counter from an old generation
+    /// is numerically plausible but semantically unrelated to the current UI.
+    pub(crate) fn accept(
+        &mut self,
+        snapshot: StablePlaneCounterSnapshot,
+        expected_generation_id: u64,
+        expected_extent: [u32; 2],
+        sample_valid: bool,
+    ) -> bool {
+        if !sample_valid
+            || snapshot.generation_id != expected_generation_id
+            || snapshot.extent != expected_extent
+        {
+            return false;
+        }
+        self.completed_frames = self.completed_frames.saturating_add(1);
+        for (sum, value) in self.sums.iter_mut().zip(snapshot.values) {
+            *sum = sum.saturating_add(u64::from(value));
+        }
+        self.last = Some(snapshot);
+        true
+    }
+
+    pub(crate) fn mean(&self, index: usize) -> Option<f64> {
+        (index < STABLE_PLANE_COUNTER_COUNT && self.completed_frames > 0)
+            .then(|| self.sums[index] as f64 / self.completed_frames as f64)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum PathSpaceMode {
@@ -275,5 +335,34 @@ mod tests {
         assert!(shader.contains("float4 data3;"));
         assert!(shader.contains("uint PackStableHdr(float3 value)"));
         assert!(shader.contains("float3 UnpackStableHdr(uint packed)"));
+    }
+
+    #[test]
+    fn stable_counter_schema_and_accumulator_reject_stale_epochs() {
+        assert_eq!(STABLE_PLANE_COUNTER_NAMES.len(), STABLE_PLANE_COUNTER_COUNT);
+        let mut telemetry = StablePlaneCounterTelemetry::default();
+        let snapshot = StablePlaneCounterSnapshot {
+            generation_id: 7,
+            extent: [320, 180],
+            values: [1; STABLE_PLANE_COUNTER_COUNT],
+        };
+        assert!(!telemetry.accept(snapshot, 8, [320, 180], true));
+        assert!(!telemetry.accept(snapshot, 7, [640, 360], true));
+        assert!(!telemetry.accept(snapshot, 7, [320, 180], false));
+        assert_eq!(telemetry.completed_frames, 0);
+        assert!(telemetry.accept(snapshot, 7, [320, 180], true));
+        assert_eq!(telemetry.completed_frames, 1);
+        assert_eq!(telemetry.mean(0), Some(1.0));
+        assert_eq!(telemetry.mean(STABLE_PLANE_COUNTER_COUNT), None);
+    }
+
+    #[test]
+    fn stable_counter_contract_has_twelve_u32_slots_and_group_sync() {
+        let shader = include_str!("../shaders/stage11_stable_plane_build.hlsl");
+        assert_eq!(STABLE_PLANE_COUNTER_COUNT * std::mem::size_of::<u32>(), 48);
+        assert!(shader.contains("groupshared uint StablePlaneGroupCounters[12]"));
+        assert!(shader.contains("GroupMemoryBarrierWithGroupSync();"));
+        assert!(shader.contains("if (inBounds)"));
+        assert!(shader.contains("InterlockedAdd(StablePlaneCounters[linearThread]"));
     }
 }

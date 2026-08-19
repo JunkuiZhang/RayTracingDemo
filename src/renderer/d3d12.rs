@@ -1064,11 +1064,11 @@ const FRAME_COUNT: usize = 3;
 #[cfg(not(any(feature = "streamline", feature = "nrd")))]
 const STABLE_BUILD_TABLE_BASE: usize = 319;
 #[cfg(not(any(feature = "streamline", feature = "nrd")))]
-const SHADER_DESCRIPTOR_COUNT: usize = 328;
+const SHADER_DESCRIPTOR_COUNT: usize = 329;
 #[cfg(all(feature = "nrd", not(feature = "streamline")))]
 const STABLE_BUILD_TABLE_BASE: usize = 368;
 #[cfg(all(feature = "nrd", not(feature = "streamline")))]
-const SHADER_DESCRIPTOR_COUNT: usize = 434;
+const SHADER_DESCRIPTOR_COUNT: usize = 435;
 #[cfg(all(
     feature = "streamline",
     not(feature = "streamline-rr"),
@@ -1080,20 +1080,20 @@ const STABLE_BUILD_TABLE_BASE: usize = 391;
     not(feature = "streamline-rr"),
     not(feature = "nrd")
 ))]
-const SHADER_DESCRIPTOR_COUNT: usize = 400;
+const SHADER_DESCRIPTOR_COUNT: usize = 401;
 #[cfg(all(feature = "streamline", not(feature = "streamline-rr"), feature = "nrd"))]
 const STABLE_BUILD_TABLE_BASE: usize = 391;
 #[cfg(all(feature = "streamline", not(feature = "streamline-rr"), feature = "nrd"))]
-const SHADER_DESCRIPTOR_COUNT: usize = 457;
+const SHADER_DESCRIPTOR_COUNT: usize = 458;
 #[cfg(all(feature = "streamline-rr", not(feature = "nrd")))]
 const STABLE_BUILD_TABLE_BASE: usize = 501;
 #[cfg(all(feature = "streamline-rr", not(feature = "nrd")))]
-const SHADER_DESCRIPTOR_COUNT: usize = 523;
+const SHADER_DESCRIPTOR_COUNT: usize = 524;
 #[cfg(all(feature = "streamline-rr", feature = "nrd"))]
 const STABLE_BUILD_TABLE_BASE: usize = 501;
 #[cfg(all(feature = "streamline-rr", feature = "nrd"))]
-const SHADER_DESCRIPTOR_COUNT: usize = 580;
-const DXR_UAV_REGISTER_COUNT: usize = 39;
+const SHADER_DESCRIPTOR_COUNT: usize = 581;
+const DXR_UAV_REGISTER_COUNT: usize = 40;
 const RECONSTRUCTION_DIFFUSE_HIT_DISTANCE_UAV_REGISTER: usize = 15;
 const RECONSTRUCTION_SPECULAR_HIT_DISTANCE_UAV_REGISTER: usize = 16;
 const RECONSTRUCTION_PRIMARY_EMISSIVE_UAV_REGISTER: usize = 17;
@@ -1109,6 +1109,7 @@ const STABLE_PLANE_SPECULAR_UAV_REGISTER: usize = 35;
 const STABLE_RADIANCE_UAV_REGISTER: usize = 36;
 const STABLE_DIFFUSE_ALBEDO_UAV_REGISTER: usize = 37;
 const STABLE_SPECULAR_ALBEDO_UAV_REGISTER: usize = 38;
+const STABLE_PLANE_COUNTER_UAV_REGISTER: usize = 39;
 #[cfg(feature = "streamline")]
 const PCL_SIMULATION_START: u32 = 0;
 #[cfg(feature = "streamline")]
@@ -1335,6 +1336,7 @@ fn active_gpu_passes(
     dlss_sr_active: bool,
     rr_active: bool,
     rr_boundary_active: bool,
+    stable_plane_active: bool,
 ) -> [bool; profiler::PASS_COUNT] {
     let mut active = [false; profiler::PASS_COUNT];
     for pass in [
@@ -1362,13 +1364,35 @@ fn active_gpu_passes(
             for pass in [GpuPass::NrdPrep, GpuPass::NrdDenoise, GpuPass::NrdCompose] {
                 active[pass as usize] = true;
             }
+            if stable_plane_active {
+                for pass in [
+                    GpuPass::NrdStablePrep0,
+                    GpuPass::NrdStablePrep1,
+                    GpuPass::NrdStablePrep2,
+                    GpuPass::NrdStableDenoise0,
+                    GpuPass::NrdStableDenoise1,
+                    GpuPass::NrdStableDenoise2,
+                    GpuPass::NrdStableCompose0,
+                    GpuPass::NrdStableCompose1,
+                    GpuPass::NrdStableCompose2,
+                ] {
+                    active[pass as usize] = true;
+                }
+            }
         }
         ReconstructionPath::DlssRayReconstruction => {
             active[GpuPass::RrInputAdapter as usize] = rr_active;
             active[GpuPass::RrEvaluate as usize] = rr_active;
             active[GpuPass::RrPrimaryVisibility as usize] = rr_boundary_active;
             active[GpuPass::RrBoundaryResolve as usize] = rr_boundary_active;
+            active[GpuPass::RrStableMerge as usize] = rr_active && stable_plane_active;
         }
+    }
+    if stable_plane_active {
+        active[GpuPass::StablePlaneBuild as usize] = true;
+        active[GpuPass::StablePlaneFill0 as usize] = true;
+        active[GpuPass::StablePlaneFill1 as usize] = true;
+        active[GpuPass::StablePlaneFill2 as usize] = true;
     }
     if dlss_sr_active {
         active[GpuPass::DlssCompose as usize] = true;
@@ -1383,6 +1407,10 @@ struct FrameContext {
     timing_valid: bool,
     timing_generation_id: u64,
     timing_passes: [bool; profiler::PASS_COUNT],
+    stable_counter_pending: bool,
+    stable_counter_valid: bool,
+    stable_counter_generation_id: u64,
+    stable_counter_extent: Extent2D,
 }
 
 struct CaptureRequest {
@@ -1484,6 +1512,8 @@ pub struct Dx12Renderer {
     render_scale_quantized_noop_count: u64,
     gpu_idle_wait_count: u64,
     gpu_profiler: GpuProfiler,
+    stable_plane_counter_readback: ID3D12Resource,
+    stable_plane_counter_telemetry: crate::path_space::StablePlaneCounterTelemetry,
     memory_telemetry: VideoMemoryTelemetry,
     shader_status: String,
     raytracing_status: String,
@@ -1579,6 +1609,56 @@ pub struct Dx12Renderer {
 }
 
 impl Dx12Renderer {
+    /// Reads only a fence-complete Frame Context slice. Counter readback is a
+    /// diagnostic side channel: a generation/reset mismatch is discarded so
+    /// it can never be mistaken for a sample from the current scene epoch.
+    fn collect_stable_plane_counters(
+        &mut self,
+        frame_index: usize,
+        fence_completed: bool,
+        pending: bool,
+        sample_valid: bool,
+        generation_id: u64,
+        extent: Extent2D,
+    ) {
+        if !pending || !fence_completed {
+            return;
+        }
+        let counter_bytes = crate::path_space::STABLE_PLANE_COUNTER_COUNT * size_of::<u32>();
+        let byte_start = frame_index * counter_bytes;
+        let read_range = D3D12_RANGE {
+            Begin: byte_start,
+            End: byte_start + counter_bytes,
+        };
+        let mut values = [0_u32; crate::path_space::STABLE_PLANE_COUNTER_COUNT];
+        unsafe {
+            let mut mapped = std::ptr::null_mut::<c_void>();
+            if self
+                .stable_plane_counter_readback
+                .Map(0, Some(&read_range), Some(&mut mapped))
+                .is_ok()
+            {
+                values.copy_from_slice(std::slice::from_raw_parts(
+                    mapped.cast::<u32>().add(frame_index * crate::path_space::STABLE_PLANE_COUNTER_COUNT),
+                    crate::path_space::STABLE_PLANE_COUNTER_COUNT,
+                ));
+                self.stable_plane_counter_readback
+                    .Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }));
+                let snapshot = crate::path_space::StablePlaneCounterSnapshot {
+                    generation_id,
+                    extent: [extent.width, extent.height],
+                    values,
+                };
+                let _ = self.stable_plane_counter_telemetry.accept(
+                    snapshot,
+                    self.active_generation.id,
+                    [self.active_generation.render_extent.width, self.active_generation.render_extent.height],
+                    sample_valid,
+                );
+            }
+        }
+    }
+
     pub fn new(window: &Window, width: u32, height: u32, config: &RealtimeConfig) -> Result<Self> {
         if let Some(error) = config.denoiser.requested_startup_error() {
             return Err(WindowsError::new(
@@ -1688,6 +1768,11 @@ impl Dx12Renderer {
             .map_err(|error| dx_error("创建 sampler 描述符堆", error))?;
             let gpu_profiler = GpuProfiler::new(&device, &command_queue, FRAME_COUNT)
                 .map_err(|error| dx_error("创建 GPU 计时器", error))?;
+            let stable_plane_counter_readback = create_readback_buffer(
+                &device,
+                (FRAME_COUNT * crate::path_space::STABLE_PLANE_COUNTER_COUNT * size_of::<u32>())
+                    as u64,
+            )?;
             let raytracing_status = require_raytracing_tier_1_1(&device)?;
             let mut frames = Vec::with_capacity(FRAME_COUNT);
             for _ in 0..FRAME_COUNT {
@@ -1697,6 +1782,10 @@ impl Dx12Renderer {
                     timing_valid: false,
                     timing_generation_id: 0,
                     timing_passes: [false; profiler::PASS_COUNT],
+                    stable_counter_pending: false,
+                    stable_counter_valid: false,
+                    stable_counter_generation_id: 0,
+                    stable_counter_extent: Extent2D { width: 0, height: 0 },
                 });
             }
             let command_list: ID3D12GraphicsCommandList = device.CreateCommandList(
@@ -2027,6 +2116,9 @@ impl Dx12Renderer {
                 render_scale_quantized_noop_count: 0,
                 gpu_idle_wait_count: 0,
                 gpu_profiler,
+                stable_plane_counter_readback,
+                stable_plane_counter_telemetry:
+                    crate::path_space::StablePlaneCounterTelemetry::default(),
                 memory_telemetry,
                 shader_status: format!(
                     "DXR/Temporal/À-Trous（{} KiB）",
@@ -2159,6 +2251,11 @@ impl Dx12Renderer {
             let previous_timing_valid = self.frames[frame_index].timing_valid;
             let previous_timing_generation_id = self.frames[frame_index].timing_generation_id;
             let previous_timing_passes = self.frames[frame_index].timing_passes;
+            let previous_counter_pending = self.frames[frame_index].stable_counter_pending;
+            let previous_counter_valid = self.frames[frame_index].stable_counter_valid;
+            let previous_counter_generation_id =
+                self.frames[frame_index].stable_counter_generation_id;
+            let previous_counter_extent = self.frames[frame_index].stable_counter_extent;
             self.wait_for_frame(frame_index)?;
             let fence_completed =
                 previous_fence_value != 0 && self.fence.GetCompletedValue() >= previous_fence_value;
@@ -2168,6 +2265,15 @@ impl Dx12Renderer {
                 previous_timing_valid,
                 previous_timing_passes,
             )?;
+            self.collect_stable_plane_counters(
+                frame_index,
+                fence_completed,
+                previous_counter_pending,
+                previous_counter_valid,
+                previous_counter_generation_id,
+                previous_counter_extent,
+            );
+            self.frames[frame_index].stable_counter_pending = false;
             if let Some(sample) = timing_sample {
                 self.apply_dynamic_resolution_sample(
                     sample.total_ms,
@@ -2379,6 +2485,23 @@ impl Dx12Renderer {
             // The legacy raygen still runs last during P2 so enabling the
             // diagnostic path cannot alter the displayed reconstruction yet.
             if self.path_space_mode == PathSpaceMode::StablePlanes {
+                self.command_list.ClearUnorderedAccessViewUint(
+                    self.active_generation
+                        .shader_heap
+                        .gpu_handle(STABLE_BUILD_TABLE_BASE + 9),
+                    self.active_generation
+                        .shader_heap
+                        .cpu_handle(STABLE_BUILD_TABLE_BASE + 9),
+                    self.active_generation
+                        .stable_planes
+                        .as_ref()
+                        .expect("stable-plane generation validated above")
+                        .counters
+                        .resource(),
+                    &[0, 0, 0, 0],
+                    &[],
+                );
+                submit_global_uav_barrier(&self.command_list);
                 let camera_words = camera_constant_words(&camera);
                 self.stable_plane_build_pipeline.bind(
                     &self.command_list,
@@ -2393,12 +2516,57 @@ impl Dx12Renderer {
                         self._acceleration_structures
                             .instance_gpu_address(frame_index),
                     );
+                self.gpu_profiler
+                    .begin(&self.command_list, frame_index, GpuPass::StablePlaneBuild);
+                self.gpu_profiler
+                    .begin_event(&self.command_list, GpuPass::StablePlaneBuild);
                 self.command_list.Dispatch(
                     render_extent.width.div_ceil(8),
                     render_extent.height.div_ceil(8),
                     1,
                 );
+                self.gpu_profiler
+                    .end(&self.command_list, frame_index, GpuPass::StablePlaneBuild);
+                self.gpu_profiler.end_event(&self.command_list);
                 submit_global_uav_barrier(&self.command_list);
+
+                let counter_resource = self
+                    .active_generation
+                    .stable_planes
+                    .as_mut()
+                    .expect("stable-plane generation validated above")
+                    .counters
+                    .resource()
+                    .clone();
+                self.active_generation
+                    .stable_planes
+                    .as_mut()
+                    .expect("stable-plane generation validated above")
+                    .counters
+                    .collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_COPY_SOURCE,
+                    );
+                self.submit_transition_batch(&mut command_recording_stats);
+                self.command_list.CopyBufferRegion(
+                    &self.stable_plane_counter_readback,
+                    (frame_index
+                        * crate::path_space::STABLE_PLANE_COUNTER_COUNT
+                        * size_of::<u32>()) as u64,
+                    &counter_resource,
+                    0,
+                    (crate::path_space::STABLE_PLANE_COUNTER_COUNT * size_of::<u32>()) as u64,
+                );
+                self.active_generation
+                    .stable_planes
+                    .as_mut()
+                    .expect("stable-plane generation validated above")
+                    .counters
+                    .collect_transition(
+                        &mut self.transition_batch,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    );
+                self.submit_transition_batch(&mut command_recording_stats);
 
                 // A compute pipeline owns a different root signature, so all
                 // DXR root arguments must be rebound before replaying planes.
@@ -2427,6 +2595,13 @@ impl Dx12Renderer {
                 // Reverse plane order matches the later denoiser/compositor
                 // contract: dependent branches are resolved before plane 0.
                 for plane_index in (0..crate::path_space::STABLE_PLANE_COUNT).rev() {
+                    let fill_pass = match plane_index {
+                        0 => GpuPass::StablePlaneFill0,
+                        1 => GpuPass::StablePlaneFill1,
+                        _ => GpuPass::StablePlaneFill2,
+                    };
+                    self.gpu_profiler.begin(&self.command_list, frame_index, fill_pass);
+                    self.gpu_profiler.begin_event(&self.command_list, fill_pass);
                     let pass_constants = [1u32, plane_index as u32];
                     command_list4.SetComputeRoot32BitConstants(
                         4,
@@ -2445,6 +2620,8 @@ impl Dx12Renderer {
                         Depth: 1,
                     };
                     command_list4.DispatchRays(&fill_dispatch);
+                    self.gpu_profiler.end(&self.command_list, frame_index, fill_pass);
+                    self.gpu_profiler.end_event(&self.command_list);
                     submit_global_uav_barrier(&self.command_list);
                 }
             }
@@ -3019,6 +3196,12 @@ impl Dx12Renderer {
                 self.gpu_profiler
                     .begin_event(&self.command_list, GpuPass::RrInputAdapter);
                 if self.path_space_mode == PathSpaceMode::StablePlanes {
+                    self.gpu_profiler
+                        .begin(&self.command_list, frame_index, GpuPass::RrStableMerge);
+                    self.gpu_profiler
+                        .begin_event(&self.command_list, GpuPass::RrStableMerge);
+                }
+                if self.path_space_mode == PathSpaceMode::StablePlanes {
                     self.rr_stable_input_pipeline.bind(
                         &self.command_list,
                         self.active_generation
@@ -3083,6 +3266,11 @@ impl Dx12Renderer {
                 );
                 self.command_list
                     .Dispatch(output_groups_x, output_groups_y, 1);
+                if self.path_space_mode == PathSpaceMode::StablePlanes {
+                    self.gpu_profiler
+                        .end(&self.command_list, frame_index, GpuPass::RrStableMerge);
+                    self.gpu_profiler.end_event(&self.command_list);
+                }
                 self.gpu_profiler
                     .end(&self.command_list, frame_index, GpuPass::RrInputAdapter);
                 self.gpu_profiler.end_event(&self.command_list);
@@ -3372,6 +3560,12 @@ impl Dx12Renderer {
                     dlss_active,
                     rr_active,
                     rr_active && self.path_space_mode == PathSpaceMode::Legacy,
+                    self.path_space_mode == PathSpaceMode::StablePlanes
+                        && matches!(
+                            self.denoiser,
+                            DenoiserBackend::NrdReblur
+                                | DenoiserBackend::DlssRayReconstruction
+                        ),
                 ),
             );
             self.command_list.Close()?;
@@ -3419,7 +3613,18 @@ impl Dx12Renderer {
                 dlss_active,
                 rr_active,
                 rr_active && self.path_space_mode == PathSpaceMode::Legacy,
+                self.path_space_mode == PathSpaceMode::StablePlanes
+                    && matches!(
+                        self.denoiser,
+                        DenoiserBackend::NrdReblur | DenoiserBackend::DlssRayReconstruction
+                    ),
             );
+            self.frames[frame_index].stable_counter_pending =
+                self.path_space_mode == PathSpaceMode::StablePlanes;
+            self.frames[frame_index].stable_counter_valid = !self.reset_history
+                && self.path_space_mode == PathSpaceMode::StablePlanes;
+            self.frames[frame_index].stable_counter_generation_id = self.active_generation.id;
+            self.frames[frame_index].stable_counter_extent = render_extent;
             self.active_generation.last_used_fence = fence_value;
             if self.benchmark_measurement_active {
                 self.benchmark_render_min.width =
@@ -3721,6 +3926,10 @@ impl Dx12Renderer {
                 frame.timing_valid = false;
                 frame.timing_generation_id = 0;
                 frame.timing_passes = [false; profiler::PASS_COUNT];
+                frame.stable_counter_pending = false;
+                frame.stable_counter_valid = false;
+                frame.stable_counter_generation_id = 0;
+                frame.stable_counter_extent = Extent2D { width: 0, height: 0 };
             }
             self.width = width;
             self.height = height;
@@ -4569,6 +4778,7 @@ impl Dx12Renderer {
                     .stable_planes
                     .as_ref()
                     .map_or(0, |stable_planes| stable_planes.allocated_bytes),
+                stable_plane_counters: &self.stable_plane_counter_telemetry,
                 denoiser_backend: self.denoiser.as_str(),
                 upscaler_mode: self.upscaler.as_str(),
                 dlss_optimal: self.dlss_optimal_json(),
@@ -4862,6 +5072,7 @@ struct BenchmarkJsonContext<'a> {
     path_space_mode: &'a str,
     path_space_consumer: &'a str,
     stable_plane_allocated_bytes: u64,
+    stable_plane_counters: &'a crate::path_space::StablePlaneCounterTelemetry,
     denoiser_backend: &'a str,
     upscaler_mode: &'a str,
     dlss_optimal: serde_json::Value,
@@ -4909,6 +5120,7 @@ fn benchmark_json_line(
         path_space_mode,
         path_space_consumer,
         stable_plane_allocated_bytes,
+        stable_plane_counters,
         denoiser_backend,
         upscaler_mode,
         dlss_optimal,
@@ -4979,6 +5191,7 @@ fn benchmark_json_line(
             "plane_count": if path_space_mode == "stable-planes" { crate::path_space::STABLE_PLANE_COUNT } else { 0 },
             "consumer": path_space_consumer,
             "allocated_bytes": stable_plane_allocated_bytes,
+            "counters": stable_plane_counter_json(stable_plane_counters),
         },
         "atrous_mode": atrous_mode,
         "upscaler": {
@@ -5120,6 +5333,29 @@ fn gpu_pass_json(stats: profiler::GpuTimingStats) -> serde_json::Value {
         "p50_ms": stats.p50_ms.filter(|value| value.is_finite()),
         "p95_ms": stats.p95_ms.filter(|value| value.is_finite()),
         "valid_samples": stats.valid_samples,
+    })
+}
+
+fn stable_plane_counter_json(
+    telemetry: &crate::path_space::StablePlaneCounterTelemetry,
+) -> serde_json::Value {
+    let means = (0..crate::path_space::STABLE_PLANE_COUNTER_COUNT)
+        .map(|index| telemetry.mean(index))
+        .collect::<Vec<_>>();
+    let schema = crate::path_space::STABLE_PLANE_COUNTER_NAMES.to_vec();
+    let last = telemetry.last.map(|snapshot| {
+        serde_json::json!({
+            "generation_id": snapshot.generation_id,
+            "render_width": snapshot.extent[0],
+            "render_height": snapshot.extent[1],
+            "values": snapshot.values,
+        })
+    });
+    serde_json::json!({
+        "schema": schema,
+        "completed_frames": telemetry.completed_frames,
+        "mean": means,
+        "last": last,
     })
 }
 
@@ -5624,6 +5860,13 @@ impl Dx12Renderer {
         self.gpu_profiler
             .begin_event(&self.command_list, GpuPass::NrdPrep);
         for plane_index in 0..crate::path_space::STABLE_PLANE_COUNT {
+            let prep_pass = match plane_index {
+                0 => GpuPass::NrdStablePrep0,
+                1 => GpuPass::NrdStablePrep1,
+                _ => GpuPass::NrdStablePrep2,
+            };
+            self.gpu_profiler.begin(&self.command_list, frame_index, prep_pass);
+            self.gpu_profiler.begin_event(&self.command_list, prep_pass);
             self.nrd_stable_prep_pipeline.bind(
                 &self.command_list,
                 self.active_generation
@@ -5635,6 +5878,8 @@ impl Dx12Renderer {
                 self.command_list
                     .Dispatch(render_groups_x, render_groups_y, 1);
             }
+            self.gpu_profiler.end(&self.command_list, frame_index, prep_pass);
+            self.gpu_profiler.end_event(&self.command_list);
         }
         self.gpu_profiler
             .end(&self.command_list, frame_index, GpuPass::NrdPrep);
@@ -5720,14 +5965,26 @@ impl Dx12Renderer {
                 .zip(bridge_layers.iter_mut())
                 .enumerate()
             {
-                if let Err(error) = unsafe {
+                let denoise_pass = match plane_index {
+                    0 => GpuPass::NrdStableDenoise0,
+                    1 => GpuPass::NrdStableDenoise1,
+                    _ => GpuPass::NrdStableDenoise2,
+                };
+                self.gpu_profiler
+                    .begin(&self.command_list, frame_index, denoise_pass);
+                self.gpu_profiler.begin_event(&self.command_list, denoise_pass);
+                let result = unsafe {
                     layer.backend.denoise(
                         &frame_state,
                         resources,
                         &self.command_list,
                         enable_validation && plane_index == 0,
                     )
-                } {
+                };
+                self.gpu_profiler
+                    .end(&self.command_list, frame_index, denoise_pass);
+                self.gpu_profiler.end_event(&self.command_list);
+                if let Err(error) = result {
                     eprintln!(
                         "nrd_dispatch_failed layer=stable-plane-{plane_index} status=error frame={} error={error}",
                         frame_state.frame_index
@@ -5809,6 +6066,15 @@ impl Dx12Renderer {
         self.gpu_profiler
             .begin_event(&self.command_list, GpuPass::NrdCompose);
         for plane_index in (0..crate::path_space::STABLE_PLANE_COUNT).rev() {
+            let compose_pass = match plane_index {
+                0 => GpuPass::NrdStableCompose0,
+                1 => GpuPass::NrdStableCompose1,
+                _ => GpuPass::NrdStableCompose2,
+            };
+            self.gpu_profiler
+                .begin(&self.command_list, frame_index, compose_pass);
+            self.gpu_profiler
+                .begin_event(&self.command_list, compose_pass);
             self.nrd_stable_compose_pipeline.bind(
                 &self.command_list,
                 self.active_generation
@@ -5823,6 +6089,9 @@ impl Dx12Renderer {
                 self.command_list
                     .Dispatch(render_groups_x, render_groups_y, 1);
             }
+            self.gpu_profiler
+                .end(&self.command_list, frame_index, compose_pass);
+            self.gpu_profiler.end_event(&self.command_list);
             submit_global_uav_barrier(&self.command_list);
         }
         self.gpu_profiler
@@ -5901,6 +6170,10 @@ impl Dx12Renderer {
             frame.timing_valid = false;
             frame.timing_generation_id = 0;
             frame.timing_passes = [false; profiler::PASS_COUNT];
+            frame.stable_counter_pending = false;
+            frame.stable_counter_valid = false;
+            frame.stable_counter_generation_id = 0;
+            frame.stable_counter_extent = Extent2D { width: 0, height: 0 };
         }
         let raytracing = RaytracingPipeline::new(&self.device, &shaders.raytracing)?;
         let temporal = ComputePipeline::new(
@@ -5939,7 +6212,7 @@ impl Dx12Renderer {
             &self.device,
             &shaders.stable_plane_build,
             4,
-            5,
+            6,
             16,
             4,
             "阶段 11 RTXPT-style BuildStablePlanes",
@@ -6098,6 +6371,44 @@ impl Dx12Renderer {
         }
         Ok(())
     }
+}
+
+fn create_readback_buffer(
+    device: &ID3D12Device,
+    byte_size: u64,
+) -> Result<ID3D12Resource> {
+    let heap_properties = D3D12_HEAP_PROPERTIES {
+        Type: D3D12_HEAP_TYPE_READBACK,
+        ..Default::default()
+    };
+    let description = D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+        Width: byte_size,
+        Height: 1,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        Format: DXGI_FORMAT_UNKNOWN,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        ..Default::default()
+    };
+    let mut resource = None;
+    unsafe {
+        device.CreateCommittedResource(
+            &heap_properties,
+            D3D12_HEAP_FLAG_NONE,
+            &description,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            None,
+            &mut resource,
+        )?;
+    }
+    resource.ok_or_else(|| {
+        WindowsError::new(
+            windows::core::HRESULT(0x80004005_u32 as i32),
+            "创建 stable-plane counter readback 失败：D3D12 未返回资源",
+        )
+    })
 }
 
 unsafe fn create_structured_srv(
@@ -7102,6 +7413,7 @@ mod tests {
                 path_space_mode: "stable-planes",
                 path_space_consumer: "nrd-stable-planes",
                 stable_plane_allocated_bytes: 228_556_800,
+                stable_plane_counters: &crate::path_space::StablePlaneCounterTelemetry::default(),
                 denoiser_backend: "svgf",
                 upscaler_mode: "native",
                 dlss_optimal: serde_json::Value::Null,

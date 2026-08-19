@@ -81,6 +81,10 @@ pub(super) struct StablePlaneGenerationResources {
     pub(super) stable_radiance: TrackedResource,
     pub(super) diffuse_albedo: TrackedResource,
     pub(super) specular_albedo: TrackedResource,
+    /// One 12-counter UAV is generation-owned so the GPU writes never alias
+    /// a resized generation. The readback copy is renderer-owned and sliced
+    /// by Frame Context fence in the submit path.
+    pub(super) counters: TrackedResource,
     pub(super) record_count: u32,
     pub(super) allocated_bytes: u64,
 }
@@ -1015,6 +1019,14 @@ impl RenderResourceGeneration {
                     DXR_UAV_BASE + STABLE_SPECULAR_ALBEDO_UAV_REGISTER,
                     &stable.specular_albedo,
                 );
+                create_structured_uav(
+                    device,
+                    &self.shader_heap,
+                    DXR_UAV_BASE + super::STABLE_PLANE_COUNTER_UAV_REGISTER,
+                    &stable.counters,
+                    crate::path_space::STABLE_PLANE_COUNTER_COUNT as u32,
+                    size_of::<u32>() as u32,
+                );
 
                 create_acceleration_structure_srv(
                     device,
@@ -1078,6 +1090,14 @@ impl RenderResourceGeneration {
                     STABLE_BUILD_TABLE_BASE + 8,
                     &stable.stable_radiance,
                 );
+                create_structured_uav(
+                    device,
+                    &self.shader_heap,
+                    STABLE_BUILD_TABLE_BASE + 9,
+                    &stable.counters,
+                    crate::path_space::STABLE_PLANE_COUNTER_COUNT as u32,
+                    size_of::<u32>() as u32,
+                );
             }
         } else {
             unsafe {
@@ -1124,6 +1144,12 @@ impl RenderResourceGeneration {
                     &self.shader_heap,
                     DXR_UAV_BASE + STABLE_SPECULAR_ALBEDO_UAV_REGISTER,
                     reconstruction_specular_albedo,
+                );
+                create_null_structured_uav(
+                    device,
+                    &self.shader_heap,
+                    DXR_UAV_BASE + super::STABLE_PLANE_COUNTER_UAV_REGISTER,
+                    size_of::<u32>() as u32,
                 );
             }
         }
@@ -1801,6 +1827,13 @@ fn create_stable_plane_resources(
             extent,
             DXGI_FORMAT_R16G16B16A16_FLOAT,
             format!("代际 {generation} stable dominant specular albedo"),
+        )?,
+        counters: TrackedResource::create_buffer(
+            device,
+            (crate::path_space::STABLE_PLANE_COUNTER_COUNT * size_of::<u32>()) as u64,
+            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            format!("代际 {generation} stable-plane counters"),
         )?,
         record_count,
         allocated_bytes,
