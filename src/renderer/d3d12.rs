@@ -1061,6 +1061,9 @@ mod shader;
 mod texture;
 
 const FRAME_COUNT: usize = 3;
+// Four SRVs followed by six UAVs. Keep this as the single source of truth for
+// every feature-specific table that begins immediately after BuildStablePlanes.
+const STABLE_BUILD_DESCRIPTOR_COUNT: usize = 10;
 #[cfg(not(any(feature = "streamline", feature = "nrd")))]
 const STABLE_BUILD_TABLE_BASE: usize = 319;
 #[cfg(not(any(feature = "streamline", feature = "nrd")))]
@@ -1216,15 +1219,15 @@ const NRD_TRANSMISSION_PREP_TABLE_BASE: usize = 337;
 const NRD_COMPOSE_TABLE_BASE: usize = 355;
 #[cfg(feature = "nrd")]
 const NRD_STABLE_PREP_TABLE_BASES: [usize; crate::path_space::STABLE_PLANE_COUNT] = [
-    STABLE_BUILD_TABLE_BASE + 9,
-    STABLE_BUILD_TABLE_BASE + 20,
-    STABLE_BUILD_TABLE_BASE + 31,
+    STABLE_BUILD_TABLE_BASE + STABLE_BUILD_DESCRIPTOR_COUNT,
+    STABLE_BUILD_TABLE_BASE + STABLE_BUILD_DESCRIPTOR_COUNT + 11,
+    STABLE_BUILD_TABLE_BASE + STABLE_BUILD_DESCRIPTOR_COUNT + 22,
 ];
 #[cfg(feature = "nrd")]
 const NRD_STABLE_COMPOSE_TABLE_BASES: [usize; crate::path_space::STABLE_PLANE_COUNT] = [
-    STABLE_BUILD_TABLE_BASE + 42,
-    STABLE_BUILD_TABLE_BASE + 50,
-    STABLE_BUILD_TABLE_BASE + 58,
+    STABLE_BUILD_TABLE_BASE + STABLE_BUILD_DESCRIPTOR_COUNT + 33,
+    STABLE_BUILD_TABLE_BASE + STABLE_BUILD_DESCRIPTOR_COUNT + 41,
+    STABLE_BUILD_TABLE_BASE + STABLE_BUILD_DESCRIPTOR_COUNT + 49,
 ];
 const TEMPORAL_TABLE_BASES: [usize; 2] = [173, 201];
 const ATROUS_HISTORY_TABLE_BASES: [usize; 2] = [229, 239];
@@ -1238,9 +1241,10 @@ const DLSS_TONEMAP_TABLE_BASE: usize = 376;
 #[cfg(feature = "streamline-rr")]
 const RR_INPUT_TABLE_BASE: usize = 391;
 #[cfg(all(feature = "streamline-rr", not(feature = "nrd")))]
-const RR_STABLE_INPUT_TABLE_BASE: usize = 510;
+const RR_STABLE_INPUT_TABLE_BASE: usize = STABLE_BUILD_TABLE_BASE + STABLE_BUILD_DESCRIPTOR_COUNT;
 #[cfg(all(feature = "streamline-rr", feature = "nrd"))]
-const RR_STABLE_INPUT_TABLE_BASE: usize = 567;
+const RR_STABLE_INPUT_TABLE_BASE: usize =
+    STABLE_BUILD_TABLE_BASE + STABLE_BUILD_DESCRIPTOR_COUNT + 57;
 #[cfg(feature = "streamline-rr")]
 const RR_EMISSIVE_TABLE_BASES: [usize; 2] = [397, 401];
 #[cfg(feature = "streamline-rr")]
@@ -1861,7 +1865,7 @@ impl Dx12Renderer {
                 &device,
                 STABLE_PLANE_BUILD_SHADER,
                 4,
-                5,
+                6,
                 16,
                 4,
                 "阶段 11 RTXPT-style BuildStablePlanes",
@@ -7172,7 +7176,10 @@ mod tests {
         for base in TONEMAP_TABLE_BASES {
             ranges.push((base, base + 15));
         }
-        ranges.push((STABLE_BUILD_TABLE_BASE, STABLE_BUILD_TABLE_BASE + 9));
+        ranges.push((
+            STABLE_BUILD_TABLE_BASE,
+            STABLE_BUILD_TABLE_BASE + STABLE_BUILD_DESCRIPTOR_COUNT,
+        ));
         #[cfg(feature = "nrd")]
         {
             ranges.push((NRD_PREP_TABLE_BASE, NRD_PREP_TABLE_BASE + 18));
