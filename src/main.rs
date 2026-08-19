@@ -91,6 +91,7 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
         matches!(
             argument.as_str(),
             "--model"
+                | "--scene"
                 | "--animate-model"
                 | "--benchmark-seconds"
                 | "--capture-output"
@@ -112,7 +113,7 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
     });
     if cpu_reference_requested && realtime_requested {
         return Err(
-            "--cpu-reference 不能与实时渲染选项（--model、--animate-model、--benchmark-seconds、--capture-output、--capture-after-spp、--debug-view、--atrous-mode、--output-size、--render-scale、--dynamic-resolution、--target-gpu-ms、--command-recording-mode、--acceleration-structure-mode、--path-space-mode、--denoiser、--upscaler、--reflex-mode、--streamline-application-id）同时使用"
+            "--cpu-reference 不能与实时渲染选项（--model、--scene、--animate-model、--benchmark-seconds、--capture-output、--capture-after-spp、--debug-view、--atrous-mode、--output-size、--render-scale、--dynamic-resolution、--target-gpu-ms、--command-recording-mode、--acceleration-structure-mode、--path-space-mode、--denoiser、--upscaler、--reflex-mode、--streamline-application-id）同时使用"
                 .to_string(),
         );
     }
@@ -150,10 +151,16 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
             return Err("--capture-after-spp 只能与 --capture-output 一起使用".to_string());
         }
         let mut config = realtime::RealtimeConfig::default();
+        let mut scene_requested = false;
         let mut dynamic_target = DynamicResolutionConfig::default();
         let mut arguments = arguments.into_iter();
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
+                "--scene" => {
+                    let value = arguments.next().ok_or("--scene 缺少场景名")?;
+                    config.scene = parse_scene_kind(&value)?;
+                    scene_requested = true;
+                }
                 "--model" => {
                     let value = arguments.next().ok_or("--model 缺少路径")?;
                     let path = PathBuf::from(&value);
@@ -246,6 +253,9 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                 }
                 _ => return Err(format!("未知参数：{argument}")),
             }
+        }
+        if scene_requested && config.model_path.is_some() {
+            return Err("--scene 与 --model 互斥；请只选择内置场景或导入模型".to_string());
         }
         if config.denoiser == reconstruction::DenoiserBackend::DlssRayReconstruction {
             if !upscaler_requested {
@@ -450,6 +460,16 @@ fn parse_path_space_mode(value: &str) -> Result<path_space::PathSpaceMode, Strin
         "stable-planes" => Ok(path_space::PathSpaceMode::StablePlanes),
         _ => Err(format!(
             "无效的路径空间模式：{value}（仅支持 legacy 或 stable-planes）"
+        )),
+    }
+}
+
+fn parse_scene_kind(value: &str) -> Result<realtime::SceneKind, String> {
+    match value {
+        "cornell" => Ok(realtime::SceneKind::Cornell),
+        "nested-dielectric" => Ok(realtime::SceneKind::NestedDielectric),
+        _ => Err(format!(
+            "无效的内置场景：{value}（仅支持 cornell 或 nested-dielectric）"
         )),
     }
 }
@@ -776,6 +796,31 @@ mod tests {
         ));
         assert!(parse_path_space_mode("invalid").is_err());
         assert!(parse_arguments(["--path-space-mode".to_string()]).is_err());
+    }
+
+    #[test]
+    fn scene_selection_parses_nested_fixture_and_rejects_model_mixing() {
+        let command = parse_arguments([
+            "--scene".to_string(),
+            "nested-dielectric".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            command,
+            Command::Realtime(RealtimeConfig {
+                scene: crate::realtime::SceneKind::NestedDielectric,
+                model_path: None,
+                ..
+            })
+        ));
+        assert!(parse_scene_kind("unknown").is_err());
+        let result = parse_arguments([
+            "--scene".to_string(),
+            "cornell".to_string(),
+            "--model".to_string(),
+            "Cargo.toml".to_string(),
+        ]);
+        assert!(matches!(result, Err(error) if error.contains("互斥")));
     }
 
     #[test]

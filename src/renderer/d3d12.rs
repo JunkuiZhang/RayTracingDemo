@@ -1794,7 +1794,12 @@ impl Dx12Renderer {
                 &frames[0].allocator,
                 None::<&ID3D12PipelineState>,
             )?;
-            let mut scene = SceneAsset::cornell_box();
+            let mut scene = match config.scene {
+                crate::realtime::SceneKind::Cornell => SceneAsset::cornell_box(),
+                crate::realtime::SceneKind::NestedDielectric => {
+                    SceneAsset::nested_dielectric_fixture()
+                }
+            };
             if let Some(model_path) = &config.model_path {
                 let imported = gltf_loader::load(model_path).map_err(|error| {
                     dx_error(
@@ -2121,13 +2126,14 @@ impl Dx12Renderer {
                     crate::path_space::StablePlaneCounterTelemetry::default(),
                 memory_telemetry,
                 shader_status: format!(
-                    "DXR/Temporal/À-Trous（{} KiB）",
+                    "DXR/Temporal/À-Trous（{} KiB，scene={}）",
                     (STAGE3_SHADER.len()
                         + TEMPORAL_SHADER.len()
                         + ATROUS_SHADER.len()
                         + ATROUS_SHARED_SHADER.len()
                         + TONEMAP_SHADER.len())
-                        / 1024
+                        / 1024,
+                    config.scene.as_str(),
                 ),
                 raytracing_status,
                 _textures: texture_set,

@@ -5,6 +5,22 @@ use crate::{
     resolution::ResolutionMode, upscaler::UpscalerMode,
 };
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SceneKind {
+    #[default]
+    Cornell,
+    NestedDielectric,
+}
+
+impl SceneKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cornell => "cornell",
+            Self::NestedDielectric => "nested-dielectric",
+        }
+    }
+}
+
 /// Stable NGX identity for this custom engine. NVIDIA's DLSS guide requires a
 /// GUID-like project ID when no NVIDIA-assigned numeric application ID exists.
 pub const STREAMLINE_PROJECT_ID: &str = "59083655-5525-475b-95a2-a904bcf8f4c0";
@@ -12,6 +28,7 @@ pub const STREAMLINE_ENGINE_VERSION: &str = concat!("RayTracingDemo-", env!("CAR
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RealtimeConfig {
+    pub scene: SceneKind,
     pub model_path: Option<PathBuf>,
     pub animate_model: bool,
     pub benchmark_seconds: Option<u32>,

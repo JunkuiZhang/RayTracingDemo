@@ -233,6 +233,10 @@ impl SceneAsset {
         cornell::create()
     }
 
+    pub fn nested_dielectric_fixture() -> Self {
+        cornell::nested_dielectric()
+    }
+
     pub fn append(&mut self, mut other: Self) -> Vec<usize> {
         let primitive_offset = self.primitives.len();
         let material_offset = self.materials.len();
@@ -523,6 +527,79 @@ mod tests {
             area_light.double_sided,
             "the sampled area light must also remain primary-ray visible"
         );
+    }
+
+    #[test]
+    fn nested_dielectric_fixture_has_closed_non_coplanar_media() {
+        let scene = SceneAsset::nested_dielectric_fixture();
+        scene.validate().unwrap();
+        let outer = scene
+            .primitives
+            .iter()
+            .filter(|primitive| primitive.name.starts_with("nested outer glass face"))
+            .collect::<Vec<_>>();
+        let inner = scene
+            .primitives
+            .iter()
+            .filter(|primitive| primitive.name.starts_with("nested inner liquid face"))
+            .collect::<Vec<_>>();
+        assert_eq!(outer.len(), 6);
+        assert_eq!(inner.len(), 6);
+        let outer_material = scene
+            .materials
+            .iter()
+            .find(|material| material.name == "Nested outer glass")
+            .unwrap();
+        let inner_material = scene
+            .materials
+            .iter()
+            .find(|material| material.name == "Nested blue-green liquid")
+            .unwrap();
+        assert_eq!(outer_material.nested_priority, 1);
+        assert_eq!(inner_material.nested_priority, 2);
+        assert!((outer_material.ior - 1.5).abs() < f32::EPSILON);
+        assert!((inner_material.ior - 1.333).abs() < f32::EPSILON);
+        assert!(outer_material.absorption_coefficient.iter().any(|v| *v > 0.0));
+        assert!(inner_material.absorption_coefficient.iter().any(|v| *v > 0.0));
+
+        let outer_normals = outer
+            .iter()
+            .map(|primitive| primitive.vertices[0].normal)
+            .collect::<Vec<_>>();
+        let inner_normals = inner
+            .iter()
+            .map(|primitive| primitive.vertices[0].normal)
+            .collect::<Vec<_>>();
+        assert!(outer_normals.iter().any(|outer_normal| {
+            inner_normals.iter().any(|inner_normal| {
+                let dot = outer_normal[0] * inner_normal[0]
+                    + outer_normal[1] * inner_normal[1]
+                    + outer_normal[2] * inner_normal[2];
+                dot.abs() < 0.999
+            })
+        }));
+
+        let span = |primitives: &[&MeshPrimitive]| {
+            let mut minimum = [f32::INFINITY; 3];
+            let mut maximum = [f32::NEG_INFINITY; 3];
+            for vertex in primitives.iter().flat_map(|primitive| primitive.vertices.iter()) {
+                for axis in 0..3 {
+                    minimum[axis] = minimum[axis].min(vertex.position[axis]);
+                    maximum[axis] = maximum[axis].max(vertex.position[axis]);
+                }
+            }
+            [
+                maximum[0] - minimum[0],
+                maximum[1] - minimum[1],
+                maximum[2] - minimum[2],
+            ]
+        };
+        let outer_span = span(&outer);
+        let inner_span = span(&inner);
+        assert!(outer_span
+            .iter()
+            .zip(inner_span)
+            .all(|(outer, inner)| *outer - inner > cornell::NESTED_DIELECTRIC_MIN_GAP));
     }
 
     #[test]
