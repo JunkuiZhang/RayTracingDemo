@@ -7,8 +7,9 @@
 显存预算与 `gpu_idle_wait_count == 0` 均形成证据。首次 Smoke 的 `E_INVALIDARG`/timeout 记录仍在
 下文保留，未被覆盖。
 
-当前仍不是“准生产通过”：Quality、Lifecycle、1080p Gate、GPU Validation 和人工动态画质尚未
-执行，默认仍是 `legacy`。所以可以继续进入下一项验收，但在这些项目完成前不能切换默认路径。
+当前仍不是“准生产通过”：Quality 已执行但被 nested 透射分支丢失阻塞；Lifecycle、1080p Gate、
+GPU Validation 和人工动态画质尚未执行，默认仍是 `legacy`。必须先修复并重跑 Quality，不能
+直接切换默认路径。
 
 ## 基线与提交
 
@@ -56,6 +57,40 @@ Runner commit 为 `5ec0c97`，run-id 为 `20260819-121437Z-5ec0c97`。原始汇�
 分别等于各自内部渲染像素数。`plane_overflow_pixels`、`interior_overflow_events` 和
 `invalid_medium_exit_events` 均为 0。`branch_queue_overflow_events` 非零，按执行方案属于首轮必须
 报告但不预设为零的 characterization 项，不能隐去，也暂不作为 Smoke 失败条件。
+
+## Quality 首轮证据与阻塞项
+
+Quality run-id 为 `20260819-152615Z-1c60f33`，原始汇总：
+
+`output/stage11-stable-planes/20260819-152615Z-1c60f33/summary.json`
+
+10 个 1280×720 capture 均在约 28 秒的总时间内完成；六组全图及每组七个 ROI 的
+`image_diff` 均实际执行成功，自动汇总正确保持 `PENDING_MANUAL`。相邻 SPP 全图数据如下：
+
+| pair | changed RGB | RGB diff > 2 | max | mean max-channel | RMSE |
+|---|---:|---:|---:|---:|---:|
+| NRD stable 127→128 | 47,223 | 1,346 | 248 | 0.1169 | 2.1280 |
+| RR stable 127→128 | 185,063 | 5,012 | 65 | 0.2705 | 1.2097 |
+| legacy 127→128 | 43,293 | 1,706 | 216 | 0.1263 | 2.2662 |
+
+Cornell 的 127/128 静态图没有可见的大范围跳变；NRD/legacy 的高 max 主要集中在灯边缘等
+少量高动态范围像素，RR 则是范围更广但幅度较低的变化。由于尚未执行真实连续窗口观察，这些
+指标只保留为 characterization，不建立回退阈值。
+
+本轮不能接受 Quality：nested NRD 和 nested RR 的内层液体都呈近乎纯黑。补充的 1 秒 nested
+benchmark 没有介质硬错误，但暴露出大量分支拒绝：
+
+| consumer | 内部尺寸 | frames | queue overflow | TIR | interior overflow | invalid exit | Total p95 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| NRD stable | 1280×720 | 141 | 19,470,489 | 3,236,675 | 0 | 0 | 7.53 ms |
+| RR stable | 853×480 | 160 | 9,819,681 | 1,632,368 | 0 | 0 | 5.42 ms |
+
+根因位于 `stage11_stable_plane_build.hlsl` 的单调 `tail` FIFO：每次玻璃界面先入队反射、再入队
+透射，已消费槽位不能复用。嵌套界面很快令 `tail == 6`，随后高能透射分支也被拒绝，造成黑色
+内部。单纯增大数组或按吞吐量排序都不是修复；NVIDIA RTXPT 的稳定平面实现会把分叉存入可用
+plane，并让当前路径沿固定 lobe 继续，而且源码明确说明吞吐量排序会在分支切换处产生降噪接缝。
+后续按《阶段11稳定平面透射分支保活修复方案》修复并重跑 Quality；在此之前不执行 Lifecycle、
+1080p Gate 或默认路径切换。
 
 ## 首次 Smoke 证据（历史，修复前）
 
@@ -144,9 +179,9 @@ Smoke summary 中记录了三个 exe 的 SHA-256。它们是本机生成物，�
 | RR stable | 213×120 | 0.71 / 0.73 ms | 0.02 / 0.02 ms | 0.20 / 0.08 / 0.08 ms | 7,054,608 B |
 
 local VRAM measurement 状态为 `available`，预算为 7,537,164,288 B；这是 Smoke 环境信息，
-不是 1080p 峰值准入数据。Smoke PNG 已生成，但 64/127/128 SPP 配对与 ROI image diff 属于
-Quality，尚未执行。修复后的 runner 会实际调用 `image_diff`，只验证证据完整性，并把主观画质
-保持为 `PENDING_MANUAL`，不会再因仅写出 ROI 坐标而判 PASS。
+不是 1080p 峰值准入数据。Quality 已实际完成 64/127/128 SPP 配对和 ROI `image_diff`，脚本只
+验证证据完整性并把主观画质保持为 `PENDING_MANUAL`，没有再因仅写出 ROI 坐标而判 PASS；人工
+review 随后因 nested 内层液体黑块将本轮标记为阻塞。
 
 ## 验收表
 
@@ -154,11 +189,11 @@ Quality，尚未执行。修复后的 runner 会实际调用 `image_diff`，只�
 |---|---|---|
 | profiler child timings 类型和聚合 pass 保留 | PASS | 已有 NRD/RR 真机 p50/p95 |
 | stable-plane counter CPU/HLSL 契约 | PASS | 已有正式测量区间 readback，硬错误为 0 |
-| nested dielectric fixture 与 scene 互斥 | PASS（单测） | fixture 已隔离；nested GPU Quality 尚未跑 |
+| nested dielectric fixture 与 scene 互斥 | PASS（单测）/ BLOCKED（GPU 画质） | fixture 已隔离，但透射主链被 fork queue 丢失 |
 | runner SelfTest、证据目录和 bounded timeout | PASS | SelfTest 15 项；修复后 Smoke PASS |
 | NRD stable Smoke | PASS | capture + 1 秒 benchmark |
 | RR stable Smoke | PASS | capture + 1 秒 benchmark |
-| Quality 64/127/128 SPP 与全图/ROI diff | NOT RUN / PENDING_MANUAL | runner 已修复，尚未执行 |
+| Quality 64/127/128 SPP 与全图/ROI diff | BLOCKED | 自动证据完整；nested 内层液体黑块，不能人工接受 |
 | Lifecycle 15 秒项目 | SKIPPED / PENDING_MANUAL | 未执行；需真实窗口和人工观察 |
 | 1080p Gate | SKIPPED | 未执行 |
 | RTX 4060 Laptop GPU Validation | BLOCKED | Smoke 已通过；Debug Layer/GPU Validation 尚未执行 |
