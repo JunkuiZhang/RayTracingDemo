@@ -3910,6 +3910,7 @@ impl Dx12Renderer {
             self.poll_pending_capture()?;
             self.reclaim_retired_generations();
             self.gpu_profiler.invalidate();
+            self.stable_plane_counter_telemetry = Default::default();
             // 命令列表会持有上一帧 Back Buffer 的引用；重置后再释放资源，
             // 否则 ResizeBuffers 会因仍有外部引用而返回 DXGI_ERROR_INVALID_CALL。
             let frame_index = self.active_swap_chain().GetCurrentBackBufferIndex() as usize;
@@ -5197,7 +5198,11 @@ fn benchmark_json_line(
             "plane_count": if path_space_mode == "stable-planes" { crate::path_space::STABLE_PLANE_COUNT } else { 0 },
             "consumer": path_space_consumer,
             "allocated_bytes": stable_plane_allocated_bytes,
-            "counters": stable_plane_counter_json(stable_plane_counters),
+            "counters": if path_space_mode == "stable-planes" {
+                stable_plane_counter_json(stable_plane_counters)
+            } else {
+                serde_json::Value::Null
+            },
         },
         "atrous_mode": atrous_mode,
         "upscaler": {
@@ -5335,6 +5340,12 @@ fn benchmark_json_line(
 }
 
 fn gpu_pass_json(stats: profiler::GpuTimingStats) -> serde_json::Value {
+    // An inactive pass is represented by null rather than a misleading zero
+    // millisecond sample. A pass with no fence-complete samples is not proof
+    // that the GPU spent zero time in it.
+    if stats.valid_samples == 0 {
+        return serde_json::Value::Null;
+    }
     serde_json::json!({
         "p50_ms": stats.p50_ms.filter(|value| value.is_finite()),
         "p95_ms": stats.p95_ms.filter(|value| value.is_finite()),
@@ -6172,6 +6183,7 @@ impl Dx12Renderer {
     fn rebuild_shader_pipelines(&mut self, shaders: ReloadedShaders) -> Result<()> {
         unsafe { self.wait_for_gpu()? };
         self.gpu_profiler.invalidate();
+        self.stable_plane_counter_telemetry = Default::default();
         for frame in &mut self.frames {
             frame.timing_valid = false;
             frame.timing_generation_id = 0;
@@ -6350,6 +6362,7 @@ impl Dx12Renderer {
         if !self.reset_history {
             self.history_reset_count = self.history_reset_count.saturating_add(1);
         }
+        self.stable_plane_counter_telemetry = Default::default();
         self.reset_history = true;
     }
 

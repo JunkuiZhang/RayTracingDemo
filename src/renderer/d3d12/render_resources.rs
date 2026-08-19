@@ -1770,6 +1770,11 @@ fn create_stable_plane_resources(
                 + 8
                 + 8,
         )
+        .and_then(|bytes| {
+            bytes.checked_add(
+                crate::path_space::STABLE_PLANE_COUNTER_COUNT as u64 * size_of::<u32>() as u64,
+            )
+        })
         .expect("stable-plane memory telemetry must fit u64");
     let array_size = STABLE_PLANE_COUNT as u16;
     Ok(StablePlaneGenerationResources {
