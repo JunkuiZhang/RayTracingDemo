@@ -6949,6 +6949,33 @@ mod tests {
     }
 
     #[test]
+    fn denoiser_switch_commits_path_space_as_one_generation_transaction() {
+        let source = include_str!("d3d12.rs");
+        let start = source.find("pub fn cycle_denoiser").unwrap();
+        let end = source[start..]
+            .find("fn reclaim_retired_generations")
+            .map(|offset| start + offset)
+            .unwrap();
+        let body = &source[start..end];
+
+        assert_eq!(body.matches("RenderResourceGeneration::new(").count(), 1);
+        assert_eq!(body.matches("self.request_history_reset();").count(), 1);
+        assert!(body.contains(
+            "with_stable_planes: next_active_path_space.uses_stable_planes()"
+        ));
+
+        let generation_ready = body.find("let old_name = self.denoiser.as_str();").unwrap();
+        let denoiser_commit = body.find("self.denoiser = next;").unwrap();
+        let path_space_commit = body
+            .find("self.active_path_space = next_active_path_space;")
+            .unwrap();
+        let history_reset = body.find("self.request_history_reset();").unwrap();
+        assert!(generation_ready < denoiser_commit);
+        assert!(denoiser_commit < path_space_commit);
+        assert!(path_space_commit < history_reset);
+    }
+
+    #[test]
     fn material_srv_stride_tracks_the_shared_gpu_abi() {
         let resources = include_str!("d3d12/render_resources.rs");
         assert!(resources.contains("size_of::<GpuMaterial>() as u32"));
