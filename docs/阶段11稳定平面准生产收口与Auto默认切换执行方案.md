@@ -87,7 +87,8 @@ marker 必须是低频生命周期日志，不能每帧输出。若只是定位�
 - 正常 benchmark、capture、窗口关闭和错误退出都只调用一次 Streamline shutdown；
 - 一次性的应用退出允许等待 GPU；steady-state、resize、F2/F3 切换仍不得引入 GPU idle wait；
 - 所有 active/retired Streamline viewport 都在 bridge shutdown 前完成 feature resource 释放；
-- proxy swapchain 在 bridge shutdown 前释放，且普通 swapchain/device 在 SDK shutdown 所需期间仍有效；
+- active/retired feature resources 在 bridge shutdown 前释放；升级后的 proxy swapchain 与普通
+  swapchain/device 均保持存活到 `slShutdown()` 完成，再释放 proxy 拥有的接口引用；
 - 不允许 `mem::forget` 新的 DX12/Streamline 对象来绕开析构；
 - 不允许 `TerminateProcess`、`process::exit`、忽略 timeout 或“stdout 已写出即 PASS”作为修复；
 - shutdown 返回非 OK 必须保留状态码和 bridge error；

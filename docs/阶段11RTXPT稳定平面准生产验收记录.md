@@ -2,14 +2,14 @@
 
 ## 结论
 
-修复后，阶段 11 的 NRD 与 RR stable-plane 路径已在 RTX 4060 Laptop 上通过有界 Smoke：
-两条路径均生成 PNG 和单行 benchmark JSON，真实 child GPU timings、异步 counter readback、
-显存预算与 `gpu_idle_wait_count == 0` 均形成证据。首次 Smoke 的 `E_INVALIDARG`/timeout 记录仍在
+阶段 11 的 NRD 与 RR stable-plane 路径已经在 RTX 4060 Laptop 上通过有界 Smoke、修复后的
+Quality 自动项和 1920×1080 准生产 Gate。两条 Gate 进程均自行以 exit code 0 退出，未 timeout，
+并形成真实 child GPU timings、异步 counter readback、显存预算与 `gpu_idle_wait_count == 0` 证据。
+首次 Smoke 的 `E_INVALIDARG`/timeout、Quality 的 nested 黑块和首次 RR Gate shutdown timeout 仍在
 下文保留，未被覆盖。
 
-当前仍不是“准生产通过”：Quality 已执行但被 nested 透射分支丢失阻塞；Lifecycle、1080p Gate、
-GPU Validation 和人工动态画质尚未执行，默认仍是 `legacy`。必须先修复并重跑 Quality，不能
-直接切换默认路径。
+当前允许进入 requested/active 分离的 `auto` 默认切换，但尚不能宣称阶段 11 全部完成：默认仍是
+`legacy`，Lifecycle 人工动态画质、GPU Validation 和 PIX UI capture 仍为 `PENDING_MANUAL`。
 
 ## 基线与提交
 
@@ -29,6 +29,11 @@ GPU Validation 和人工动态画质尚未执行，默认仍是 `legacy`。必�
 | `64cbb14` | 令直方图按最终平面数每像素只记一次，并隔离 benchmark 正式区间与旧世代 counter。 |
 | `ae3981c` | 移除 nested fixture 中遗留玻璃，确保内外介质闭合、相互包含且与金属盒分离。 |
 | `5ec0c97` | runner 区分 legacy/stable 契约，并真正执行全图/ROI image diff，Quality 不再假阳性 PASS。 |
+| `ce6f741` | 在稳定平面队列饱和时保留高能透射 continuation，修复 nested 介质黑块。 |
+| `235f6b4` | 增加 nested transmission retention 的自动验收。 |
+| `7e67fb6` | 让 acceptance runner 的 process record、timeout 和退出证据确定化。 |
+| `9e255b1` | 保留无可分叉平面时的反射 continuation，并完成修复后 Quality 自动验收。 |
+| `1691ac3` | 按 Streamline 2.12 生命周期要求，让升级后的 DXGI 代理交换链存活到 `slShutdown()` 完成。 |
 
 未实现、未切换：`--path-space-mode auto` 默认切换、Frame Generation、ReSTIR、透明层重构。
 
@@ -58,7 +63,7 @@ Runner commit 为 `5ec0c97`，run-id 为 `20260819-121437Z-5ec0c97`。原始汇�
 `invalid_medium_exit_events` 均为 0。`branch_queue_overflow_events` 非零，按执行方案属于首轮必须
 报告但不预设为零的 characterization 项，不能隐去，也暂不作为 Smoke 失败条件。
 
-## Quality 首轮证据与阻塞项
+## Quality 首轮证据与阻塞项（历史）
 
 Quality run-id 为 `20260819-152615Z-1c60f33`，原始汇总：
 
@@ -89,8 +94,46 @@ benchmark 没有介质硬错误，但暴露出大量分支拒绝：
 透射，已消费槽位不能复用。嵌套界面很快令 `tail == 6`，随后高能透射分支也被拒绝，造成黑色
 内部。单纯增大数组或按吞吐量排序都不是修复；NVIDIA RTXPT 的稳定平面实现会把分叉存入可用
 plane，并让当前路径沿固定 lobe 继续，而且源码明确说明吞吐量排序会在分支切换处产生降噪接缝。
-后续按《阶段11稳定平面透射分支保活修复方案》修复并重跑 Quality；在此之前不执行 Lifecycle、
-1080p Gate 或默认路径切换。
+后续已按《阶段11稳定平面透射分支保活修复方案》修复并重跑 Quality；本段只保留首次失败证据，
+不再代表当前状态。
+
+## 修复后 Quality 与 1080p Gate
+
+修复后的 Quality 自动项 run-id 为 `20260819-162502Z-9e255b1`，自动证据完整，汇总保持
+`PENDING_MANUAL`，没有把主观画质伪造成 PASS。首次 1080p Gate
+`20260819-163119Z-9e255b1` 中 NRD PASS，但 RR 在退出阶段 timeout；该失败记录继续保留。
+
+根因不是渲染或性能：`Dx12Renderer::drop` 先释放 Streamline 升级出的 DXGI 代理交换链，再调用
+`slShutdown()`，违反本项目所带 Streamline 2.12 文档“在销毁 DXGI/D3D12 组件前 shutdown”的
+要求。直接调用、重定向调用和 phase-marker 诊断确认 RR 阻塞发生在 `slShutdown()` 内。`1691ac3`
+调整为先释放 active/retired feature resources，再 `slShutdown()`，最后释放代理交换链；没有增加
+steady-state GPU wait，也没有用强杀、提前输出或泄漏规避正常销毁。
+
+修复后正式 Gate run-id 为 `20260819-172115Z-1691ac3`：
+
+`output/stage11-stable-planes/20260819-172115Z-1691ac3/summary.json`
+
+命令：
+
+```powershell
+.\scripts\stage11_stable_planes_acceptance.ps1 `
+  -Suite Gate `
+  -NrdExe .\target\stage11-fixed-nrd\release\ray_tracing_demo.exe `
+  -RrExe .\target\release\ray_tracing_demo.exe `
+  -TimeoutSeconds 45
+```
+
+两个可执行文件均由干净 commit `1691ac3` 构建，summary 记录 `git.dirty=false`：
+
+| consumer | exe SHA-256 | 输出/内部尺寸 | frames | Total p50/p95 | stable allocation | peak VRAM |
+|---|---|---:|---:|---:|---:|---:|
+| NRD stable | `3e71021f43678b5dc97d7a6aa4cef64d128e459c1a3f900ba189111a8c96f3f3` | 1920×1080 / 1920×1080 | 68 | 14.01 / 14.81 ms | 572,313,648 B | 2,470,621,184 B |
+| RR stable + DLSS Quality | `f731365251f2f55cfdc2cdee3eff073c0fa9de7e93e50031cd7ea69e9327dce5` | 1920×1080 / 1280×720 | 94 | 9.64 / 10.21 ms | 254,361,648 B | 1,201,954,816 B |
+
+两者 `Total p95 <= 16.67 ms`、`gpu_idle_wait_count == 0`、exit code 0、无 timeout；
+`branch_queue_overflow_events`、`interior_overflow_events`、`invalid_medium_exit_events` 均为 0。
+`plane_overflow_pixels` 分别为 119,943 和 73,655，属于稳定平面容量 characterization，不是介质
+栈或分支队列硬错误。完整 Smoke `20260819-172103Z-1691ac3` 也在相同干净构建上 PASS。
 
 ## 首次 Smoke 证据（历史，修复前）
 
@@ -163,8 +206,9 @@ Smoke summary 中记录了三个 exe 的 SHA-256。它们是本机生成物，�
 | `cargo build --release --locked` | PASS |
 | 隔离 `cargo build --release --features nrd --locked` | PASS |
 | 隔离 `cargo build --release --features streamline-rr --locked` | PASS |
-| `.\scripts\stage11_stable_planes_acceptance.ps1 -SelfTest` | PASS，15 项拒绝/契约检查 |
+| `.\scripts\stage11_stable_planes_acceptance.ps1 -SelfTest` | PASS，19 项拒绝/契约检查 |
 | 修复后 `-Suite Smoke` | PASS，NRD/RR capture 与 1 秒 benchmark 均通过，总用时约 12.5 s |
+| 干净 `1691ac3` 构建的 `-Suite Gate` | PASS，NRD/RR 1 秒 benchmark 均自行退出，约 12 s |
 | `git diff --check` | PASS |
 | `cargo clippy --all-targets --all-features -- -D warnings` | FAIL，既有 `resource.rs:create_texture_2d_array` too-many-arguments 和既有 stable NRD `needless_range_loop`；本轮未用全局 allow 掩盖 |
 | `cargo fmt --all -- --check` | FAIL，仓库已有历史格式差异，且此前阶段提交中的 Rust 片段仍未全局重排；本轮遵守不全局格式化约束 |
@@ -193,14 +237,15 @@ review 随后因 nested 内层液体黑块将本轮标记为阻塞。
 | runner SelfTest、证据目录和 bounded timeout | PASS | SelfTest 15 项；修复后 Smoke PASS |
 | NRD stable Smoke | PASS | capture + 1 秒 benchmark |
 | RR stable Smoke | PASS | capture + 1 秒 benchmark |
-| Quality 64/127/128 SPP 与全图/ROI diff | BLOCKED | 自动证据完整；nested 内层液体黑块，不能人工接受 |
+| Quality 64/127/128 SPP 与全图/ROI diff | PENDING_MANUAL | nested continuation 已修复，自动证据完整；主观项不伪造 PASS |
 | Lifecycle 15 秒项目 | SKIPPED / PENDING_MANUAL | 未执行；需真实窗口和人工观察 |
-| 1080p Gate | SKIPPED | 未执行 |
-| RTX 4060 Laptop GPU Validation | BLOCKED | Smoke 已通过；Debug Layer/GPU Validation 尚未执行 |
+| 1080p Gate | PASS | NRD 14.81 ms、RR 10.21 ms p95，均无 timeout/idle wait |
+| RTX 4060 Laptop GPU Validation | PENDING_MANUAL | Smoke/Gate 已通过；Debug Layer/GPU Validation 尚未执行 |
 | 默认 stable/auto 切换 | NOT DONE | 明确留给 Codex review 和用户动态验收 |
 
 ## 待人工与外部验收
 
-以下均没有伪造为 PASS：静止收敛、移动后停止、resize、最小化/恢复、shader hot reload、玻璃
-水波纹/接缝/灯边缘主观画质、nested dielectric TIR 画面、公开 PBR/大模型、PIX UI capture、
-Debug GPU Validation 和 1080p gate。
+以下均没有伪造为 PASS：Lifecycle 的移动后停止、resize、最小化/恢复、shader hot reload，修复后
+nested dielectric TIR 的最终人工复核，公开 PBR/大模型、PIX UI capture 和 Debug GPU Validation。
+静止 Cornell 场景的灯边缘、墙缝、接地和玻璃稳定性此前已经由用户连续观察确认改善；该观察不
+替代尚未执行的通用场景验收。
