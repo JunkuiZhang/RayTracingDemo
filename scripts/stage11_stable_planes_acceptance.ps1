@@ -618,6 +618,11 @@ function New-Case([string]$Label, [string]$Feature, [string]$Denoiser, [string]$
     }
 }
 
+function Get-CaseStatus([System.Collections.Generic.List[string]]$Failures) {
+    if ($Failures.Count -eq 0) { return "PASS" }
+    return "FAIL"
+}
+
 function Get-SuiteCases([string]$SelectedSuite) {
     if ($SelectedSuite -eq "Smoke") {
         return @(
@@ -694,6 +699,7 @@ function Invoke-SelfTest {
     Assert-Reject "RR profile mismatch" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.path_space.consumer = "nrd-stable-planes"; Test-BenchmarkContract ([pscustomobject]@{ exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1; json = $bad; json_error = $null }) $case $f }
     Assert-Reject "missing active RR pass" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.passes.rr_stable_merge = $null; Test-BenchmarkContract ([pscustomobject]@{ exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1; json = $bad; json_error = $null }) $case $f }
     Assert-Reject "hidden NRD cost" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.passes.nrd_stable.prep = @(@{}, @{}, @{}); Test-BenchmarkContract ([pscustomobject]@{ exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1; json = $bad; json_error = $null }) $case $f }
+    Assert-Reject "missing nested benchmark counters" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.path_space.counters = $null; Test-BenchmarkContract ([pscustomobject]@{ exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1; json = $bad; json_error = $null }) $case $f }
     Assert-Reject "bad histogram sum" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.path_space.counters.plane_count_histogram[1] = 1; Test-CounterContract $bad $f }
     Assert-Reject "nonzero gpu idle wait" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.gpu_idle_wait_count = 1; Test-BenchmarkContract ([pscustomobject]@{ exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1; json = $bad; json_error = $null }) $case $f }
     Assert-Reject "wrong optimal extent" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.upscaler.dlss_optimal.optimal_render_width = 160; Test-OptimalExtent $bad $f }
@@ -761,6 +767,43 @@ function Invoke-SelfTest {
         $bad = $diffRecord | ConvertTo-Json -Depth 20 -Compress | ConvertFrom-Json
         $bad.json.roi.width = 319
         Test-ImageDiffContract $bad 320 180 $null $f
+    }
+
+    $nestedQualityCases = @(Get-SuiteCases "Quality" | Where-Object { $_.scene -eq "nested-dielectric" -and $_.spp -eq 128 })
+    if ($nestedQualityCases.Count -ne 2) {
+        $script:SelfTestFailed.Add("nested Quality cases")
+    } else {
+        foreach ($nestedCase in $nestedQualityCases) {
+            $benchmarkArgs = New-RendererArguments $nestedCase "benchmark" ""
+            if ($benchmarkArgs -notcontains "--benchmark-seconds" -or
+                $benchmarkArgs[$benchmarkArgs.IndexOf("--benchmark-seconds") + 1] -ne "1" -or
+                $benchmarkArgs -contains "--capture-output") {
+                $script:SelfTestFailed.Add("nested benchmark command: $($nestedCase.label)")
+            }
+        }
+        $script:SelfTestPassed++
+    }
+
+    $nestedCase = $nestedQualityCases[0]
+    $captureFailures = [System.Collections.Generic.List[string]]::new()
+    Test-CaptureContract ([pscustomobject]@{
+            exit_code = 0; timed_out = $false
+            json = [pscustomobject]@{
+                png_path = $PSCommandPath; output_width = 1280; output_height = 720
+                path_space = [pscustomobject]@{ active = "stable-planes"; consumer = "nrd-stable-planes" }
+            }
+        }) $nestedCase $captureFailures
+    $benchmarkFailures = [System.Collections.Generic.List[string]]::new()
+    $missingBenchmark = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json
+    $missingBenchmark.path_space.counters = $null
+    Test-BenchmarkContract ([pscustomobject]@{
+            exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1
+            json = $missingBenchmark; json_error = $null
+        }) $nestedCase $benchmarkFailures
+    if ($captureFailures.Count -ne 0 -or (Get-CaseStatus $benchmarkFailures) -ne "FAIL") {
+        $script:SelfTestFailed.Add("nested capture PASS plus benchmark FAIL must fail the case")
+    } else {
+        $script:SelfTestPassed++
     }
 
     if ($failed.Count -gt 0) {
@@ -831,7 +874,18 @@ foreach ($case in $cases) {
         Test-BenchmarkContract $benchmarkRecord $case $caseFailures -Gate:($Suite -eq "Gate")
     }
 
-    $status = if ($caseFailures.Count -eq 0) { "PASS" } else { "FAIL" }
+    if (($Suite -eq "Quality") -and
+        ([string]$case.scene -eq "nested-dielectric") -and
+        ([int]$case.spp -eq 128)) {
+        # Nested Quality must include a separately recorded one-second
+        # benchmark. A successful capture cannot hide a failed benchmark.
+        $benchmarkArgs = New-RendererArguments $case "benchmark" ""
+        $nestedBenchmarkRecord = Invoke-RecordedProcess $exe $benchmarkArgs (Join-Path $caseRoot "benchmark") "benchmark" $effectiveTimeout
+        $records.Add($nestedBenchmarkRecord)
+        Test-BenchmarkContract $nestedBenchmarkRecord $case $caseFailures
+    }
+
+    $status = Get-CaseStatus $caseFailures
     $caseSummaries.Add([ordered]@{ label = $case.label; status = $status; gates = @($caseFailures) })
     foreach ($failure in $caseFailures) { Add-Failure $suiteFailures "$($case.label): $failure" }
 }

@@ -251,6 +251,149 @@ fn decode_slot(slot: u32) -> Option<(u32, u8)> {
 mod tests {
     use super::*;
 
+    const REFERENCE_QUEUE_CAPACITY: usize = 6;
+    const REFERENCE_LOW_ENERGY: f32 = 1.0e-5;
+    const REFERENCE_MAX_BUILD_STEPS: usize = 16;
+
+    #[derive(Clone, Copy)]
+    enum ReferenceJunction {
+        Dielectric {
+            fresnel: f32,
+            transmission_valid: bool,
+        },
+        Mirror,
+        Tir,
+        Base,
+    }
+
+    #[derive(Clone, Copy)]
+    struct ReferenceBranch {
+        branch_id: u32,
+        throughput: f32,
+        next_junction: usize,
+        primary: bool,
+    }
+
+    #[derive(Default)]
+    struct ReferenceSchedulerResult {
+        base_ids: Vec<u32>,
+        primary_base_ids: Vec<u32>,
+        primary_continuation_ids: Vec<u32>,
+        forks_enqueued: usize,
+        queue_overflow: u32,
+    }
+
+    fn enqueue_reference_branch(
+        queue: &mut Vec<ReferenceBranch>,
+        branch: ReferenceBranch,
+        forks_enqueued: &mut usize,
+        queue_overflow: &mut u32,
+    ) -> bool {
+        // This ordering mirrors the shader: a discarded low-energy lobe is an
+        // intentional topology decision, not evidence of queue pressure.
+        if branch.throughput < REFERENCE_LOW_ENERGY {
+            return false;
+        }
+        if queue.len() >= REFERENCE_QUEUE_CAPACITY {
+            *queue_overflow += 1;
+            return false;
+        }
+        queue.push(branch);
+        *forks_enqueued += 1;
+        true
+    }
+
+    fn apply_dielectric_reference(
+        current: ReferenceBranch,
+        fresnel: f32,
+        transmission_valid: bool,
+        queue: &mut Vec<ReferenceBranch>,
+        forks_enqueued: &mut usize,
+        queue_overflow: &mut u32,
+    ) -> ReferenceBranch {
+        let reflected_id = advance_stable_branch(current.branch_id, 1)
+            .expect("reference dielectric must have a reflection identity");
+        let transmitted_id = advance_stable_branch(current.branch_id, 2);
+        let fresnel = fresnel.clamp(0.0, 1.0);
+        let reflected = ReferenceBranch {
+            branch_id: reflected_id,
+            throughput: current.throughput * fresnel,
+            next_junction: current.next_junction + 1,
+            primary: false,
+        };
+        if !transmission_valid || transmitted_id.is_none() {
+            // Invalid medium state has no legal transmission. Reflection is
+            // the sole deterministic fallback and remains the current path.
+            return reflected;
+        }
+
+        let _ = enqueue_reference_branch(queue, reflected, forks_enqueued, queue_overflow);
+        // The transmission lobe is deliberately not enqueued. Keeping it in
+        // the current slot protects a nested medium's primary chain when the
+        // bounded fork queue is full.
+        ReferenceBranch {
+            branch_id: transmitted_id.unwrap(),
+            throughput: current.throughput * (1.0 - fresnel),
+            next_junction: current.next_junction + 1,
+            primary: current.primary,
+        }
+    }
+
+    fn run_reference_scheduler(junctions: &[ReferenceJunction]) -> ReferenceSchedulerResult {
+        let mut result = ReferenceSchedulerResult::default();
+        let mut queue = vec![ReferenceBranch {
+            branch_id: STABLE_BRANCH_ROOT,
+            throughput: 1.0,
+            next_junction: 0,
+            primary: true,
+        }];
+        let mut head = 0;
+
+        while head < queue.len() {
+            let mut state = queue[head];
+            head += 1;
+            for _ in 0..REFERENCE_MAX_BUILD_STEPS {
+                let Some(junction) = junctions.get(state.next_junction).copied() else {
+                    break;
+                };
+                match junction {
+                    ReferenceJunction::Base => {
+                        result.base_ids.push(state.branch_id);
+                        if state.primary {
+                            result.primary_base_ids.push(state.branch_id);
+                        }
+                        break;
+                    }
+                    ReferenceJunction::Mirror | ReferenceJunction::Tir => {
+                        state.branch_id = advance_stable_branch(state.branch_id, 1)
+                            .expect("reference single-lobe path must have an identity");
+                        state.next_junction += 1;
+                        if state.primary {
+                            result.primary_continuation_ids.push(state.branch_id);
+                        }
+                    }
+                    ReferenceJunction::Dielectric {
+                        fresnel,
+                        transmission_valid,
+                    } => {
+                        state = apply_dielectric_reference(
+                            state,
+                            fresnel,
+                            transmission_valid,
+                            &mut queue,
+                            &mut result.forks_enqueued,
+                            &mut result.queue_overflow,
+                        );
+                        if state.primary {
+                            result.primary_continuation_ids.push(state.branch_id);
+                        }
+                    }
+                }
+            }
+        }
+        result
+    }
+
     #[test]
     fn stable_branch_ids_preserve_lobes_and_ancestry() {
         let reflection = advance_stable_branch(STABLE_BRANCH_ROOT, 1).unwrap();
@@ -399,5 +542,169 @@ mod tests {
         assert!(shader.contains("if (inBounds)"));
         assert!(shader.contains("InterlockedAdd(StablePlaneCounters[linearThread]"));
         assert!(shader.contains("STABLE_COUNTER_PLANE_COUNT_0 + planeCount"));
+    }
+
+    #[test]
+    fn nested_four_segment_transmission_reaches_base_without_fork_queue() {
+        let junctions = [
+            ReferenceJunction::Dielectric {
+                fresnel: 0.04,
+                transmission_valid: true,
+            },
+            ReferenceJunction::Dielectric {
+                fresnel: 0.02,
+                transmission_valid: true,
+            },
+            ReferenceJunction::Dielectric {
+                fresnel: 0.03,
+                transmission_valid: true,
+            },
+            ReferenceJunction::Dielectric {
+                fresnel: 0.05,
+                transmission_valid: true,
+            },
+            ReferenceJunction::Base,
+        ];
+        let result = run_reference_scheduler(&junctions);
+        let mut expected = STABLE_BRANCH_ROOT;
+        for _ in 0..4 {
+            expected = advance_stable_branch(expected, 2).unwrap();
+        }
+
+        assert!(result.primary_base_ids.contains(&expected));
+        assert_eq!(result.primary_continuation_ids[..4], [
+            advance_stable_branch(STABLE_BRANCH_ROOT, 2).unwrap(),
+            advance_stable_branch(advance_stable_branch(STABLE_BRANCH_ROOT, 2).unwrap(), 2)
+                .unwrap(),
+            advance_stable_branch(
+                advance_stable_branch(
+                    advance_stable_branch(STABLE_BRANCH_ROOT, 2).unwrap(),
+                    2,
+                )
+                .unwrap(),
+                2,
+            )
+            .unwrap(),
+            expected,
+        ]);
+    }
+
+    #[test]
+    fn dielectric_adds_only_reflection_to_the_fork_queue() {
+        let result = run_reference_scheduler(&[
+            ReferenceJunction::Dielectric {
+                fresnel: 0.2,
+                transmission_valid: true,
+            },
+            ReferenceJunction::Base,
+        ]);
+
+        assert_eq!(result.forks_enqueued, 1);
+        assert_eq!(result.queue_overflow, 0);
+        assert_eq!(
+            result.primary_continuation_ids,
+            vec![advance_stable_branch(STABLE_BRANCH_ROOT, 2).unwrap()]
+        );
+    }
+
+    #[test]
+    fn mirror_and_tir_continue_in_place_without_forks() {
+        for junction in [ReferenceJunction::Mirror, ReferenceJunction::Tir] {
+            let result = run_reference_scheduler(&[junction, ReferenceJunction::Base]);
+            assert_eq!(result.forks_enqueued, 0);
+            assert_eq!(result.queue_overflow, 0);
+            assert_eq!(
+                result.primary_continuation_ids,
+                vec![advance_stable_branch(STABLE_BRANCH_ROOT, 1).unwrap()]
+            );
+        }
+    }
+
+    #[test]
+    fn low_energy_reflection_is_pruned_before_capacity_and_transmission_survives() {
+        let result = run_reference_scheduler(&[
+            ReferenceJunction::Dielectric {
+                fresnel: 0.5e-5,
+                transmission_valid: true,
+            },
+            ReferenceJunction::Base,
+        ]);
+
+        assert_eq!(result.forks_enqueued, 0);
+        assert_eq!(result.queue_overflow, 0);
+        assert_eq!(result.primary_base_ids.len(), 1);
+    }
+
+    #[test]
+    fn full_fork_queue_rejects_only_reflection_and_keeps_current_transmission() {
+        let mut queue = Vec::new();
+        let mut forks_enqueued = 0;
+        let mut queue_overflow = 0;
+        for index in 0..REFERENCE_QUEUE_CAPACITY {
+            assert!(enqueue_reference_branch(
+                &mut queue,
+                ReferenceBranch {
+                    branch_id: STABLE_BRANCH_ROOT + index as u32,
+                    throughput: 1.0,
+                    next_junction: 0,
+                    primary: false,
+                },
+                &mut forks_enqueued,
+                &mut queue_overflow,
+            ));
+        }
+        let current = apply_dielectric_reference(
+            ReferenceBranch {
+                branch_id: STABLE_BRANCH_ROOT,
+                throughput: 1.0,
+                next_junction: 0,
+                primary: true,
+            },
+            0.2,
+            true,
+            &mut queue,
+            &mut forks_enqueued,
+            &mut queue_overflow,
+        );
+
+        assert_eq!(queue.len(), REFERENCE_QUEUE_CAPACITY);
+        assert_eq!(queue_overflow, 1);
+        assert_eq!(
+            current.branch_id,
+            advance_stable_branch(STABLE_BRANCH_ROOT, 2).unwrap()
+        );
+    }
+
+    #[test]
+    fn fresnel_weight_changes_do_not_change_primary_branch_identity() {
+        let topology = |fresnel| {
+            run_reference_scheduler(&[
+                ReferenceJunction::Dielectric {
+                    fresnel,
+                    transmission_valid: true,
+                },
+                ReferenceJunction::Dielectric {
+                    fresnel: 1.0 - fresnel,
+                    transmission_valid: true,
+                },
+                ReferenceJunction::Base,
+            ])
+            .primary_continuation_ids
+        };
+
+        assert_eq!(topology(0.01), topology(0.99));
+    }
+
+    #[test]
+    fn stable_build_contract_keeps_threshold_before_capacity_and_no_transmission_enqueue() {
+        let shader = include_str!("../shaders/stage11_stable_plane_build.hlsl");
+        let threshold = shader
+            .find("AverageThroughput(branch.throughput) < 1.0e-5")
+            .unwrap();
+        let capacity = shader.find("tail >= MAX_BUILD_QUEUE").unwrap();
+        assert!(threshold < capacity);
+        assert!(!shader.contains("EnqueueBranch(queue, tail, transmitted)"));
+        assert!(shader.contains("state = transmitted;\n            continue;"));
+        assert!(shader.contains("Throughput sorting would swap plane identities"));
     }
 }
