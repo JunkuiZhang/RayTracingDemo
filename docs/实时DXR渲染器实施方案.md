@@ -898,7 +898,7 @@ H1–I3 最新状态（2026-08-09）：median/环境来源修复和五条 Debug 
 
 执行细则：[`阶段11RayReconstruction与FrameGeneration执行方案.md`](阶段11RayReconstruction与FrameGeneration执行方案.md)。阶段 11 分成两个顺序增量：先以 11A–11F 接入融合的 DLSS Ray Reconstruction 并与 SVGF/NRD 对照；只有 RR、基础帧率、Reflex 计数和生命周期通过后，才以 11G–11H 改造 swap chain/Present 接入 Frame Generation。第一轮 Luna 仅实现 11A–11D，禁止同时改 FG。
 
-当前状态（2026-08-19）：11A–11D 的真实 RR 路径、后续输入/lifecycle review、不透明边界稳定工作包和 11F-R 有界收口 runner 已经实现。RTX 4060 Laptop 的 RR Quality 121/122 SPP 固定 capture 中，右侧红灰接缝 mean max-channel diff 从 `0.6453` 降至 `0.205523`，diff > 2 的像素从 `723` 降至 `0`，Total p95 为 `5.08 ms`；用户已经确认旧路径当前静止画面观感良好。随后完成了 [`阶段11RTXPT路径空间重构执行方案.md`](阶段11RTXPT路径空间重构执行方案.md) 的功能候选：三稳定平面、稳定 branch ID、两槽优先级介质、Build/Fill、NRD 三份独立 history 与 RR 单次合并输入均已落地；stable NRD/RR 的短截图在 RTX 4060 Laptop 上成功，稳定消费者已切断旧镜面/玻璃补丁。下一轮按 [`阶段11RTXPT稳定平面准生产验收执行方案.md`](阶段11RTXPT稳定平面准生产验收执行方案.md) 增加 child GPU timing、异步诊断 counter、嵌套玻璃/液体夹具和有界 runner；在证据 review 与人工动态观察前，仍需显式指定 `--path-space-mode stable-planes`，默认保留 `legacy`。详细证据与准入项见 [`阶段11RTXPT路径空间重构验收记录.md`](阶段11RTXPT路径空间重构验收记录.md)。Frame Generation 尚未实现，阶段 11 仍不标记完成，也不能提前进入阶段 12。
+当前状态（2026-08-20）：11A–11F-R 的真实 RR、输入/生命周期修复、不透明边界稳定和 RTXPT-style 三稳定平面均已实现。nested 透射 continuation 与 Streamline shutdown 顺序已经修复；RTX 4060 Laptop 的干净构建通过 NRD/RR 1920×1080 Gate，最新 Total p95 分别为 `14.23/9.86 ms`，正式区间 `gpu_idle_wait_count == 0`。`--path-space-mode` 默认已切到 `auto`：SVGF 使用 legacy，NRD/RR 使用 stable planes，显式 legacy 回退仍保留；F3 在单个 generation transaction 中同时提交 denoiser 与 active path-space。扩展 Smoke 覆盖默认/显式矩阵并全部 PASS，详细证据见 [`阶段11RTXPT稳定平面准生产验收记录.md`](阶段11RTXPT稳定平面准生产验收记录.md)。Frame Generation 尚未实现，下一步从既有 11G-A 的 SDK/部署/C ABI 锁定开始；阶段 11 整体仍不标记完成，也不能提前进入阶段 12。
 
 工作内容：
 

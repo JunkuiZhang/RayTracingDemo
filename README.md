@@ -195,26 +195,26 @@ cargo run --release --features streamline-rr --locked -- --output-size 1280x720 
 或相机运动区域应显示非零运动。`specular-hit-distance` 仍用于检查备用距离，但 RR 不再提交该
 tag。详细短测见 [`docs/阶段11短测记录.md`](docs/阶段11短测记录.md)。
 
-### RTXPT-style stable planes（候选路径）
+### RTXPT-style stable planes（NRD/RR 默认路径）
 
-阶段 11 另提供显式启用的 `stable-planes` 路径空间：在理想反射/折射处分解路径，每像素最多
+阶段 11 的 `stable-planes` 路径空间在理想反射/折射处分解路径，每像素最多
 保存 3 个可独立重投影的稳定平面；NRD 为每个平面维护独立 REBLUR history 并反向合成，RR
 把全部平面合并成一次重建输入。闭合玻璃使用有优先级的嵌套介质列表和 Beer-Lambert 吸收，
 不再依赖 post-RR 屏幕空间玻璃补丁。
 
-NRD 与 RR 的候选路径分别这样运行：
+默认 `--path-space-mode auto`：SVGF 解析为 `legacy`，NRD/RR 解析为 `stable-planes`。因此正常运行
+NRD 与 RR 不再需要显式路径参数：
 
 ```powershell
-cargo run --release --features nrd -- --output-size 1280x720 --path-space-mode stable-planes --denoiser nrd-reblur
-cargo run --release --features streamline-rr --locked -- --output-size 1280x720 --path-space-mode stable-planes --denoiser dlss-rr --upscaler dlss-quality
+cargo run --release --features nrd -- --output-size 1280x720 --denoiser nrd-reblur
+cargo run --release --features streamline-rr --locked -- --output-size 1280x720 --denoiser dlss-rr --upscaler dlss-quality
 ```
 
-需要 A/B 回退时，把 `--path-space-mode stable-planes` 改成 `--path-space-mode legacy`。当前默认
-仍是 `legacy`；这是为了在 720p/1080p 固定 ROI、动态观察、resize 和嵌套介质夹具完成验收前
-保留可靠回退，不代表 stable planes 只是一套接口。SVGF 不消费多平面，和
-`--path-space-mode stable-planes` 同时使用时只执行诊断生成。具体设计、证据和剩余准入项见
+需要 A/B 回退时显式传 `--path-space-mode legacy`；需要让 SVGF 生成但不消费稳定平面时可显式传
+`--path-space-mode stable-planes`，此时 consumer 为 `diagnostic-only`。benchmark/capture JSON 会
+分别报告 requested 与 active，窗口标题显示 active 路径。具体设计、Gate 和默认矩阵证据见
 [`docs/阶段11RTXPT路径空间重构执行方案.md`](docs/阶段11RTXPT路径空间重构执行方案.md) 与
-[`docs/阶段11RTXPT路径空间重构验收记录.md`](docs/阶段11RTXPT路径空间重构验收记录.md)。
+[`docs/阶段11RTXPT稳定平面准生产验收记录.md`](docs/阶段11RTXPT稳定平面准生产验收记录.md)。
 
 ## 阶段 8：性能优化（8A–8E-2、8G）
 

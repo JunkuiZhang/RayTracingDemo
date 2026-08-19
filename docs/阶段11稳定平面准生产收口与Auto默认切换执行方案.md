@@ -1,5 +1,10 @@
 # 阶段 11 稳定平面准生产收口与 Auto 默认切换执行方案
 
+> 完成状态（2026-08-20）：WP-A 与 WP-B 均已完成。Streamline 生命周期修复、干净 1080p Gate、
+> requested/active 分离、默认 auto、显式回退和 8-case Smoke 均已通过；最终证据见
+> [`阶段11RTXPT稳定平面准生产验收记录.md`](阶段11RTXPT稳定平面准生产验收记录.md)。本文件后续
+> 仅作为实施契约保留，不应再次交给 agent 重复执行。下一步是 11G-A Frame Generation。
+
 ## 1. 目标与当前结论
 
 本轮只完成两件事：
@@ -304,7 +309,7 @@ docs(stage11): close stable-plane production acceptance
 本方案完成的唯一标准是：RR 能自行退出、完整 1080p Gate PASS、默认 `auto` 正确解析、F3 的 active
 路径随 denoiser 进行单 generation 事务切换、显式回退可用、证据和工作树干净。
 
-完成并经 Codex review 后，阶段 11 stable-plane 准生产收口完成。下一段才执行既有
+上述条件已完成并经 Codex review，阶段 11 stable-plane 准生产收口完成。下一段执行既有
 `docs/阶段11RR收口与FrameGeneration分段执行方案.md` 的 11G-A：锁定 Frame Generation SDK、部署
 清单和最小 C ABI；仍然不把 11G-A 到 11G-E 合成一个大提交。
 

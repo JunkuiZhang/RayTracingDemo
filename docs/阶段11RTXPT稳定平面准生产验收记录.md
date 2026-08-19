@@ -8,8 +8,10 @@ Quality 自动项和 1920×1080 准生产 Gate。两条 Gate 进程均自行以 
 首次 Smoke 的 `E_INVALIDARG`/timeout、Quality 的 nested 黑块和首次 RR Gate shutdown timeout 仍在
 下文保留，未被覆盖。
 
-当前允许进入 requested/active 分离的 `auto` 默认切换，但尚不能宣称阶段 11 全部完成：默认仍是
-`legacy`，Lifecycle 人工动态画质、GPU Validation 和 PIX UI capture 仍为 `PENDING_MANUAL`。
+requested/active 分离的 `auto` 默认切换也已经完成：SVGF 默认解析为 `legacy`，NRD/RR 默认解析
+为 `stable-planes`，显式覆盖继续有效。stable-plane 准生产工作包已完成；但尚不能宣称阶段 11
+整体完成，因为 Frame Generation 尚未开始，Lifecycle 人工动态画质、GPU Validation 和 PIX UI
+capture 仍为 `PENDING_MANUAL`。
 
 ## 基线与提交
 
@@ -34,8 +36,13 @@ Quality 自动项和 1920×1080 准生产 Gate。两条 Gate 进程均自行以 
 | `7e67fb6` | 让 acceptance runner 的 process record、timeout 和退出证据确定化。 |
 | `9e255b1` | 保留无可分叉平面时的反射 continuation，并完成修复后 Quality 自动验收。 |
 | `1691ac3` | 按 Streamline 2.12 生命周期要求，让升级后的 DXGI 代理交换链存活到 `slShutdown()` 完成。 |
+| `c5b688f` | 分离 requested/active 类型，默认解析 NRD/RR 到 stable planes，并让 F3 单 generation 事务提交。 |
+| `629a6ee` | runner 分别验证 requested/active，增加默认、显式回退和 SVGF 诊断矩阵。 |
+| `8494fe9` | 修正显式 stable + SVGF 诊断 pass 的 profiler active mask。 |
+| `9ae3745` | 锁定 F3 只有一次 generation 创建、一次 history reset 且成功后才提交 active。 |
 
-未实现、未切换：`--path-space-mode auto` 默认切换、Frame Generation、ReSTIR、透明层重构。
+未实现：Frame Generation、ReSTIR。透明物体已由 stable-plane 路径空间处理，本轮没有另建
+TransparencyLayer 后处理管线。
 
 ## 修复后短时 Smoke 证据
 
@@ -135,6 +142,52 @@ steady-state GPU wait，也没有用强杀、提前输出或泄漏规避正常�
 `plane_overflow_pixels` 分别为 119,943 和 73,655，属于稳定平面容量 characterization，不是介质
 栈或分支队列硬错误。完整 Smoke `20260819-172103Z-1691ac3` 也在相同干净构建上 PASS。
 
+## Auto 默认切换与最终 Gate
+
+`c5b688f` 将用户请求建模为 `PathSpaceMode::{Auto, Legacy, StablePlanes}`，将 generation 实际
+状态建模为不含 Auto 的 `ActivePathSpace`。唯一纯解析器固定采用以下策略：
+
+| requested | SVGF | NRD | RR |
+|---|---|---|---|
+| auto | legacy | stable-planes | stable-planes |
+| legacy | legacy | legacy | legacy |
+| stable-planes | stable-planes | stable-planes | stable-planes |
+
+资源分配、dispatch、counter 与 consumer 只读取 active；benchmark/capture schema 升级到 2，分别
+报告 requested/active。F3 先构造目标 Streamline viewport 和唯一的新 generation，成功后才同时
+提交 denoiser 与 active，随后只请求一次 history reset；创建失败不会推进 viewport ID 或改变旧
+renderer 状态。显式 stable + SVGF 保持 `diagnostic-only`，仍真实记录 Build/Fill timings。
+
+扩展 Smoke 首轮 `20260819-173456Z-629a6ee` 正确拦截了 SVGF diagnostic pass active-mask 漏报，
+overall 为 FAIL；该记录没有删除。修复后的干净 runtime commit `8494fe9` run-id 为
+`20260819-173839Z-8494fe9`：
+
+`output/stage11-stable-planes/20260819-173839Z-8494fe9/summary.json`
+
+8 个 case 的 capture 与 1 秒 benchmark 全部 PASS：历史显式 stable NRD/RR、默认 SVGF/NRD/RR、
+显式 legacy NRD/RR、显式 stable SVGF。三个 default case 的命令中没有
+`--path-space-mode`，JSON 分别得到：
+
+| denoiser | requested | active | consumer | stable allocation |
+|---|---|---|---|---:|
+| SVGF | auto | legacy | legacy | 0 B |
+| NRD | auto | stable-planes | nrd-stable-planes | 15,897,648 B |
+| RR | auto | stable-planes | rr-stable-planes | 7,054,608 B |
+
+显式 legacy 的 NRD/RR 均报告 requested/active 为 legacy、allocation 0；显式 stable 的 SVGF
+报告 `diagnostic-only`、allocation 15,897,648 B，并具有真实 stable child timing 与 counter。
+
+最终 1080p Gate run-id 为 `20260819-173924Z-8494fe9`：
+
+`output/stage11-stable-planes/20260819-173924Z-8494fe9/summary.json`
+
+| consumer | exe SHA-256 | Total p50/p95 | frames | exit/timeout | GPU idle wait |
+|---|---|---:|---:|---|---:|
+| NRD stable | `f4d2907ff68de66bec5d654cd8d30f159a2ae27b50a02922bb3697988d412f59` | 13.90 / 14.23 ms | 69 | 0 / false | 0 |
+| RR stable + DLSS Quality | `f8c93d1ac11a1fa8e23a8cb14685fa862327a5438888eb8f9f67c12adda66be7` | 9.62 / 9.86 ms | 101 | 0 / false | 0 |
+
+summary 记录 RTX 4060 Laptop、`git.dirty=false`；两个 p95 均低于 16.67 ms，正式进程均自行退出。
+
 ## 首次 Smoke 证据（历史，修复前）
 
 Runner commit 为 `6bc0ecd`，run-id 为 `20260819-114804Z-6bc0ecd`。原始汇总：
@@ -198,17 +251,17 @@ Smoke summary 中记录了三个 exe 的 SHA-256。它们是本机生成物，�
 
 | 命令 | 结果 |
 |---|---|
-| `cargo test --all-targets --locked` | PASS，160 tests + image_diff 6 tests |
-| `cargo test --all-targets --features nrd --locked` | PASS，161 tests + image_diff 6 tests |
-| `cargo test --all-targets --features streamline-rr --locked` | PASS，170 tests + image_diff 6 tests |
-| `cargo test --all-targets --features nrd,streamline-rr --locked` | PASS，171 tests + image_diff 6 tests |
+| `cargo test --all-targets --locked` | PASS，172 tests + image_diff 6 tests |
+| `cargo test --all-targets --features nrd --locked` | PASS，173 tests + image_diff 6 tests |
+| `cargo test --all-targets --features streamline-rr --locked` | PASS，182 tests + image_diff 6 tests |
+| `cargo test --all-targets --features nrd,streamline-rr --locked` | PASS，183 tests + image_diff 6 tests |
 | `cargo build --locked` | PASS |
 | `cargo build --release --locked` | PASS |
 | 隔离 `cargo build --release --features nrd --locked` | PASS |
 | 隔离 `cargo build --release --features streamline-rr --locked` | PASS |
-| `.\scripts\stage11_stable_planes_acceptance.ps1 -SelfTest` | PASS，19 项拒绝/契约检查 |
-| 修复后 `-Suite Smoke` | PASS，NRD/RR capture 与 1 秒 benchmark 均通过，总用时约 12.5 s |
-| 干净 `1691ac3` 构建的 `-Suite Gate` | PASS，NRD/RR 1 秒 benchmark 均自行退出，约 12 s |
+| `.\scripts\stage11_stable_planes_acceptance.ps1 -SelfTest` | PASS，21 项拒绝/契约检查 |
+| 最终 `-Suite Smoke` | PASS，8 个 requested/active case 的 capture 与 1 秒 benchmark 均通过 |
+| 干净 `8494fe9` 构建的 `-Suite Gate` | PASS，NRD/RR 1 秒 benchmark 均自行退出，约 11 s |
 | `git diff --check` | PASS |
 | `cargo clippy --all-targets --all-features -- -D warnings` | FAIL，既有 `resource.rs:create_texture_2d_array` too-many-arguments 和既有 stable NRD `needless_range_loop`；本轮未用全局 allow 掩盖 |
 | `cargo fmt --all -- --check` | FAIL，仓库已有历史格式差异，且此前阶段提交中的 Rust 片段仍未全局重排；本轮遵守不全局格式化约束 |
@@ -233,15 +286,15 @@ review 随后因 nested 内层液体黑块将本轮标记为阻塞。
 |---|---|---|
 | profiler child timings 类型和聚合 pass 保留 | PASS | 已有 NRD/RR 真机 p50/p95 |
 | stable-plane counter CPU/HLSL 契约 | PASS | 已有正式测量区间 readback，硬错误为 0 |
-| nested dielectric fixture 与 scene 互斥 | PASS（单测）/ BLOCKED（GPU 画质） | fixture 已隔离，但透射主链被 fork queue 丢失 |
-| runner SelfTest、证据目录和 bounded timeout | PASS | SelfTest 15 项；修复后 Smoke PASS |
+| nested dielectric fixture 与 scene 互斥 | PASS（自动）/ PENDING_MANUAL（最终画质） | fixture 已隔离，透射主链保活与硬错误 counter 已通过 |
+| runner SelfTest、证据目录和 bounded timeout | PASS | SelfTest 21 项；8-case Smoke PASS |
 | NRD stable Smoke | PASS | capture + 1 秒 benchmark |
 | RR stable Smoke | PASS | capture + 1 秒 benchmark |
 | Quality 64/127/128 SPP 与全图/ROI diff | PENDING_MANUAL | nested continuation 已修复，自动证据完整；主观项不伪造 PASS |
 | Lifecycle 15 秒项目 | SKIPPED / PENDING_MANUAL | 未执行；需真实窗口和人工观察 |
-| 1080p Gate | PASS | NRD 14.81 ms、RR 10.21 ms p95，均无 timeout/idle wait |
+| 1080p Gate | PASS | 最新 NRD 14.23 ms、RR 9.86 ms p95，均无 timeout/idle wait |
 | RTX 4060 Laptop GPU Validation | PENDING_MANUAL | Smoke/Gate 已通过；Debug Layer/GPU Validation 尚未执行 |
-| 默认 stable/auto 切换 | NOT DONE | 明确留给 Codex review 和用户动态验收 |
+| 默认 stable/auto 切换 | PASS | 默认 3-case、显式 legacy 回退与 SVGF diagnostic 均有自动证据 |
 
 ## 待人工与外部验收
 
