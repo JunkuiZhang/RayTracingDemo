@@ -6664,11 +6664,14 @@ impl Drop for Dx12Renderer {
                 runtime.free_resources(viewport);
             }
             #[cfg(feature = "streamline")]
-            drop(self.streamline_swap_chain.take());
-            #[cfg(feature = "streamline")]
             if let Some(streamline) = self.streamline.take() {
+                // Streamline requires slShutdown before destroying DXGI/D3D12
+                // components. Keep the upgraded proxy swap chain alive until
+                // shutdown has finished, then release its owned reference.
                 streamline.shutdown_after_gpu();
             }
+            #[cfg(feature = "streamline")]
+            drop(self.streamline_swap_chain.take());
             if cfg!(debug_assertions) {
                 report_debug_messages(&self.device);
             }
