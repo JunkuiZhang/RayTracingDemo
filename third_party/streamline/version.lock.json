@@ -12,6 +12,7 @@
     { "path": "include/sl_core_types.h", "sha256": "d0a4bc9d2efac5aa2d6171eb93f10e59a856c334a786536c0a871608ee8a877f", "purpose": "core ABI types" },
     { "path": "include/sl_dlss.h", "sha256": "d2c8c61fa71794c8ba424cebce5b3079ebfab8e47ed98b4b00cf8b257ecfd6b5", "purpose": "DLSS API" },
     { "path": "include/sl_dlss_d.h", "sha256": "a726e8135f2e36ad3939ce852530a879e1d909b85539c20c8cb5029ab122f2c4", "purpose": "DLSS Ray Reconstruction API", "optional_feature": "streamline-rr" },
+    { "path": "include/sl_dlss_g.h", "sha256": "1fc18cbe004e280df1f787276d08a1b28b8a8c4c65856fbaa659f56dff6a915d", "purpose": "DLSS Frame Generation API", "optional_feature": "streamline-fg" },
     { "path": "include/sl_reflex.h", "sha256": "3b623a1189e04a686384d224a58c4ad9974c4e6e3204077676f6ec529475164c", "purpose": "Reflex API" },
     { "path": "include/sl_pcl.h", "sha256": "f43c5135fc8d5349ccd345e424f8cf1f61953a9f17e9897204b0741a3ab7b0fb", "purpose": "PCL API" },
     { "path": "include/sl_hooks.h", "sha256": "cfeff70a52e1cc012cf4c955a15cc9d0b290f7e084dcb3c0168a9af06ff8f122", "purpose": "manual hooking API" },
@@ -25,6 +26,8 @@
     { "path": "bin/x64/nvngx_dlss.dll", "sha256": "be6e434a94ca32499515eb62ca0e6c274526055d568d0426e4c652dcdfb6ee6e", "purpose": "production NVIDIA DLSS plugin" },
     { "path": "bin/x64/sl.dlss_d.dll", "sha256": "35e4f8fc8396a08514a4493b87ba507445f886dad4b7c6c024d3305824236be6", "purpose": "production DLSS Ray Reconstruction plugin", "optional_feature": "streamline-rr" },
     { "path": "bin/x64/nvngx_dlssd.dll", "sha256": "f4e97624f70fbb769acb11ebd751b512ecc9463d4bd6aef04896d3956e6084a0", "purpose": "production NVIDIA DLSS Ray Reconstruction plugin", "optional_feature": "streamline-rr" },
+    { "path": "bin/x64/sl.dlss_g.dll", "sha256": "1fec3f8fdfc59d78c4445c276c1a0fb798bf251985f348597dc2b44d0c995e52", "purpose": "production DLSS Frame Generation plugin", "optional_feature": "streamline-fg" },
+    { "path": "bin/x64/nvngx_dlssg.dll", "sha256": "135eaf0733c1e37381a8c28abcf7a862404a54132b81787c04e35d09efc5e36f", "purpose": "production NVIDIA DLSS Frame Generation plugin", "optional_feature": "streamline-fg" },
     { "path": "bin/x64/development/sl.interposer.dll", "sha256": "f54318c050d7c13528fc1560066584c33766694084f5c416a02ec096884bdb44", "purpose": "development Streamline loader" },
     { "path": "bin/x64/development/sl.common.dll", "sha256": "b1b4017343a5fbcf2edad190ae0de229725648c7b9f1975ba30563df8371ebee", "purpose": "development common plugin" },
     { "path": "bin/x64/development/sl.dlss.dll", "sha256": "d2200487675c31479bbe514792d661a963aba49cbc497dc6fe60a9c409508b19", "purpose": "development DLSS plugin" },
@@ -33,6 +36,8 @@
     { "path": "bin/x64/development/nvngx_dlss.dll", "sha256": "1cdfdc957cb7fc9805500ca6793f607ef2d4dbd7c967feac70aca9caf382d0c0", "purpose": "development NVIDIA DLSS plugin" },
     { "path": "bin/x64/development/sl.dlss_d.dll", "sha256": "33050565f417c10c8bb543c5192d21de0d334fbcffbb8a62af0565576f3c7b34", "purpose": "development DLSS Ray Reconstruction plugin", "optional_feature": "streamline-rr" },
     { "path": "bin/x64/development/nvngx_dlssd.dll", "sha256": "fd83687c98d00754ae8e26b5daa7dabfed04557113c69c9eddfe4b6f3acaf426", "purpose": "development NVIDIA DLSS Ray Reconstruction plugin", "optional_feature": "streamline-rr" }
+    ,{ "path": "bin/x64/development/sl.dlss_g.dll", "sha256": "fa1f72c54ea3efc92baa5574d112e7b04c4d10949d394c8ec9a0aeba51963a3e", "purpose": "development DLSS Frame Generation plugin", "optional_feature": "streamline-fg" }
+    ,{ "path": "bin/x64/development/nvngx_dlssg.dll", "sha256": "0d33b5de65d60a943c33bd096d574297302b214a1c5baa6bcb74bc1150a608de", "purpose": "development NVIDIA DLSS Frame Generation plugin", "optional_feature": "streamline-fg" }
   ],
   "licenses": [
     { "path": "license.txt", "sha256": "7b6f23e7d6f3ad6292f9308d2b42cdc3d82ae4e9b2abb55f230279d83bedd43d" },

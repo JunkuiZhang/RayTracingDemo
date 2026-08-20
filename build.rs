@@ -93,6 +93,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CMAKE");
     println!("cargo:rerun-if-env-changed=STREAMLINE_SOURCE_DIR");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_STREAMLINE_RR");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_STREAMLINE_FG");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         if env::var_os("CARGO_FEATURE_NRD").is_some() {
             panic!("NRD feature 仅支持 Windows D3D12 目标");
@@ -155,8 +156,13 @@ fn main() {
         validate_streamline_sdk(
             &output_directory,
             env::var_os("CARGO_FEATURE_STREAMLINE_RR").is_some(),
+            env::var_os("CARGO_FEATURE_STREAMLINE_FG").is_some(),
         );
-        build_streamline_bridge(&output_directory);
+        build_streamline_bridge(
+            &output_directory,
+            env::var_os("CARGO_FEATURE_STREAMLINE_RR").is_some(),
+            env::var_os("CARGO_FEATURE_STREAMLINE_FG").is_some(),
+        );
     }
     println!("cargo:rustc-env=RAY_TRACING_DXC={}", dxc.display());
     println!("cargo:rustc-env=WINPIX_RUNTIME_VERSION=1.0.240308001");
@@ -213,13 +219,13 @@ fn emit_build_provenance() {
     }
 }
 
-fn validate_streamline_sdk(output_directory: &Path, rr_enabled: bool) {
+fn validate_streamline_sdk(output_directory: &Path, rr_enabled: bool, fg_enabled: bool) {
     let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let sdk = dependency_path(
         "STREAMLINE_SOURCE_DIR",
         &repository_root.join("external/streamline-v2.12.0"),
     );
-    validate_streamline_lock(repository_root, &sdk, rr_enabled);
+    validate_streamline_lock(repository_root, &sdk, rr_enabled, fg_enabled);
     let required = [
         "include/sl.h",
         "include/sl_consts.h",
@@ -231,7 +237,11 @@ fn validate_streamline_sdk(output_directory: &Path, rr_enabled: bool) {
         "include/sl_hooks.h",
         "lib/x64/sl.interposer.lib",
     ];
-    for relative in required {
+    let mut required_files = required.to_vec();
+    if fg_enabled {
+        required_files.push("include/sl_dlss_g.h");
+    }
+    for relative in required_files {
         if !sdk.join(relative).is_file() {
             panic!(
                 "Streamline SDK 文件缺失：{}；请先运行 scripts/fetch_streamline.ps1",
@@ -254,6 +264,9 @@ fn validate_streamline_sdk(output_directory: &Path, rr_enabled: bool) {
     ];
     if rr_enabled {
         runtime_files.extend(["sl.dlss_d.dll", "nvngx_dlssd.dll"]);
+    }
+    if fg_enabled {
+        runtime_files.extend(["sl.dlss_g.dll", "nvngx_dlssg.dll"]);
     }
     for name in runtime_files.iter() {
         let relative = format!("bin/x64/{flavor}{name}");
@@ -299,7 +312,12 @@ fn validate_streamline_sdk(output_directory: &Path, rr_enabled: bool) {
     );
 }
 
-fn validate_streamline_lock(repository_root: &Path, sdk: &Path, rr_enabled: bool) {
+fn validate_streamline_lock(
+    repository_root: &Path,
+    sdk: &Path,
+    rr_enabled: bool,
+    fg_enabled: bool,
+) {
     let lock_path = repository_root.join("third_party/streamline/version.lock.json");
     println!("cargo:rerun-if-changed={}", lock_path.display());
     let lock: serde_json::Value = serde_json::from_slice(
@@ -319,8 +337,15 @@ fn validate_streamline_lock(repository_root: &Path, sdk: &Path, rr_enabled: bool
             let optional_feature = entry
                 .get("optional_feature")
                 .and_then(serde_json::Value::as_str);
-            if optional_feature == Some("streamline-rr") && !rr_enabled {
-                continue;
+            if let Some(feature) = optional_feature {
+                match feature {
+                    "streamline-rr" if !rr_enabled => continue,
+                    "streamline-fg" if !fg_enabled => continue,
+                    "streamline-rr" | "streamline-fg" => {}
+                    other => panic!(
+                        "Streamline lock 包含未知 optional_feature：{other}；必须显式声明 feature 隔离"
+                    ),
+                }
             }
             let relative = entry
                 .get("path")
@@ -370,7 +395,7 @@ fn file_sha256(path: &Path) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn build_streamline_bridge(output_directory: &Path) {
+fn build_streamline_bridge(output_directory: &Path, rr_enabled: bool, fg_enabled: bool) {
     let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let sdk = dependency_path(
         "STREAMLINE_SOURCE_DIR",
@@ -402,11 +427,15 @@ fn build_streamline_bridge(output_directory: &Path) {
         format!("-DSTREAMLINE_LIB_DIR={}", sdk.join("lib/x64").display()),
         format!(
             "-DSTREAMLINE_ENABLE_RR={}",
-            if env::var_os("CARGO_FEATURE_STREAMLINE_RR").is_some() {
+            if rr_enabled {
                 "ON"
             } else {
                 "OFF"
             }
+        ),
+        format!(
+            "-DSTREAMLINE_ENABLE_FG={}",
+            if fg_enabled { "ON" } else { "OFF" }
         ),
     ];
     run_cmake(
