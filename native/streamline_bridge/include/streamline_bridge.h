@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define STREAMLINE_BRIDGE_ABI_VERSION UINT32_C(4)
+#define STREAMLINE_BRIDGE_ABI_VERSION UINT32_C(5)
 
 typedef struct StreamlineBridge StreamlineBridge;
 
@@ -42,6 +42,7 @@ typedef struct StreamlineBridgeInitDesc {
     uint32_t enable_dlss;
     uint32_t application_id;
     uint32_t enable_dlss_rr;
+    uint32_t enable_dlss_fg;
     const wchar_t* plugin_path;
     const wchar_t* log_path;
     const char* project_id;
@@ -55,10 +56,12 @@ typedef struct StreamlineBridgeSupport {
     uint32_t reflex_supported;
     uint32_t pcl_supported;
     uint32_t rr_supported;
+    uint32_t fg_supported;
     uint32_t dlss_result;
     uint32_t reflex_result;
     uint32_t pcl_result;
     uint32_t rr_result;
+    uint32_t fg_result;
     uint64_t adapter_luid;
     char sdk_version[32];
 } StreamlineBridgeSupport;
@@ -146,6 +149,39 @@ typedef struct StreamlineBridgeRrState {
     uint64_t estimated_vram_usage_bytes;
 } StreamlineBridgeRrState;
 
+typedef enum StreamlineBridgeFrameGenerationMode {
+    STREAMLINE_BRIDGE_FRAME_GENERATION_OFF = 0,
+    STREAMLINE_BRIDGE_FRAME_GENERATION_ON = 1
+} StreamlineBridgeFrameGenerationMode;
+
+typedef struct StreamlineBridgeFrameGenerationOptions {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint32_t mode;
+    uint32_t num_frames_to_generate;
+    uint32_t flags;
+    uint32_t num_back_buffers;
+    uint32_t mvec_depth_width;
+    uint32_t mvec_depth_height;
+    uint32_t color_width;
+    uint32_t color_height;
+    uint32_t color_buffer_format;
+    uint32_t mvec_buffer_format;
+    uint32_t depth_buffer_format;
+} StreamlineBridgeFrameGenerationOptions;
+
+typedef struct StreamlineBridgeFrameGenerationState {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint32_t status_raw;
+    uint32_t min_width_or_height;
+    uint32_t num_frames_actually_presented;
+    uint32_t num_frames_to_generate_max;
+    uint64_t estimated_vram_usage_bytes;
+    uint32_t vsync_support_available;
+    uint32_t dynamic_mfg_supported;
+} StreamlineBridgeFrameGenerationState;
+
 typedef struct StreamlineBridgeConstants {
     uint32_t struct_size;
     uint32_t abi_version;
@@ -232,6 +268,15 @@ StreamlineBridgeStatus streamline_bridge_free_resources(
 StreamlineBridgeStatus streamline_bridge_rr_free_resources(
     StreamlineBridge* bridge,
     const StreamlineBridgeViewport* viewport);
+StreamlineBridgeStatus streamline_bridge_fg_set_options(
+    StreamlineBridge* bridge,
+    const StreamlineBridgeViewport* viewport,
+    const StreamlineBridgeFrameGenerationOptions* options);
+StreamlineBridgeStatus streamline_bridge_fg_get_state(
+    StreamlineBridge* bridge,
+    const StreamlineBridgeViewport* viewport,
+    const StreamlineBridgeFrameGenerationOptions* estimate_options,
+    StreamlineBridgeFrameGenerationState* out_state);
 StreamlineBridgeStatus streamline_bridge_get_frame_token(
     StreamlineBridge* bridge,
     uint32_t frame_index,
@@ -274,6 +319,10 @@ StreamlineBridgeStatus streamline_bridge_reflex_get_state(
 StreamlineBridgeStatus streamline_bridge_upgrade_interface(
     StreamlineBridge* bridge,
     void** interface_ptr);
+StreamlineBridgeStatus streamline_bridge_get_native_interface(
+    StreamlineBridge* bridge,
+    void* proxy_interface,
+    void** out_native_interface);
 size_t streamline_bridge_copy_last_error(
     const StreamlineBridge* bridge,
     char* destination,

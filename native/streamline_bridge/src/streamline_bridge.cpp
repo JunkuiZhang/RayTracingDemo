@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <io.h>
 #include <memory>
 #include <new>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -17,11 +19,19 @@
 #if STREAMLINE_ENABLE_RR
 #include <sl_dlss_d.h>
 #endif
+#if STREAMLINE_ENABLE_FG
+#include <sl_dlss_g.h>
+#endif
 #include <sl_pcl.h>
 #include <sl_reflex.h>
 
-static_assert(sizeof(StreamlineBridgeInitDesc) == 56, "Streamline init ABI changed");
-static_assert(sizeof(StreamlineBridgeSupport) == 80, "Streamline support ABI changed");
+static_assert(sizeof(StreamlineBridgeInitDesc) == 64, "Streamline init ABI changed");
+static_assert(offsetof(StreamlineBridgeInitDesc, enable_dlss_fg) == 24, "Streamline init FG offset changed");
+static_assert(offsetof(StreamlineBridgeInitDesc, plugin_path) == 32, "Streamline init pointer offset changed");
+static_assert(sizeof(StreamlineBridgeSupport) == 88, "Streamline support ABI changed");
+static_assert(offsetof(StreamlineBridgeSupport, fg_supported) == 24, "Streamline support FG offset changed");
+static_assert(offsetof(StreamlineBridgeSupport, fg_result) == 44, "Streamline support FG result offset changed");
+static_assert(offsetof(StreamlineBridgeSupport, adapter_luid) == 48, "Streamline support LUID offset changed");
 static_assert(sizeof(StreamlineBridgeOptimalSettings) == 36, "Streamline optimal ABI changed");
 static_assert(sizeof(StreamlineBridgeFrameToken) == 24, "Streamline token ABI changed");
 static_assert(sizeof(StreamlineBridgeViewport) == 16, "Streamline viewport ABI changed");
@@ -29,6 +39,11 @@ static_assert(sizeof(StreamlineBridgeDlssOptions) == 44, "Streamline options ABI
 static_assert(sizeof(StreamlineBridgeRrOptions) == 204, "Streamline RR options ABI changed");
 static_assert(sizeof(StreamlineBridgeRrOptimalSettings) == 36, "Streamline RR optimal ABI changed");
 static_assert(sizeof(StreamlineBridgeRrState) == 16, "Streamline RR state ABI changed");
+static_assert(sizeof(StreamlineBridgeFrameGenerationOptions) == 52, "Streamline FG options ABI changed");
+static_assert(offsetof(StreamlineBridgeFrameGenerationOptions, flags) == 16, "Streamline FG flags offset changed");
+static_assert(offsetof(StreamlineBridgeFrameGenerationOptions, color_width) == 32, "Streamline FG color offset changed");
+static_assert(sizeof(StreamlineBridgeFrameGenerationState) == 40, "Streamline FG state ABI changed");
+static_assert(offsetof(StreamlineBridgeFrameGenerationState, estimated_vram_usage_bytes) == 24, "Streamline FG state VRAM offset changed");
 static_assert(sizeof(StreamlineBridgeConstants) == 364, "Streamline constants ABI changed");
 static_assert(sizeof(StreamlineBridgeResourceTag) == 48, "Streamline resource tag ABI changed");
 static_assert(sizeof(StreamlineBridgeReflexState) == 20, "Streamline Reflex ABI changed");
@@ -64,8 +79,16 @@ private:
 struct StreamlineBridge {
     bool initialized = false;
     bool device_set = false;
+    bool rr_requested = false;
+    bool fg_requested = false;
     uint64_t adapter_luid = 0;
-    std::array<uint32_t, 4> support_results{};
+    struct {
+        uint32_t dlss = 0;
+        uint32_t reflex = 0;
+        uint32_t pcl = 0;
+        uint32_t rr = 0;
+        uint32_t fg = 0;
+    } support_results;
     std::string last_error;
     std::unique_ptr<ScopedStdoutToStderr> stdout_redirect;
 };
@@ -185,6 +208,47 @@ bool valid_rr_options(const StreamlineBridgeRrOptions& input) noexcept {
 }
 #endif
 
+#if STREAMLINE_ENABLE_FG
+bool valid_fg_options(const StreamlineBridgeFrameGenerationOptions& input) noexcept {
+    if (input.mode != STREAMLINE_BRIDGE_FRAME_GENERATION_OFF &&
+        input.mode != STREAMLINE_BRIDGE_FRAME_GENERATION_ON)
+        return false;
+    if (input.num_frames_to_generate != 1 || input.flags != 0)
+        return false;
+    if (input.mode == STREAMLINE_BRIDGE_FRAME_GENERATION_ON) {
+        return input.num_back_buffers != 0 && input.mvec_depth_width != 0 &&
+               input.mvec_depth_height != 0 && input.color_width != 0 &&
+               input.color_height != 0 && input.color_buffer_format != 0 &&
+               input.mvec_buffer_format != 0 && input.depth_buffer_format != 0;
+    }
+    return true;
+}
+
+sl::DLSSGOptions make_fg_options(
+    const StreamlineBridgeFrameGenerationOptions& input,
+    bool request_vram_estimate) noexcept {
+    sl::DLSSGOptions options{};
+    options.mode = input.mode == STREAMLINE_BRIDGE_FRAME_GENERATION_ON
+        ? sl::DLSSGMode::eOn
+        : sl::DLSSGMode::eOff;
+    options.numFramesToGenerate = 1;
+    options.flags = request_vram_estimate
+        ? sl::DLSSGFlags::eRequestVRAMEstimate
+        : sl::DLSSGFlags{};
+    options.numBackBuffers = input.num_back_buffers;
+    options.mvecDepthWidth = input.mvec_depth_width;
+    options.mvecDepthHeight = input.mvec_depth_height;
+    options.colorWidth = input.color_width;
+    options.colorHeight = input.color_height;
+    options.colorBufferFormat = input.color_buffer_format;
+    options.mvecBufferFormat = input.mvec_buffer_format;
+    options.depthBufferFormat = input.depth_buffer_format;
+    options.queueParallelismMode = sl::DLSSGQueueParallelismMode::eBlockPresentingClientQueue;
+    options.enableUserInterfaceRecomposition = sl::eFalse;
+    return options;
+}
+#endif
+
 } // namespace
 
 StreamlineBridgeStatus streamline_bridge_create(
@@ -208,18 +272,30 @@ StreamlineBridgeStatus streamline_bridge_create(
         if (desc->enable_dlss != 0 && !has_application_id && !has_project_identity)
             return STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT;
 
-        constexpr sl::Feature features[] = {
-            sl::kFeatureReflex,
-            sl::kFeaturePCL,
-            sl::kFeatureDLSS,
+        std::array<sl::Feature, 5> features{};
+        size_t feature_count = 0;
+        features[feature_count++] = sl::kFeatureReflex;
+        features[feature_count++] = sl::kFeaturePCL;
+        if (desc->enable_dlss != 0)
+            features[feature_count++] = sl::kFeatureDLSS;
 #if STREAMLINE_ENABLE_RR
-            sl::kFeatureDLSS_RR,
+        if (desc->enable_dlss_rr != 0)
+            features[feature_count++] = sl::kFeatureDLSS_RR;
 #endif
-        };
+#if STREAMLINE_ENABLE_FG
+        if (desc->enable_dlss_fg != 0)
+            features[feature_count++] = sl::kFeatureDLSS_G;
+#endif
 #if !STREAMLINE_ENABLE_RR
         if (desc->enable_dlss_rr != 0)
             return set_error(bridge.get(), "DLSS RR bridge 未编译；请启用 streamline-rr");
 #endif
+#if !STREAMLINE_ENABLE_FG
+        if (desc->enable_dlss_fg != 0)
+            return set_error(bridge.get(), "DLSS FG bridge 未编译；请启用 streamline-fg");
+#endif
+        bridge->rr_requested = desc->enable_dlss_rr != 0;
+        bridge->fg_requested = desc->enable_dlss_fg != 0;
         sl::Preferences preferences{};
         preferences.showConsole = desc->development != 0;
         // Production diagnostics must not contaminate the benchmark's
@@ -232,19 +308,11 @@ StreamlineBridgeStatus streamline_bridge_create(
                             sl::PreferenceFlags::eDisableDebugText |
                             sl::PreferenceFlags::eUseManualHooking |
                             sl::PreferenceFlags::eUseFrameBasedResourceTagging;
-        preferences.featuresToLoad = features;
-        // Keep the optional RR plugin out of ordinary DLSS/SVGF launches.
-        // The feature array is ordered so truncating its tail still loads the
-        // common features needed by the existing Streamline path.
-        const size_t optional_rr =
-#if STREAMLINE_ENABLE_RR
-            desc->enable_dlss_rr == 0 ? 1u : 0u;
-#else
-            0u;
-#endif
-        preferences.numFeaturesToLoad = desc->enable_dlss != 0
-            ? static_cast<uint32_t>(std::size(features) - optional_rr)
-            : static_cast<uint32_t>(std::size(features) - 1 - optional_rr);
+        preferences.featuresToLoad = features.data();
+        // Build the list explicitly so RR and FG are independently opt-in;
+        // truncating one optional feature from a shared tail could silently
+        // load the other plugin in a feature-off build.
+        preferences.numFeaturesToLoad = static_cast<uint32_t>(feature_count);
         preferences.applicationId = desc->application_id;
         if (!has_application_id && has_project_identity) {
             preferences.engine = sl::EngineType::eCustom;
@@ -286,21 +354,25 @@ StreamlineBridgeStatus streamline_bridge_set_d3d_device(
         sl::AdapterInfo adapter{};
         adapter.deviceLUID = const_cast<uint8_t*>(adapter_luid);
         adapter.deviceLUIDSizeInBytes = static_cast<uint32_t>(adapter_luid_size);
-        constexpr sl::Feature features[] = {
-            sl::kFeatureDLSS,
-            sl::kFeatureReflex,
-            sl::kFeaturePCL,
+        bridge->support_results.dlss = static_cast<uint32_t>(
+            slIsFeatureSupported(sl::kFeatureDLSS, adapter));
+        bridge->support_results.reflex = static_cast<uint32_t>(
+            slIsFeatureSupported(sl::kFeatureReflex, adapter));
+        bridge->support_results.pcl = static_cast<uint32_t>(
+            slIsFeatureSupported(sl::kFeaturePCL, adapter));
 #if STREAMLINE_ENABLE_RR
-            sl::kFeatureDLSS_RR,
-#endif
-        };
-        for (size_t i = 0; i < 3; ++i) {
-            bridge->support_results[i] = static_cast<uint32_t>(slIsFeatureSupported(features[i], adapter));
-        }
-#if STREAMLINE_ENABLE_RR
-        bridge->support_results[3] = static_cast<uint32_t>(slIsFeatureSupported(features[3], adapter));
+        bridge->support_results.rr = bridge->rr_requested
+            ? static_cast<uint32_t>(slIsFeatureSupported(sl::kFeatureDLSS_RR, adapter))
+            : static_cast<uint32_t>(sl::Result::eErrorFeatureNotSupported);
 #else
-        bridge->support_results[3] = static_cast<uint32_t>(sl::Result::eErrorFeatureNotSupported);
+        bridge->support_results.rr = static_cast<uint32_t>(sl::Result::eErrorFeatureNotSupported);
+#endif
+#if STREAMLINE_ENABLE_FG
+        bridge->support_results.fg = bridge->fg_requested
+            ? static_cast<uint32_t>(slIsFeatureSupported(sl::kFeatureDLSS_G, adapter))
+            : static_cast<uint32_t>(sl::Result::eErrorFeatureNotSupported);
+#else
+        bridge->support_results.fg = static_cast<uint32_t>(sl::Result::eErrorFeatureNotSupported);
 #endif
         bridge->device_set = true;
         return STREAMLINE_BRIDGE_STATUS_OK;
@@ -320,14 +392,16 @@ StreamlineBridgeStatus streamline_bridge_query_support(
     *out_support = {};
     out_support->struct_size = sizeof(*out_support);
     out_support->abi_version = STREAMLINE_BRIDGE_ABI_VERSION;
-    out_support->dlss_result = bridge->support_results[0];
-    out_support->reflex_result = bridge->support_results[1];
-    out_support->pcl_result = bridge->support_results[2];
-    out_support->rr_result = bridge->support_results[3];
+    out_support->dlss_result = bridge->support_results.dlss;
+    out_support->reflex_result = bridge->support_results.reflex;
+    out_support->pcl_result = bridge->support_results.pcl;
+    out_support->rr_result = bridge->support_results.rr;
+    out_support->fg_result = bridge->support_results.fg;
     out_support->dlss_supported = out_support->dlss_result == 0;
     out_support->reflex_supported = out_support->reflex_result == 0;
     out_support->pcl_supported = out_support->pcl_result == 0;
     out_support->rr_supported = out_support->rr_result == 0;
+    out_support->fg_supported = out_support->fg_result == 0;
     out_support->adapter_luid = bridge->adapter_luid;
     std::strncpy(out_support->sdk_version, "2.12.0", sizeof(out_support->sdk_version) - 1);
     return STREAMLINE_BRIDGE_STATUS_OK;
@@ -454,6 +528,88 @@ StreamlineBridgeStatus streamline_bridge_rr_get_state(
     } catch (...) {
         return STREAMLINE_BRIDGE_STATUS_EXCEPTION;
     }
+}
+#endif
+
+#if STREAMLINE_ENABLE_FG
+StreamlineBridgeStatus streamline_bridge_fg_set_options(
+    StreamlineBridge* bridge,
+    const StreamlineBridgeViewport* viewport,
+    const StreamlineBridgeFrameGenerationOptions* input) {
+    if (check_bridge(bridge) != STREAMLINE_BRIDGE_STATUS_OK || viewport == nullptr || input == nullptr ||
+        !valid_header(viewport->struct_size, viewport->abi_version, sizeof(*viewport)) ||
+        !valid_header(input->struct_size, input->abi_version, sizeof(*input)) ||
+        !valid_fg_options(*input))
+        return STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT;
+    try {
+        const sl::Result result = slDLSSGSetOptions(
+            sl::ViewportHandle(viewport->id), make_fg_options(*input, false));
+        return result == sl::Result::eOk
+            ? STREAMLINE_BRIDGE_STATUS_OK
+            : set_error(bridge, "slDLSSGSetOptions failed", result);
+    } catch (...) {
+        return STREAMLINE_BRIDGE_STATUS_EXCEPTION;
+    }
+}
+
+StreamlineBridgeStatus streamline_bridge_fg_get_state(
+    StreamlineBridge* bridge,
+    const StreamlineBridgeViewport* viewport,
+    const StreamlineBridgeFrameGenerationOptions* estimate_input,
+    StreamlineBridgeFrameGenerationState* out_state) {
+    if (check_bridge(bridge) != STREAMLINE_BRIDGE_STATUS_OK || viewport == nullptr || out_state == nullptr ||
+        !valid_header(viewport->struct_size, viewport->abi_version, sizeof(*viewport)) ||
+        !valid_header(out_state->struct_size, out_state->abi_version, sizeof(*out_state)))
+        return STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT;
+    if (estimate_input != nullptr &&
+        (!valid_header(estimate_input->struct_size, estimate_input->abi_version, sizeof(*estimate_input)) ||
+         !valid_fg_options(*estimate_input)))
+        return STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT;
+    try {
+        sl::DLSSGState state{};
+        std::optional<sl::DLSSGOptions> estimate;
+        if (estimate_input != nullptr)
+            estimate = make_fg_options(*estimate_input, true);
+        const sl::Result result = slDLSSGGetState(
+            sl::ViewportHandle(viewport->id), state, estimate ? &*estimate : nullptr);
+        if (result != sl::Result::eOk)
+            return set_error(bridge, "slDLSSGGetState failed", result);
+        *out_state = {};
+        out_state->struct_size = sizeof(*out_state);
+        out_state->abi_version = STREAMLINE_BRIDGE_ABI_VERSION;
+        out_state->status_raw = static_cast<uint32_t>(state.status);
+        out_state->min_width_or_height = state.minWidthOrHeight;
+        out_state->num_frames_actually_presented = state.numFramesActuallyPresented;
+        out_state->num_frames_to_generate_max = state.numFramesToGenerateMax;
+        out_state->estimated_vram_usage_bytes = state.estimatedVRAMUsageInBytes;
+        out_state->vsync_support_available = state.bIsVsyncSupportAvailable == sl::eTrue;
+        out_state->dynamic_mfg_supported = state.bIsDynamicMFGSupported == sl::eTrue;
+        return STREAMLINE_BRIDGE_STATUS_OK;
+    } catch (...) {
+        return STREAMLINE_BRIDGE_STATUS_EXCEPTION;
+    }
+}
+#else
+StreamlineBridgeStatus streamline_bridge_fg_set_options(
+    StreamlineBridge* bridge,
+    const StreamlineBridgeViewport* viewport,
+    const StreamlineBridgeFrameGenerationOptions* input) {
+    (void)bridge;
+    (void)viewport;
+    (void)input;
+    return STREAMLINE_BRIDGE_STATUS_UNSUPPORTED;
+}
+
+StreamlineBridgeStatus streamline_bridge_fg_get_state(
+    StreamlineBridge* bridge,
+    const StreamlineBridgeViewport* viewport,
+    const StreamlineBridgeFrameGenerationOptions* estimate_input,
+    StreamlineBridgeFrameGenerationState* out_state) {
+    (void)bridge;
+    (void)viewport;
+    (void)estimate_input;
+    (void)out_state;
+    return STREAMLINE_BRIDGE_STATUS_UNSUPPORTED;
 }
 #endif
 
@@ -751,6 +907,28 @@ StreamlineBridgeStatus streamline_bridge_upgrade_interface(
             return STREAMLINE_BRIDGE_STATUS_OK;
         return set_error(bridge, "slUpgradeInterface failed", result);
     } catch (...) {
+        return STREAMLINE_BRIDGE_STATUS_EXCEPTION;
+    }
+}
+
+StreamlineBridgeStatus streamline_bridge_get_native_interface(
+    StreamlineBridge* bridge,
+    void* proxy_interface,
+    void** out_native_interface) {
+    if (out_native_interface != nullptr)
+        *out_native_interface = nullptr;
+    if (check_bridge(bridge) != STREAMLINE_BRIDGE_STATUS_OK ||
+        proxy_interface == nullptr || out_native_interface == nullptr)
+        return STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT;
+    try {
+        const sl::Result result = slGetNativeInterface(proxy_interface, out_native_interface);
+        if (result != sl::Result::eOk)
+            return set_error(bridge, "slGetNativeInterface failed", result);
+        if (*out_native_interface == nullptr)
+            return set_error(bridge, "slGetNativeInterface returned null");
+        return STREAMLINE_BRIDGE_STATUS_OK;
+    } catch (...) {
+        *out_native_interface = nullptr;
         return STREAMLINE_BRIDGE_STATUS_EXCEPTION;
     }
 }

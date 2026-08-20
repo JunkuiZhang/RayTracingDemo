@@ -3,7 +3,7 @@
 use std::{ffi::c_void, ptr::NonNull};
 
 pub const SDK_VERSION: &str = "2.12.0";
-pub const ABI_VERSION: u32 = 4;
+pub const ABI_VERSION: u32 = 5;
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_INVALID_ARGUMENT: u32 = 1;
 pub const STATUS_SDK_ERROR: u32 = 2;
@@ -11,6 +11,8 @@ pub const STATUS_EXCEPTION: u32 = 3;
 pub const STATUS_NOT_INITIALIZED: u32 = 4;
 pub const STATUS_UNSUPPORTED: u32 = 5;
 pub const STATUS_ALREADY_UPGRADED: u32 = 6;
+pub const FRAME_GENERATION_OFF: u32 = 0;
+pub const FRAME_GENERATION_ON: u32 = 1;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -21,6 +23,7 @@ pub struct InitDesc {
     pub enable_dlss: u32,
     pub application_id: u32,
     pub enable_dlss_rr: u32,
+    pub enable_dlss_fg: u32,
     pub plugin_path: *const u16,
     pub log_path: *const u16,
     pub project_id: *const i8,
@@ -36,10 +39,12 @@ pub struct Support {
     pub reflex_supported: u32,
     pub pcl_supported: u32,
     pub rr_supported: u32,
+    pub fg_supported: u32,
     pub dlss_result: u32,
     pub reflex_result: u32,
     pub pcl_result: u32,
     pub rr_result: u32,
+    pub fg_result: u32,
     pub adapter_luid: u64,
     pub sdk_version: [u8; 32],
 }
@@ -139,6 +144,38 @@ pub struct RrState {
     pub struct_size: u32,
     pub abi_version: u32,
     pub estimated_vram_usage_bytes: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FrameGenerationOptions {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub mode: u32,
+    pub num_frames_to_generate: u32,
+    pub flags: u32,
+    pub num_back_buffers: u32,
+    pub mvec_depth_width: u32,
+    pub mvec_depth_height: u32,
+    pub color_width: u32,
+    pub color_height: u32,
+    pub color_buffer_format: u32,
+    pub mvec_buffer_format: u32,
+    pub depth_buffer_format: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FrameGenerationState {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub status_raw: u32,
+    pub min_width_or_height: u32,
+    pub num_frames_actually_presented: u32,
+    pub num_frames_to_generate_max: u32,
+    pub estimated_vram_usage_bytes: u64,
+    pub vsync_support_available: u32,
+    pub dynamic_mfg_supported: u32,
 }
 
 #[repr(C)]
@@ -244,6 +281,17 @@ unsafe extern "C" {
         bridge: *mut RawBridge,
         viewport: *const Viewport,
     ) -> u32;
+    pub fn streamline_bridge_fg_set_options(
+        bridge: *mut RawBridge,
+        viewport: *const Viewport,
+        options: *const FrameGenerationOptions,
+    ) -> u32;
+    pub fn streamline_bridge_fg_get_state(
+        bridge: *mut RawBridge,
+        viewport: *const Viewport,
+        estimate_options: *const FrameGenerationOptions,
+        out: *mut FrameGenerationState,
+    ) -> u32;
     pub fn streamline_bridge_get_frame_token(
         bridge: *mut RawBridge,
         frame_index: u32,
@@ -287,6 +335,11 @@ unsafe extern "C" {
     pub fn streamline_bridge_upgrade_interface(
         bridge: *mut RawBridge,
         interface_ptr: *mut *mut c_void,
+    ) -> u32;
+    pub fn streamline_bridge_get_native_interface(
+        bridge: *mut RawBridge,
+        proxy_interface: *mut c_void,
+        out_native_interface: *mut *mut c_void,
     ) -> u32;
     pub fn streamline_bridge_shutdown(bridge: *mut RawBridge) -> u32;
     pub fn streamline_bridge_copy_last_error(
@@ -353,7 +406,7 @@ impl Drop for Bridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::mem::size_of;
+    use std::mem::{offset_of, size_of};
 
     #[test]
     fn locks_streamline_version() {
@@ -362,8 +415,13 @@ mod tests {
 
     #[test]
     fn abi_struct_layout_is_fixed_width() {
-        assert_eq!(size_of::<InitDesc>(), 56);
-        assert_eq!(size_of::<Support>(), 80);
+        assert_eq!(size_of::<InitDesc>(), 64);
+        assert_eq!(offset_of!(InitDesc, enable_dlss_fg), 24);
+        assert_eq!(offset_of!(InitDesc, plugin_path), 32);
+        assert_eq!(size_of::<Support>(), 88);
+        assert_eq!(offset_of!(Support, fg_supported), 24);
+        assert_eq!(offset_of!(Support, fg_result), 44);
+        assert_eq!(offset_of!(Support, adapter_luid), 48);
         assert_eq!(size_of::<OptimalSettings>(), 36);
         assert_eq!(size_of::<FrameToken>(), 24);
         assert_eq!(size_of::<Viewport>(), 16);
@@ -371,6 +429,14 @@ mod tests {
         assert_eq!(size_of::<RrOptions>(), 204);
         assert_eq!(size_of::<RrOptimalSettings>(), 36);
         assert_eq!(size_of::<RrState>(), 16);
+        assert_eq!(size_of::<FrameGenerationOptions>(), 52);
+        assert_eq!(offset_of!(FrameGenerationOptions, flags), 16);
+        assert_eq!(offset_of!(FrameGenerationOptions, color_width), 32);
+        assert_eq!(size_of::<FrameGenerationState>(), 40);
+        assert_eq!(
+            offset_of!(FrameGenerationState, estimated_vram_usage_bytes),
+            24
+        );
         assert_eq!(size_of::<Constants>(), 364);
         assert_eq!(size_of::<ResourceTag>(), 48);
         assert_eq!(size_of::<ReflexState>(), 20);
@@ -378,7 +444,7 @@ mod tests {
 
     #[test]
     fn invalid_bridge_statuses_are_stable() {
-        assert_eq!(ABI_VERSION, 4);
+        assert_eq!(ABI_VERSION, 5);
         assert_eq!(STATUS_OK, 0);
         assert_eq!(STATUS_INVALID_ARGUMENT, 1);
         assert_eq!(size_of::<RawBridge>(), 0);
@@ -390,5 +456,54 @@ mod tests {
         let status = unsafe { streamline_bridge_create(std::ptr::null(), &mut raw) };
         assert_eq!(status, STATUS_INVALID_ARGUMENT);
         assert!(raw.is_null());
+    }
+
+    #[cfg(not(feature = "streamline-fg"))]
+    #[test]
+    fn feature_off_fg_entry_points_return_unsupported_without_sdk_state() {
+        let set_status = unsafe {
+            streamline_bridge_fg_set_options(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        let get_status = unsafe {
+            streamline_bridge_fg_get_state(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(set_status, STATUS_UNSUPPORTED);
+        assert_eq!(get_status, STATUS_UNSUPPORTED);
+    }
+
+    #[test]
+    fn frame_generation_source_contract_is_feature_isolated() {
+        let bridge = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/native/streamline_bridge/src/streamline_bridge.cpp"
+        ));
+        let cmake = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/native/streamline_bridge/CMakeLists.txt"
+        ));
+        let build = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/build.rs"));
+        assert!(bridge.contains("#if STREAMLINE_ENABLE_FG\n#include <sl_dlss_g.h>"));
+        assert!(bridge.contains("input.mode != STREAMLINE_BRIDGE_FRAME_GENERATION_ON"));
+        assert!(bridge.contains("input.num_frames_to_generate != 1"));
+        assert!(bridge.contains("input.flags != 0"));
+        assert!(bridge.contains("sl::DLSSGMode::eOff"));
+        assert!(bridge.contains("sl::DLSSGMode::eOn"));
+        assert!(bridge.contains("options.flags = request_vram_estimate"));
+        assert!(bridge.contains("slDLSSGGetState"));
+        assert!(bridge.contains("*out_native_interface = nullptr"));
+        assert!(bridge.contains("slGetNativeInterface"));
+        assert!(cmake.contains("option(STREAMLINE_ENABLE_FG"));
+        assert!(build.contains("optional_feature"));
+        assert!(build.contains("未知 optional_feature"));
+        assert!(build.contains("CARGO_FEATURE_STREAMLINE_FG"));
     }
 }

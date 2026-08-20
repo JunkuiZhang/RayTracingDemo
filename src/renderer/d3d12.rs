@@ -192,6 +192,7 @@ impl StreamlineRuntime {
     fn create_before_dxgi(
         application_id: Option<u32>,
         enable_rr: bool,
+        enable_fg: bool,
     ) -> Result<crate::streamline::Bridge> {
         let plugin_directory = std::env::current_exe()
             .ok()
@@ -214,6 +215,7 @@ impl StreamlineRuntime {
             enable_dlss: 1,
             application_id: application_id.unwrap_or(0),
             enable_dlss_rr: u32::from(enable_rr),
+            enable_dlss_fg: u32::from(enable_fg),
             plugin_path: plugin_path.as_ptr(),
             log_path: std::ptr::null(),
             project_id: project_id.as_ptr(),
@@ -267,7 +269,7 @@ impl StreamlineRuntime {
             ));
         }
         eprintln!(
-            "Streamline support: dlss={}({}), reflex={}({}), pcl={}({}), rr={}({}), adapter_luid=0x{:016x}",
+            "Streamline support: dlss={}({}), reflex={}({}), pcl={}({}), rr={}({}), fg={}({}), adapter_luid=0x{:016x}",
             support.dlss_supported,
             support.dlss_result,
             support.reflex_supported,
@@ -276,6 +278,8 @@ impl StreamlineRuntime {
             support.pcl_result,
             support.rr_supported,
             support.rr_result,
+            support.fg_supported,
+            support.fg_result,
             support.adapter_luid,
         );
         if support.reflex_supported != 0 {
@@ -1689,6 +1693,7 @@ impl Dx12Renderer {
             let streamline_bridge = Some(StreamlineRuntime::create_before_dxgi(
                 config.streamline_application_id,
                 config.denoiser == DenoiserBackend::DlssRayReconstruction,
+                cfg!(feature = "streamline-fg"),
             )?);
 
             let factory_flags = if cfg!(debug_assertions) {
