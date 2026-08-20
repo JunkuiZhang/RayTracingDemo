@@ -506,4 +506,36 @@ mod tests {
         assert!(build.contains("未知 optional_feature"));
         assert!(build.contains("CARGO_FEATURE_STREAMLINE_FG"));
     }
+
+    #[test]
+    fn frame_generation_feature_graph_and_api_boundaries_are_locked() {
+        let manifest = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
+        let bridge = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/native/streamline_bridge/src/streamline_bridge.cpp"
+        ));
+        let lock = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/third_party/streamline/version.lock.json"
+        ));
+
+        // RR and FG must be opt-in independently: otherwise a build intended
+        // to validate one optional plugin can silently deploy/load the other.
+        assert!(manifest.contains("streamline-fg = [\"streamline\"]"));
+        assert!(manifest.contains("streamline-rr = [\"streamline\"]"));
+        assert!(!manifest.contains("streamline-rr = [\"streamline\", \"streamline-fg\"]"));
+        assert!(!manifest.contains("streamline-fg = [\"streamline\", \"streamline-rr\"]"));
+
+        // FG on/off is an options update, while state is queried through the
+        // dedicated API; this first-round ABI intentionally has no evaluate,
+        // tag, or feature-loaded hook that could start 11G-B early.
+        assert!(bridge.contains("slDLSSGSetOptions"));
+        assert!(bridge.contains("slDLSSGGetState"));
+        assert!(bridge.contains("sl::kFeatureDLSS_G"));
+        assert!(!bridge.contains("slSetFeatureLoaded"));
+        assert!(!bridge.contains("slDLSSGEvaluateFeature"));
+        assert!(lock.contains("include/sl_dlss_g.h"));
+        assert!(lock.contains("bin/x64/sl.dlss_g.dll"));
+        assert!(lock.contains("bin/x64/nvngx_dlssg.dll"));
+    }
 }
