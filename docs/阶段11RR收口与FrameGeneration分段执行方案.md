@@ -163,6 +163,11 @@ Reflex/presentCommon 计数不等，以及 timeout/多 JSON 行；每个负例�
 
 ## 5. 11G-A：FG SDK 锁、部署与 ABI
 
+> 2026-08-20 更新：本节保留为总体路线。实际实施以
+> [`阶段11FrameGeneration-11G-A-SDK部署与ABI执行方案.md`](阶段11FrameGeneration-11G-A-SDK部署与ABI执行方案.md)
+> 为准；新版根据本地 Streamline v2.12 指南修正了 `slSetFeatureLoaded` 的边界，并锁定当前 ABI
+> v4、manual-hooking 与 stable-plane 基线。
+
 ### 5.1 Cargo/build 隔离
 
 新增：
