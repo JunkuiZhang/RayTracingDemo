@@ -7,6 +7,23 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
+const STREAMLINE_BASE_RUNTIME_FILES: &[&str] = &[
+    "sl.interposer.dll",
+    "sl.common.dll",
+    "sl.dlss.dll",
+    "sl.reflex.dll",
+    "sl.pcl.dll",
+    "nvngx_dlss.dll",
+];
+const STREAMLINE_RR_RUNTIME_FILES: &[&str] = &["sl.dlss_d.dll", "nvngx_dlssd.dll"];
+const STREAMLINE_FG_RUNTIME_FILES: &[&str] = &["sl.dlss_g.dll", "nvngx_dlssg.dll"];
+const STREAMLINE_NOTICE_FILES: &[&str] = &[
+    "Streamline.LICENSE.txt",
+    "Streamline.ThirdPartyLicenses.md",
+    "Streamline.Reflex.LICENSE.txt",
+    "Streamline.NvngxDlss.LICENSE.txt",
+];
+
 fn main() {
     emit_build_provenance();
     let shaders = [
@@ -152,16 +169,25 @@ fn main() {
         );
     }
     deploy_winpix_runtime(&output_directory);
-    if env::var_os("CARGO_FEATURE_STREAMLINE").is_some() {
+    let streamline_enabled = env::var_os("CARGO_FEATURE_STREAMLINE").is_some();
+    let streamline_rr_enabled = env::var_os("CARGO_FEATURE_STREAMLINE_RR").is_some();
+    let streamline_fg_enabled = env::var_os("CARGO_FEATURE_STREAMLINE_FG").is_some();
+    reconcile_streamline_runtime(
+        &output_directory,
+        streamline_enabled,
+        streamline_rr_enabled,
+        streamline_fg_enabled,
+    );
+    if streamline_enabled {
         validate_streamline_sdk(
             &output_directory,
-            env::var_os("CARGO_FEATURE_STREAMLINE_RR").is_some(),
-            env::var_os("CARGO_FEATURE_STREAMLINE_FG").is_some(),
+            streamline_rr_enabled,
+            streamline_fg_enabled,
         );
         build_streamline_bridge(
             &output_directory,
-            env::var_os("CARGO_FEATURE_STREAMLINE_RR").is_some(),
-            env::var_os("CARGO_FEATURE_STREAMLINE_FG").is_some(),
+            streamline_rr_enabled,
+            streamline_fg_enabled,
         );
     }
     println!("cargo:rustc-env=RAY_TRACING_DXC={}", dxc.display());
@@ -254,19 +280,12 @@ fn validate_streamline_sdk(output_directory: &Path, rr_enabled: bool, fg_enabled
     } else {
         "development/"
     };
-    let mut runtime_files = vec![
-        "sl.interposer.dll",
-        "sl.common.dll",
-        "sl.dlss.dll",
-        "sl.reflex.dll",
-        "sl.pcl.dll",
-        "nvngx_dlss.dll",
-    ];
+    let mut runtime_files = STREAMLINE_BASE_RUNTIME_FILES.to_vec();
     if rr_enabled {
-        runtime_files.extend(["sl.dlss_d.dll", "nvngx_dlssd.dll"]);
+        runtime_files.extend(STREAMLINE_RR_RUNTIME_FILES);
     }
     if fg_enabled {
-        runtime_files.extend(["sl.dlss_g.dll", "nvngx_dlssg.dll"]);
+        runtime_files.extend(STREAMLINE_FG_RUNTIME_FILES);
     }
     for name in runtime_files.iter() {
         let relative = format!("bin/x64/{flavor}{name}");
@@ -310,6 +329,53 @@ fn validate_streamline_sdk(output_directory: &Path, rr_enabled: bool, fg_enabled
         "cargo:rustc-env=RAY_TRACING_STREAMLINE_SOURCE_DIR={}",
         sdk.display()
     );
+}
+
+fn reconcile_streamline_runtime(
+    output_directory: &Path,
+    streamline_enabled: bool,
+    rr_enabled: bool,
+    fg_enabled: bool,
+) {
+    let profile_directory = output_directory
+        .ancestors()
+        .nth(3)
+        .expect("无法从 OUT_DIR 定位 Cargo profile 输出目录");
+
+    // Cargo reuses one profile directory for different feature sets. Remove
+    // only the exact optional artifacts that the active executable cannot
+    // request, otherwise a previous RR/FG build is still scanned as a plugin
+    // during the next launch and can leak into packaging evidence.
+    for (keep, files) in [
+        (streamline_enabled, STREAMLINE_BASE_RUNTIME_FILES),
+        (
+            streamline_enabled && rr_enabled,
+            STREAMLINE_RR_RUNTIME_FILES,
+        ),
+        (
+            streamline_enabled && fg_enabled,
+            STREAMLINE_FG_RUNTIME_FILES,
+        ),
+        (streamline_enabled, STREAMLINE_NOTICE_FILES),
+    ] {
+        if keep {
+            continue;
+        }
+        for name in files {
+            remove_deployed_file(&profile_directory.join(name));
+        }
+    }
+}
+
+fn remove_deployed_file(path: &Path) {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!(
+            "清理未启用的 Streamline 文件 {} 失败：{error}",
+            path.display()
+        ),
+    }
 }
 
 fn validate_streamline_lock(
@@ -427,11 +493,7 @@ fn build_streamline_bridge(output_directory: &Path, rr_enabled: bool, fg_enabled
         format!("-DSTREAMLINE_LIB_DIR={}", sdk.join("lib/x64").display()),
         format!(
             "-DSTREAMLINE_ENABLE_RR={}",
-            if rr_enabled {
-                "ON"
-            } else {
-                "OFF"
-            }
+            if rr_enabled { "ON" } else { "OFF" }
         ),
         format!(
             "-DSTREAMLINE_ENABLE_FG={}",
