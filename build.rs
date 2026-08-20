@@ -7,8 +7,8 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
-const STREAMLINE_BASE_RUNTIME_FILES: &[&str] = &[
-    "sl.interposer.dll",
+const STREAMLINE_LOADER_FILE: &str = "sl.interposer.dll";
+const STREAMLINE_BASE_PLUGIN_FILES: &[&str] = &[
     "sl.common.dll",
     "sl.dlss.dll",
     "sl.reflex.dll",
@@ -17,12 +17,6 @@ const STREAMLINE_BASE_RUNTIME_FILES: &[&str] = &[
 ];
 const STREAMLINE_RR_RUNTIME_FILES: &[&str] = &["sl.dlss_d.dll", "nvngx_dlssd.dll"];
 const STREAMLINE_FG_RUNTIME_FILES: &[&str] = &["sl.dlss_g.dll", "nvngx_dlssg.dll"];
-const STREAMLINE_NOTICE_FILES: &[&str] = &[
-    "Streamline.LICENSE.txt",
-    "Streamline.ThirdPartyLicenses.md",
-    "Streamline.Reflex.LICENSE.txt",
-    "Streamline.NvngxDlss.LICENSE.txt",
-];
 
 fn main() {
     emit_build_provenance();
@@ -172,13 +166,8 @@ fn main() {
     let streamline_enabled = env::var_os("CARGO_FEATURE_STREAMLINE").is_some();
     let streamline_rr_enabled = env::var_os("CARGO_FEATURE_STREAMLINE_RR").is_some();
     let streamline_fg_enabled = env::var_os("CARGO_FEATURE_STREAMLINE_FG").is_some();
-    reconcile_streamline_runtime(
-        &output_directory,
-        streamline_enabled,
-        streamline_rr_enabled,
-        streamline_fg_enabled,
-    );
     if streamline_enabled {
+        remove_legacy_adjacent_streamline_plugins(&output_directory);
         validate_streamline_sdk(
             &output_directory,
             streamline_rr_enabled,
@@ -280,7 +269,8 @@ fn validate_streamline_sdk(output_directory: &Path, rr_enabled: bool, fg_enabled
     } else {
         "development/"
     };
-    let mut runtime_files = STREAMLINE_BASE_RUNTIME_FILES.to_vec();
+    let mut runtime_files = vec![STREAMLINE_LOADER_FILE];
+    runtime_files.extend(STREAMLINE_BASE_PLUGIN_FILES);
     if rr_enabled {
         runtime_files.extend(STREAMLINE_RR_RUNTIME_FILES);
     }
@@ -305,11 +295,21 @@ fn validate_streamline_sdk(output_directory: &Path, rr_enabled: bool, fg_enabled
         .ancestors()
         .nth(3)
         .expect("无法从 OUT_DIR 定位 Cargo profile 输出目录");
-    for name in runtime_files {
-        copy_if_changed(
-            &sdk.join(format!("bin/x64/{flavor}{name}")),
-            &profile_directory.join(name),
-        );
+    let plugin_subdirectory = streamline_plugin_subdirectory(rr_enabled, fg_enabled);
+    let plugin_directory = profile_directory.join(&plugin_subdirectory);
+    fs::create_dir_all(&plugin_directory).unwrap_or_else(|error| {
+        panic!(
+            "创建 Streamline feature plugin 目录 {} 失败：{error}",
+            plugin_directory.display()
+        )
+    });
+    for name in runtime_files.iter().copied() {
+        let destination = if name == STREAMLINE_LOADER_FILE {
+            profile_directory.join(name)
+        } else {
+            plugin_directory.join(name)
+        };
+        copy_if_changed(&sdk.join(format!("bin/x64/{flavor}{name}")), &destination);
     }
     for (source, destination) in [
         ("license.txt", "Streamline.LICENSE.txt"),
@@ -329,42 +329,38 @@ fn validate_streamline_sdk(output_directory: &Path, rr_enabled: bool, fg_enabled
         "cargo:rustc-env=RAY_TRACING_STREAMLINE_SOURCE_DIR={}",
         sdk.display()
     );
+    println!("cargo:rustc-env=RAY_TRACING_STREAMLINE_PLUGIN_SUBDIR={plugin_subdirectory}");
 }
 
-fn reconcile_streamline_runtime(
-    output_directory: &Path,
-    streamline_enabled: bool,
-    rr_enabled: bool,
-    fg_enabled: bool,
-) {
+fn remove_legacy_adjacent_streamline_plugins(output_directory: &Path) {
     let profile_directory = output_directory
         .ancestors()
         .nth(3)
         .expect("无法从 OUT_DIR 定位 Cargo profile 输出目录");
 
-    // Cargo reuses one profile directory for different feature sets. Remove
-    // only the exact optional artifacts that the active executable cannot
-    // request, otherwise a previous RR/FG build is still scanned as a plugin
-    // during the next launch and can leak into packaging evidence.
-    for (keep, files) in [
-        (streamline_enabled, STREAMLINE_BASE_RUNTIME_FILES),
-        (
-            streamline_enabled && rr_enabled,
-            STREAMLINE_RR_RUNTIME_FILES,
-        ),
-        (
-            streamline_enabled && fg_enabled,
-            STREAMLINE_FG_RUNTIME_FILES,
-        ),
-        (streamline_enabled, STREAMLINE_NOTICE_FILES),
+    // Older builds placed every plugin beside the executable. Keep only the
+    // interposer loader there and move plugins into immutable feature-set
+    // directories. Cargo may reuse a cached build script when switching back
+    // to a prior feature set, so deleting another set's directory is unsafe.
+    for files in [
+        STREAMLINE_BASE_PLUGIN_FILES,
+        STREAMLINE_RR_RUNTIME_FILES,
+        STREAMLINE_FG_RUNTIME_FILES,
     ] {
-        if keep {
-            continue;
-        }
         for name in files {
             remove_deployed_file(&profile_directory.join(name));
         }
     }
+}
+
+fn streamline_plugin_subdirectory(rr_enabled: bool, fg_enabled: bool) -> String {
+    let feature_set = match (rr_enabled, fg_enabled) {
+        (false, false) => "base",
+        (true, false) => "rr",
+        (false, true) => "fg",
+        (true, true) => "rr-fg",
+    };
+    format!("streamline-plugins/{feature_set}")
 }
 
 fn remove_deployed_file(path: &Path) {

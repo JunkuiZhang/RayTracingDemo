@@ -100,8 +100,11 @@ param(
 ```
 
 Runner 不负责调用 Cargo，也不复制 EXE/DLL。正式矩阵使用不同 `CARGO_TARGET_DIR` 生成三套彼此
-隔离、runtime DLL 位于 EXE 同目录的构建，再把路径显式传给脚本，避免后一种 feature 构建覆盖
-前一种证据。`-SelfTest` 不启动 GPU 进程，使用内存中的合成 JSON 验证至少这些负例：错误 RR
+隔离的构建，再把路径显式传给脚本，避免后一种 feature 构建覆盖前一种证据。
+`sl.interposer.dll` 位于 EXE 同目录，其余 plugin 位于
+`streamline-plugins/<feature-set>/`；runner 按 executable 的预期 feature-set 取证，不能把同一开发
+目录中其他缓存 feature 的 DLL 算入当前构建。`-SelfTest` 不启动 GPU 进程，使用内存中的合成 JSON
+验证至少这些负例：错误 RR
 档位、缺失 active pass、出现 hidden SR/NRD pass、idle wait 非零、错误 optimal extent、
 Reflex/presentCommon 计数不等，以及 timeout/多 JSON 行；每个负例必须被对应 gate 拒绝。
 

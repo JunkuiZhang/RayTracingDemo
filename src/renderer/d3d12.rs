@@ -194,11 +194,16 @@ impl StreamlineRuntime {
         enable_rr: bool,
         enable_fg: bool,
     ) -> Result<crate::streamline::Bridge> {
-        let plugin_directory = std::env::current_exe()
+        let executable_directory = std::env::current_exe()
             .ok()
             .and_then(|path| path.parent().map(PathBuf::from))
             .or_else(|| std::env::current_dir().ok())
             .ok_or_else(|| streamline_error("定位 Streamline plugin 目录", 0))?;
+        // Only the interposer loader lives beside the executable. Plugins are
+        // immutable per feature set so cached Cargo builds cannot scan stale
+        // RR/FG DLLs left by a different executable configuration.
+        let plugin_directory =
+            executable_directory.join(env!("RAY_TRACING_STREAMLINE_PLUGIN_SUBDIR"));
         let plugin_path = plugin_directory
             .as_os_str()
             .encode_wide()

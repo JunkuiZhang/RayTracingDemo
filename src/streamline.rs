@@ -529,7 +529,8 @@ mod tests {
         assert!(build.contains("optional_feature"));
         assert!(build.contains("未知 optional_feature"));
         assert!(build.contains("CARGO_FEATURE_STREAMLINE_FG"));
-        assert!(build.contains("reconcile_streamline_runtime"));
+        assert!(build.contains("streamline_plugin_subdirectory"));
+        assert!(build.contains("remove_legacy_adjacent_streamline_plugins"));
         assert!(build.contains("remove_deployed_file"));
     }
 

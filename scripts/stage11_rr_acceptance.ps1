@@ -223,34 +223,50 @@ function Get-StreamlineSdkEvidence([string[]]$ExecutablePaths) {
     }
     $dllNames = @(
         "sl.interposer.dll", "sl.common.dll", "sl.dlss.dll", "sl.reflex.dll",
-        "sl.pcl.dll", "nvngx_dlss.dll", "sl.dlss_d.dll", "nvngx_dlssd.dll"
+        "sl.pcl.dll", "nvngx_dlss.dll", "sl.dlss_d.dll", "nvngx_dlssd.dll",
+        "sl.dlss_g.dll", "nvngx_dlssg.dll"
     )
     $dlls = [System.Collections.Generic.List[object]]::new()
     foreach ($exePath in @($ExecutablePaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
         $exeDirectory = Split-Path -Parent $exePath
-        foreach ($name in $dllNames) {
-            $path = Join-Path $exeDirectory $name
-            if (-not (Test-Path -LiteralPath $path)) {
-                continue
+        $locations = [System.Collections.Generic.List[object]]::new()
+        $locations.Add([pscustomobject]@{ path = $exeDirectory; plugin_set = "adjacent" })
+        $pluginRoot = Join-Path $exeDirectory "streamline-plugins"
+        if (Test-Path -LiteralPath $pluginRoot) {
+            foreach ($directory in @(Get-ChildItem -LiteralPath $pluginRoot -Directory)) {
+                $locations.Add([pscustomobject]@{
+                    path = $directory.FullName
+                    plugin_set = $directory.Name
+                })
             }
-            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-            $flavor = "unmatched"
-            if ($null -ne $lock) {
-                foreach ($entry in @($lock.files)) {
-                    if ([IO.Path]::GetFileName([string]$entry.path) -eq $name -and
-                        [string]$entry.sha256 -eq $hash) {
-                        $flavor = if ([string]$entry.path -match "/development/") { "development" } else { "production" }
-                        break
+        }
+        foreach ($location in $locations) {
+            foreach ($name in $dllNames) {
+                $path = Join-Path ([string]$location.path) $name
+                if (-not (Test-Path -LiteralPath $path)) {
+                    continue
+                }
+                $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+                $flavor = "unmatched"
+                if ($null -ne $lock) {
+                    foreach ($entry in @($lock.files)) {
+                        if ([IO.Path]::GetFileName([string]$entry.path) -eq $name -and
+                            [string]$entry.sha256 -eq $hash) {
+                            $flavor = if ([string]$entry.path -match "/development/") { "development" } else { "production" }
+                            break
+                        }
                     }
                 }
+                $dlls.Add([ordered]@{
+                    executable_directory = $exeDirectory
+                    deployment_directory = [string]$location.path
+                    plugin_set = [string]$location.plugin_set
+                    name = $name
+                    path = $path
+                    sha256 = $hash
+                    flavor = $flavor
+                })
             }
-            $dlls.Add([ordered]@{
-                executable_directory = $exeDirectory
-                name = $name
-                path = $path
-                sha256 = $hash
-                flavor = $flavor
-            })
         }
     }
     $uniqueFlavors = @($dlls | ForEach-Object { $_.flavor } | Sort-Object -Unique)
@@ -319,14 +335,29 @@ function Get-StreamlineSdkFailures(
     )
     $rr = @($common) + @("sl.dlss_d.dll", "nvngx_dlssd.dll")
     $expectations = @(
-        [pscustomobject]@{ executable = $Executables.rr; required = $rr; label = "rr" },
-        [pscustomobject]@{ executable = $Executables.default; required = @(); label = "default" },
-        [pscustomobject]@{ executable = $Executables.nrd_streamline; required = $common; label = "nrd_streamline" }
+        [pscustomobject]@{ executable = $Executables.rr; required = $rr; label = "rr"; plugin_set = "rr" },
+        [pscustomobject]@{ executable = $Executables.default; required = @(); label = "default"; plugin_set = $null },
+        [pscustomobject]@{ executable = $Executables.nrd_streamline; required = $common; label = "nrd_streamline"; plugin_set = "base" }
     )
     foreach ($expectation in $expectations) {
         if ($null -eq $expectation.executable) { continue }
         $directory = Split-Path -Parent ([string]$expectation.executable.path)
-        $deployed = @($Evidence.dlls | Where-Object { [string]$_.executable_directory -eq $directory })
+        $allForExecutable = @($Evidence.dlls | Where-Object { [string]$_.executable_directory -eq $directory })
+        if (@($expectation.required).Count -eq 0) {
+            $deployed = $allForExecutable
+        } else {
+            $featureSet = @($allForExecutable | Where-Object { [string]$_.plugin_set -eq [string]$expectation.plugin_set })
+            if ($featureSet.Count -ne 0) {
+                $deployed = @($allForExecutable | Where-Object {
+                    ([string]$_.plugin_set -eq [string]$expectation.plugin_set) -or
+                    ([string]$_.plugin_set -eq "adjacent" -and [string]$_.name -eq "sl.interposer.dll")
+                })
+            } else {
+                # Preserve compatibility with evidence produced before plugins
+                # were isolated into immutable feature-set subdirectories.
+                $deployed = @($allForExecutable | Where-Object { [string]$_.plugin_set -eq "adjacent" })
+            }
+        }
         $names = @($deployed | ForEach-Object { [string]$_.name })
         foreach ($required in @($expectation.required)) {
             if ($required -notin $names) {
@@ -861,6 +892,46 @@ function Invoke-SelfTest {
     $extraStdout = Get-ExactJsonLine "{`"ok`":true}`nStreamline diagnostic"
     if ($extraStdout.exact) { throw "SelfTest accepted extra non-JSON stdout" }
     $cases.Add([ordered]@{ name = "extra_stdout_line"; rejected = $true })
+
+    $runtimeRoot = Join-Path $repoRoot "output/self-test-streamline-runtime"
+    $rrExecutable = [pscustomobject]@{ path = (Join-Path $runtimeRoot "rr.exe") }
+    $runtimeDlls = [System.Collections.Generic.List[object]]::new()
+    foreach ($name in @(
+        "sl.interposer.dll", "sl.common.dll", "sl.dlss.dll", "sl.reflex.dll",
+        "sl.pcl.dll", "nvngx_dlss.dll", "sl.dlss_d.dll", "nvngx_dlssd.dll"
+    )) {
+        $runtimeDlls.Add([pscustomobject]@{
+            executable_directory = $runtimeRoot
+            plugin_set = if ($name -eq "sl.interposer.dll") { "adjacent" } else { "rr" }
+            name = $name
+            flavor = "production"
+        })
+    }
+    # A cached FG directory in the same Cargo profile must not be attributed
+    # to the RR executable selected by its immutable plugin-set contract.
+    foreach ($name in @("sl.dlss_g.dll", "nvngx_dlssg.dll")) {
+        $runtimeDlls.Add([pscustomobject]@{
+            executable_directory = $runtimeRoot
+            plugin_set = "fg"
+            name = $name
+            flavor = "production"
+        })
+    }
+    $runtimeEvidence = [pscustomobject]@{
+        version = "2.12.0"
+        tag = "v2.12.0"
+        dlls = @($runtimeDlls)
+    }
+    $runtimeExecutables = [pscustomobject]@{
+        rr = $rrExecutable
+        default = $null
+        nrd_streamline = $null
+    }
+    $runtimeFailures = @(Get-StreamlineSdkFailures $runtimeEvidence $runtimeExecutables "production")
+    if ($runtimeFailures.Count -ne 0) {
+        throw "SelfTest rejected isolated RR plugin-set evidence: $($runtimeFailures -join '; ')"
+    }
+    $cases.Add([ordered]@{ name = "feature_set_runtime_isolation"; rejected = $true })
     [ordered]@{ self_test = "passed"; gpu_started = $false; rejected_cases = @($cases) } | ConvertTo-Json -Compress -Depth 20
 }
 

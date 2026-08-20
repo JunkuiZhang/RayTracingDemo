@@ -96,6 +96,12 @@ notices 与 `nvngx_dlss.license.txt`。
 - production 只复制 `bin/x64`，Debug 只复制 `bin/x64/development`；
 - 现有 copy-if-changed、输出目录定位、SDK 版本和 hash 校验方式保持不变。
 
+实现收口补充：Cargo 会缓存 build-script，不能靠切 feature 时删除另一个构建的 DLL 再复制回来。
+`sl.interposer.dll` 保持在 EXE 同目录，其余 plugin 按
+`streamline-plugins/base|rr|fg|rr-fg` 隔离，并由编译进可执行文件的相对目录选择。各目录不可
+互删；正式验收仍使用独立 `CARGO_TARGET_DIR`，但普通开发目录连续切 feature 也不得扫描错误的
+可选 plugin。
+
 不要修改 `fetch_streamline.ps1` 的下载来源、archive hash 或签名验证；lock 新条目应被现有下载后
 校验自然覆盖。若脚本目前对 optional feature 有独立过滤，才做最小的 RR/FG 泛化并补测试。
 
