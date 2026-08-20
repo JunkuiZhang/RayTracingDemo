@@ -209,19 +209,29 @@ bool valid_rr_options(const StreamlineBridgeRrOptions& input) noexcept {
 #endif
 
 #if STREAMLINE_ENABLE_FG
+bool valid_fg_resource_description(const StreamlineBridgeFrameGenerationOptions& input) noexcept {
+    return input.num_back_buffers != 0 && input.mvec_depth_width != 0 &&
+           input.mvec_depth_height != 0 && input.color_width != 0 &&
+           input.color_height != 0 && input.color_buffer_format != 0 &&
+           input.mvec_buffer_format != 0 && input.depth_buffer_format != 0;
+}
+
 bool valid_fg_options(const StreamlineBridgeFrameGenerationOptions& input) noexcept {
     if (input.mode != STREAMLINE_BRIDGE_FRAME_GENERATION_OFF &&
         input.mode != STREAMLINE_BRIDGE_FRAME_GENERATION_ON)
         return false;
     if (input.num_frames_to_generate != 1 || input.flags != 0)
         return false;
-    if (input.mode == STREAMLINE_BRIDGE_FRAME_GENERATION_ON) {
-        return input.num_back_buffers != 0 && input.mvec_depth_width != 0 &&
-               input.mvec_depth_height != 0 && input.color_width != 0 &&
-               input.color_height != 0 && input.color_buffer_format != 0 &&
-               input.mvec_buffer_format != 0 && input.depth_buffer_format != 0;
-    }
+    if (input.mode == STREAMLINE_BRIDGE_FRAME_GENERATION_ON)
+        return valid_fg_resource_description(input);
     return true;
+}
+
+bool valid_fg_estimate_options(const StreamlineBridgeFrameGenerationOptions& input) noexcept {
+    // SetOptions(eOff) may omit resource metadata, but a non-null GetState
+    // options pointer requests a VRAM estimate and NVIDIA requires a complete
+    // target swap-chain/input description even while interpolation is off.
+    return valid_fg_options(input) && valid_fg_resource_description(input);
 }
 
 sl::DLSSGOptions make_fg_options(
@@ -269,7 +279,9 @@ StreamlineBridgeStatus streamline_bridge_create(
         const bool has_project_identity =
             desc->project_id != nullptr && desc->project_id[0] != '\0' &&
             desc->engine_version != nullptr && desc->engine_version[0] != '\0';
-        if (desc->enable_dlss != 0 && !has_application_id && !has_project_identity)
+        const bool ngx_requested =
+            desc->enable_dlss != 0 || desc->enable_dlss_rr != 0 || desc->enable_dlss_fg != 0;
+        if (ngx_requested && !has_application_id && !has_project_identity)
             return STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT;
 
         std::array<sl::Feature, 5> features{};
@@ -288,11 +300,11 @@ StreamlineBridgeStatus streamline_bridge_create(
 #endif
 #if !STREAMLINE_ENABLE_RR
         if (desc->enable_dlss_rr != 0)
-            return set_error(bridge.get(), "DLSS RR bridge 未编译；请启用 streamline-rr");
+            return STREAMLINE_BRIDGE_STATUS_UNSUPPORTED;
 #endif
 #if !STREAMLINE_ENABLE_FG
         if (desc->enable_dlss_fg != 0)
-            return set_error(bridge.get(), "DLSS FG bridge 未编译；请启用 streamline-fg");
+            return STREAMLINE_BRIDGE_STATUS_UNSUPPORTED;
 #endif
         bridge->rr_requested = desc->enable_dlss_rr != 0;
         bridge->fg_requested = desc->enable_dlss_fg != 0;
@@ -563,7 +575,7 @@ StreamlineBridgeStatus streamline_bridge_fg_get_state(
         return STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT;
     if (estimate_input != nullptr &&
         (!valid_header(estimate_input->struct_size, estimate_input->abi_version, sizeof(*estimate_input)) ||
-         !valid_fg_options(*estimate_input)))
+         !valid_fg_estimate_options(*estimate_input)))
         return STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT;
     try {
         sl::DLSSGState state{};
@@ -920,14 +932,21 @@ StreamlineBridgeStatus streamline_bridge_get_native_interface(
     if (check_bridge(bridge) != STREAMLINE_BRIDGE_STATUS_OK ||
         proxy_interface == nullptr || out_native_interface == nullptr)
         return STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT;
+    void* native_interface = nullptr;
     try {
-        const sl::Result result = slGetNativeInterface(proxy_interface, out_native_interface);
-        if (result != sl::Result::eOk)
+        const sl::Result result = slGetNativeInterface(proxy_interface, &native_interface);
+        if (result != sl::Result::eOk) {
+            if (native_interface != nullptr)
+                static_cast<IUnknown*>(native_interface)->Release();
             return set_error(bridge, "slGetNativeInterface failed", result);
-        if (*out_native_interface == nullptr)
+        }
+        if (native_interface == nullptr)
             return set_error(bridge, "slGetNativeInterface returned null");
+        *out_native_interface = native_interface;
         return STREAMLINE_BRIDGE_STATUS_OK;
     } catch (...) {
+        if (native_interface != nullptr)
+            static_cast<IUnknown*>(native_interface)->Release();
         *out_native_interface = nullptr;
         return STREAMLINE_BRIDGE_STATUS_EXCEPTION;
     }

@@ -480,6 +480,28 @@ mod tests {
         assert_eq!(get_status, STATUS_UNSUPPORTED);
     }
 
+    #[cfg(not(feature = "streamline-fg"))]
+    #[test]
+    fn feature_off_fg_create_request_returns_unsupported_before_sdk_init() {
+        let description = InitDesc {
+            struct_size: size_of::<InitDesc>() as u32,
+            abi_version: ABI_VERSION,
+            development: 0,
+            enable_dlss: 0,
+            application_id: 1,
+            enable_dlss_rr: 0,
+            enable_dlss_fg: 1,
+            plugin_path: std::ptr::null(),
+            log_path: std::ptr::null(),
+            project_id: std::ptr::null(),
+            engine_version: std::ptr::null(),
+        };
+        let mut raw = std::ptr::null_mut();
+        let status = unsafe { streamline_bridge_create(&description, &mut raw) };
+        assert_eq!(status, STATUS_UNSUPPORTED);
+        assert!(raw.is_null());
+    }
+
     #[test]
     fn frame_generation_source_contract_is_feature_isolated() {
         let bridge = include_str!(concat!(
@@ -495,6 +517,8 @@ mod tests {
         assert!(bridge.contains("input.mode != STREAMLINE_BRIDGE_FRAME_GENERATION_ON"));
         assert!(bridge.contains("input.num_frames_to_generate != 1"));
         assert!(bridge.contains("input.flags != 0"));
+        assert!(bridge.contains("valid_fg_estimate_options(*estimate_input)"));
+        assert!(bridge.contains("valid_fg_resource_description(input)"));
         assert!(bridge.contains("sl::DLSSGMode::eOff"));
         assert!(bridge.contains("sl::DLSSGMode::eOn"));
         assert!(bridge.contains("options.flags = request_vram_estimate"));
@@ -505,6 +529,8 @@ mod tests {
         assert!(build.contains("optional_feature"));
         assert!(build.contains("未知 optional_feature"));
         assert!(build.contains("CARGO_FEATURE_STREAMLINE_FG"));
+        assert!(build.contains("reconcile_streamline_runtime"));
+        assert!(build.contains("remove_deployed_file"));
     }
 
     #[test]
