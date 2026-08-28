@@ -165,6 +165,84 @@ impl Drop for NrdBackend {
     }
 }
 
+struct StreamlineDeviceInterfaces {
+    native: Option<ID3D12Device>,
+    proxy: Option<ID3D12Device>,
+}
+
+impl StreamlineDeviceInterfaces {
+    fn new(native: ID3D12Device, proxy: Option<ID3D12Device>) -> Self {
+        Self {
+            native: Some(native),
+            proxy,
+        }
+    }
+
+    fn native(&self) -> &ID3D12Device {
+        self.native
+            .as_ref()
+            .expect("native Streamline device owner is alive")
+    }
+
+    fn hooked(&self) -> &ID3D12Device {
+        self.proxy.as_ref().unwrap_or_else(|| self.native())
+    }
+
+}
+
+struct StreamlineFactoryInterfaces {
+    native: Option<IDXGIFactory6>,
+    proxy: Option<IDXGIFactory6>,
+}
+
+impl StreamlineFactoryInterfaces {
+    fn new(native: IDXGIFactory6, proxy: Option<IDXGIFactory6>) -> Self {
+        Self {
+            native: Some(native),
+            proxy,
+        }
+    }
+
+    fn native(&self) -> &IDXGIFactory6 {
+        self.native
+            .as_ref()
+            .expect("native Streamline factory owner is alive")
+    }
+
+    fn hooked(&self) -> &IDXGIFactory6 {
+        self.proxy.as_ref().unwrap_or_else(|| self.native())
+    }
+
+}
+
+struct SwapChainInterfaces {
+    native: Option<IDXGISwapChain3>,
+    proxy: Option<IDXGISwapChain3>,
+}
+
+impl SwapChainInterfaces {
+    fn new(native: IDXGISwapChain3, proxy: Option<IDXGISwapChain3>) -> Self {
+        Self {
+            native: Some(native),
+            proxy,
+        }
+    }
+
+    fn native(&self) -> &IDXGISwapChain3 {
+        self.native
+            .as_ref()
+            .expect("native Streamline swap chain owner is alive")
+    }
+
+    fn hooked(&self) -> &IDXGISwapChain3 {
+        self.proxy.as_ref().unwrap_or_else(|| self.native())
+    }
+
+    fn is_proxied(&self) -> bool {
+        self.proxy.is_some()
+    }
+}
+
 #[cfg(feature = "streamline")]
 struct StreamlineRuntime {
     bridge: crate::streamline::Bridge,
@@ -311,15 +389,17 @@ impl StreamlineRuntime {
     }
 
     /// Upgrade a COM interface immediately after creation for the manual
-    /// hooking path. The bridge proxy AddRefs the original interface; the
-    /// temporary Rust clone owns and releases the input reference, while the
-    /// returned interface owns the proxy reference.
-    unsafe fn upgrade_interface<T: Interface>(&self, interface: T) -> Result<T> {
+    /// hooking path. The input owner is consumed exactly once; a successful
+    /// proxy result becomes the sole owner of the returned COM reference.
+    unsafe fn upgrade_interface_with_bridge<T: Interface>(
+        bridge: &crate::streamline::Bridge,
+        interface: T,
+    ) -> Result<T> {
         let original = interface.into_raw();
         let mut upgraded = original;
         let status = unsafe {
             crate::streamline::streamline_bridge_upgrade_interface(
-                self.bridge.as_raw(),
+                bridge.as_raw(),
                 &mut upgraded,
             )
         };
@@ -331,13 +411,45 @@ impl StreamlineRuntime {
             return Err(streamline_error_with_detail(
                 "升级 Streamline manual-hooking interface",
                 status,
-                self.bridge.last_error(),
+                bridge.last_error(),
             ));
         }
         if !std::ptr::eq(upgraded, original) {
             unsafe { drop(T::from_raw(original)) };
         }
         Ok(unsafe { T::from_raw(upgraded.cast()) })
+    }
+
+    unsafe fn upgrade_interface<T: Interface>(&self, interface: T) -> Result<T> {
+        unsafe { Self::upgrade_interface_with_bridge(&self.bridge, interface) }
+    }
+
+    /// `slGetNativeInterface` returns a new AddRef. Construct exactly one Rust
+    /// owner from that returned reference; never derive a second owner from a
+    /// proxy's raw pointer.
+    unsafe fn get_native_interface<T: Interface>(&self, proxy: &T) -> Result<T> {
+        let mut native = std::ptr::null_mut();
+        let status = unsafe {
+            crate::streamline::streamline_bridge_get_native_interface(
+                self.bridge.as_raw(),
+                proxy.as_raw(),
+                &mut native,
+            )
+        };
+        if status != crate::streamline::STATUS_OK {
+            return Err(streamline_error_with_detail(
+                "获取 Streamline manual-hooking native interface",
+                status,
+                self.bridge.last_error(),
+            ));
+        }
+        if native.is_null() {
+            return Err(streamline_error(
+                "Streamline native interface 为空",
+                crate::streamline::STATUS_SDK_ERROR,
+            ));
+        }
+        Ok(unsafe { T::from_raw(native.cast()) })
     }
 
     fn reflex_supported(&self) -> bool {
@@ -1480,13 +1592,12 @@ fn submit_global_uav_barrier(command_list: &ID3D12GraphicsCommandList) {
 
 /// 阶段 1 的最小 DX12 后端：三缓冲交换链、清屏和逐帧 Fence。
 pub struct Dx12Renderer {
-    device: ID3D12Device,
+    device_interfaces: StreamlineDeviceInterfaces,
     _adapter: IDXGIAdapter1,
     gpu_name: String,
+    factory_interfaces: StreamlineFactoryInterfaces,
     command_queue: ID3D12CommandQueue,
-    swap_chain: IDXGISwapChain3,
-    #[cfg(feature = "streamline")]
-    streamline_swap_chain: Option<IDXGISwapChain3>,
+    swap_chain: SwapChainInterfaces,
     rtv_heap: DescriptorHeap,
     render_targets: [Option<TrackedResource>; FRAME_COUNT],
     active_generation: RenderResourceGeneration,
@@ -1706,7 +1817,7 @@ impl Dx12Renderer {
             } else {
                 DXGI_CREATE_FACTORY_FLAGS(0)
             };
-            let factory: IDXGIFactory6 = match CreateDXGIFactory2(factory_flags) {
+            let native_factory: IDXGIFactory6 = match CreateDXGIFactory2(factory_flags) {
                 Ok(factory) => factory,
                 Err(error) if cfg!(debug_assertions) => {
                     eprintln!("DXGI 调试 Factory 不可用，将使用普通 Factory：{error}");
@@ -1715,13 +1826,34 @@ impl Dx12Renderer {
                 }
                 Err(error) => return Err(dx_error("创建 DXGI Factory", error)),
             };
-            let (device, adapter, gpu_name) =
-                create_hardware_device(&factory).map_err(|error| dx_error("创建设备", error))?;
+            #[cfg(feature = "streamline")]
+            let factory_proxy = streamline_bridge
+                .as_ref()
+                .map(|bridge| {
+                    StreamlineRuntime::upgrade_interface_with_bridge(bridge, native_factory.clone())
+                })
+                .transpose()?;
+            #[cfg(not(feature = "streamline"))]
+            let factory_proxy = None;
+            let factory_interfaces = StreamlineFactoryInterfaces::new(native_factory, factory_proxy);
+            let (native_device, adapter, gpu_name) =
+                create_hardware_device(factory_interfaces.native())
+                    .map_err(|error| dx_error("创建设备", error))?;
+            #[cfg(feature = "streamline")]
+            let device_proxy = streamline_bridge
+                .as_ref()
+                .map(|bridge| {
+                    StreamlineRuntime::upgrade_interface_with_bridge(bridge, native_device.clone())
+                })
+                .transpose()?;
+            #[cfg(not(feature = "streamline"))]
+            let device_proxy = None;
+            let device_interfaces = StreamlineDeviceInterfaces::new(native_device, device_proxy);
             #[cfg(feature = "streamline")]
             let streamline = if let Some(bridge) = streamline_bridge {
                 Some(StreamlineRuntime::attach(
                     bridge,
-                    &device,
+                    device_interfaces.native(),
                     &adapter,
                     config.reflex_mode,
                     true,
@@ -1731,7 +1863,7 @@ impl Dx12Renderer {
                 None
             };
             let memory_telemetry = VideoMemoryTelemetry::new(&adapter);
-            configure_info_queue(&device);
+            configure_info_queue(device_interfaces.native());
 
             let queue_description = D3D12_COMMAND_QUEUE_DESC {
                 Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -1740,7 +1872,8 @@ impl Dx12Renderer {
                 NodeMask: 0,
             };
             let command_queue: ID3D12CommandQueue =
-                device
+                device_interfaces
+                    .hooked()
                     .CreateCommandQueue(&queue_description)
                     .map_err(|error| dx_error("创建命令队列", error))?;
 
@@ -1761,43 +1894,55 @@ impl Dx12Renderer {
                 AlphaMode: DXGI_ALPHA_MODE_UNSPECIFIED,
                 Flags: 0,
             };
-            let swap_chain: IDXGISwapChain3 = factory
+            let native_swap_chain: IDXGISwapChain3 = factory_interfaces
+                .native()
                 .CreateSwapChainForHwnd(&command_queue, hwnd, &swap_chain_description, None, None)
                 .map_err(|error| dx_error("创建交换链", error))?
                 .cast()
                 .map_err(|error| dx_error("获取 IDXGISwapChain3", error))?;
             #[cfg(feature = "streamline")]
-            let streamline_swap_chain = if let Some(runtime) = streamline.as_ref() {
-                Some(runtime.upgrade_interface(swap_chain.clone())?)
+            let proxy_swap_chain = if let Some(runtime) = streamline.as_ref() {
+                Some(runtime.upgrade_interface(native_swap_chain.clone())?)
             } else {
                 None
             };
-            factory
+            #[cfg(not(feature = "streamline"))]
+            let proxy_swap_chain = None;
+            let swap_chain = SwapChainInterfaces::new(native_swap_chain, proxy_swap_chain);
+            factory_interfaces
+                .native()
                 .MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER)
                 .map_err(|error| dx_error("设置窗口关联", error))?;
 
             let rtv_heap =
-                DescriptorHeap::new(&device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, FRAME_COUNT, false)
+                DescriptorHeap::new(
+                    device_interfaces.native(),
+                    D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
+                    FRAME_COUNT,
+                    false,
+                )
                     .map_err(|error| dx_error("创建 RTV 描述符堆", error))?;
             let sampler_heap = DescriptorHeap::new(
-                &device,
+                device_interfaces.native(),
                 D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
                 MAX_SCENE_SAMPLERS,
                 true,
             )
             .map_err(|error| dx_error("创建 sampler 描述符堆", error))?;
-            let gpu_profiler = GpuProfiler::new(&device, &command_queue, FRAME_COUNT)
+            let gpu_profiler = GpuProfiler::new(device_interfaces.native(), &command_queue, FRAME_COUNT)
                 .map_err(|error| dx_error("创建 GPU 计时器", error))?;
             let stable_plane_counter_readback = create_readback_buffer(
-                &device,
+                device_interfaces.native(),
                 (FRAME_COUNT * crate::path_space::STABLE_PLANE_COUNTER_COUNT * size_of::<u32>())
                     as u64,
             )?;
-            let raytracing_status = require_raytracing_tier_1_1(&device)?;
+            let raytracing_status = require_raytracing_tier_1_1(device_interfaces.native())?;
             let mut frames = Vec::with_capacity(FRAME_COUNT);
             for _ in 0..FRAME_COUNT {
                 frames.push(FrameContext {
-                    allocator: device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)?,
+                    allocator: device_interfaces
+                        .native()
+                        .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)?,
                     fence_value: 0,
                     timing_valid: false,
                     timing_generation_id: 0,
@@ -1811,7 +1956,7 @@ impl Dx12Renderer {
                     },
                 });
             }
-            let command_list: ID3D12GraphicsCommandList = device.CreateCommandList(
+            let command_list: ID3D12GraphicsCommandList = device_interfaces.native().CreateCommandList(
                 0,
                 D3D12_COMMAND_LIST_TYPE_DIRECT,
                 &frames[0].allocator,
@@ -1841,35 +1986,35 @@ impl Dx12Renderer {
                 ));
             }
             let mut texture_set = TextureSet::new(
-                &device,
+                device_interfaces.native(),
                 &command_list,
                 &scene.images,
                 &scene.materials,
                 &scene.samplers,
             )
             .map_err(|error| dx_error("创建 glTF 纹理资源", error))?;
-            texture_set.write_samplers(&device, &sampler_heap);
+            texture_set.write_samplers(device_interfaces.native(), &sampler_heap);
             let mut scene_geometry =
-                SceneGeometry::new(&device, &command_list, &scene, &texture_set)
+                SceneGeometry::new(device_interfaces.native(), &command_list, &scene, &texture_set)
                     .map_err(|error| dx_error("创建场景网格", error))?;
             let pending_acceleration_structures = AccelerationStructures::build_phase_a(
-                &device,
+                device_interfaces.native(),
                 &command_list,
                 &scene_geometry,
                 config.acceleration_structure_mode,
                 config.animate_model,
             )
             .map_err(|error| dx_error("构建 DXR 加速结构 Phase A", error))?;
-            let raytracing_pipeline = RaytracingPipeline::new(&device, STAGE3_SHADER)
+            let raytracing_pipeline = RaytracingPipeline::new(device_interfaces.native(), STAGE3_SHADER)
                 .map_err(|error| dx_error("创建 DXR State Object", error))?;
             let temporal_pipeline =
-                ComputePipeline::new(&device, TEMPORAL_SHADER, 18, 10, 1, "阶段 6 时域重投影")
+                ComputePipeline::new(device_interfaces.native(), TEMPORAL_SHADER, 18, 10, 1, "阶段 6 时域重投影")
                     .map_err(|error| dx_error("创建时域重投影管线", error))?;
             let atrous_baseline_pipeline =
-                ComputePipeline::new(&device, ATROUS_SHADER, 8, 2, 2, "阶段 8 À-Trous Baseline")
+                ComputePipeline::new(device_interfaces.native(), ATROUS_SHADER, 8, 2, 2, "阶段 8 À-Trous Baseline")
                     .map_err(|error| dx_error("创建 À-Trous baseline 管线", error))?;
             let atrous_shared_pipeline = ComputePipeline::new(
-                &device,
+                device_interfaces.native(),
                 ATROUS_SHARED_SHADER,
                 8,
                 2,
@@ -1878,10 +2023,10 @@ impl Dx12Renderer {
             )
             .map_err(|error| dx_error("创建 À-Trous shared 管线", error))?;
             let tonemap_pipeline =
-                ComputePipeline::new(&device, TONEMAP_SHADER, 14, 1, 3, "Tone Map 与调试视图")
+                ComputePipeline::new(device_interfaces.native(), TONEMAP_SHADER, 14, 1, 3, "Tone Map 与调试视图")
                     .map_err(|error| dx_error("创建 Tone Map 管线", error))?;
             let stable_plane_build_pipeline = ComputePipeline::new_with_root_srv(
-                &device,
+                device_interfaces.native(),
                 STABLE_PLANE_BUILD_SHADER,
                 4,
                 6,
@@ -1892,7 +2037,7 @@ impl Dx12Renderer {
             .map_err(|error| dx_error("创建 stable-plane build 管线", error))?;
             #[cfg(feature = "streamline")]
             let dlss_compose_pipeline = ComputePipeline::new(
-                &device,
+                device_interfaces.native(),
                 DLSS_COMPOSE_SHADER,
                 2,
                 2,
@@ -1902,7 +2047,7 @@ impl Dx12Renderer {
             .map_err(|error| dx_error("创建 DLSS HDR 合成管线", error))?;
             #[cfg(feature = "streamline-rr")]
             let rr_input_pipeline = ComputePipeline::new(
-                &device,
+                device_interfaces.native(),
                 RR_INPUT_SHADER,
                 3,
                 3,
@@ -1912,7 +2057,7 @@ impl Dx12Renderer {
             .map_err(|error| dx_error("创建 DLSS RR 输入适配管线", error))?;
             #[cfg(feature = "streamline-rr")]
             let rr_stable_input_pipeline = ComputePipeline::new(
-                &device,
+                device_interfaces.native(),
                 RR_STABLE_INPUT_SHADER,
                 7,
                 6,
@@ -1922,7 +2067,7 @@ impl Dx12Renderer {
             .map_err(|error| dx_error("创建 stable-plane DLSS RR 输入管线", error))?;
             #[cfg(feature = "streamline-rr")]
             let rr_emissive_pipeline = ComputePipeline::new(
-                &device,
+                device_interfaces.native(),
                 RR_EMISSIVE_SHADER,
                 3,
                 1,
@@ -1932,7 +2077,7 @@ impl Dx12Renderer {
             .map_err(|error| dx_error("创建 DLSS RR emissive 稳定管线", error))?;
             #[cfg(feature = "streamline-rr")]
             let rr_primary_visibility_pipeline = ComputePipeline::new(
-                &device,
+                device_interfaces.native(),
                 RR_PRIMARY_VISIBILITY_SHADER,
                 5,
                 3,
@@ -1942,7 +2087,7 @@ impl Dx12Renderer {
             .map_err(|error| dx_error("创建 DLSS RR primary visibility 管线", error))?;
             #[cfg(feature = "streamline-rr")]
             let rr_boundary_resolve_pipeline = ComputePipeline::new(
-                &device,
+                device_interfaces.native(),
                 RR_BOUNDARY_RESOLVE_SHADER,
                 7,
                 2,
@@ -1952,7 +2097,7 @@ impl Dx12Renderer {
             .map_err(|error| dx_error("创建 DLSS RR boundary resolve 管线", error))?;
             #[cfg(feature = "nrd")]
             let nrd_prep_pipeline = ComputePipeline::new(
-                &device,
+                device_interfaces.native(),
                 NRD_PREP_SHADER,
                 11,
                 7,
@@ -1962,7 +2107,7 @@ impl Dx12Renderer {
             .map_err(|error| dx_error("创建 NRD 输入准备管线", error))?;
             #[cfg(feature = "nrd")]
             let nrd_compose_pipeline = ComputePipeline::new(
-                &device,
+                device_interfaces.native(),
                 NRD_COMPOSE_SHADER,
                 11,
                 2,
@@ -1972,7 +2117,7 @@ impl Dx12Renderer {
             .map_err(|error| dx_error("创建 NRD 输出合成管线", error))?;
             #[cfg(feature = "nrd")]
             let nrd_stable_prep_pipeline = ComputePipeline::new(
-                &device,
+                device_interfaces.native(),
                 NRD_STABLE_PREP_SHADER,
                 4,
                 7,
@@ -1982,7 +2127,7 @@ impl Dx12Renderer {
             .map_err(|error| dx_error("创建 stable-plane NRD 输入准备管线", error))?;
             #[cfg(feature = "nrd")]
             let nrd_stable_compose_pipeline = ComputePipeline::new(
-                &device,
+                device_interfaces.native(),
                 NRD_STABLE_COMPOSE_SHADER,
                 6,
                 2,
@@ -1992,7 +2137,9 @@ impl Dx12Renderer {
             .map_err(|error| dx_error("创建 stable-plane NRD 合成管线", error))?;
             command_list.Close()?;
 
-            let fence: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_NONE)?;
+            let fence: ID3D12Fence = device_interfaces
+                .native()
+                .CreateFence(0, D3D12_FENCE_FLAG_NONE)?;
             let fence_event = CreateEventW(None, false, false, None)?;
             let initialization_list: ID3D12CommandList = command_list.cast()?;
             command_queue.ExecuteCommandLists(&[Some(initialization_list)]);
@@ -2002,7 +2149,7 @@ impl Dx12Renderer {
             frames[0].allocator.Reset()?;
             command_list.Reset(&frames[0].allocator, None::<&ID3D12PipelineState>)?;
             let mut acceleration_structures = pending_acceleration_structures
-                .finish_phase_b(&device, &command_list, &scene_geometry)
+                .finish_phase_b(device_interfaces.native(), &command_list, &scene_geometry)
                 .map_err(|error| dx_error("构建 DXR 加速结构 Phase B", error))?;
             command_list.Close()?;
             let phase_b_list: ID3D12CommandList = command_list.cast()?;
@@ -2078,7 +2225,7 @@ impl Dx12Renderer {
                 });
             let active_path_space = resolve_path_space(config.path_space_mode, config.denoiser);
             let active_generation = RenderResourceGeneration::new(
-                &device,
+                device_interfaces.native(),
                 &texture_set,
                 &scene_geometry,
                 &acceleration_structures,
@@ -2095,13 +2242,12 @@ impl Dx12Renderer {
             )
             .map_err(|error| dx_error("创建初始渲染资源代际", error))?;
             let mut renderer = Self {
-                device,
+                device_interfaces,
                 _adapter: adapter,
                 gpu_name,
+                factory_interfaces,
                 command_queue,
                 swap_chain,
-                #[cfg(feature = "streamline")]
-                streamline_swap_chain,
                 rtv_heap,
                 render_targets: [None, None, None],
                 active_generation,
@@ -2277,7 +2423,7 @@ impl Dx12Renderer {
         self.memory_telemetry.poll(false);
 
         unsafe {
-            let frame_index = self.active_swap_chain().GetCurrentBackBufferIndex() as usize;
+            let frame_index = self.hooked_swap_chain().GetCurrentBackBufferIndex() as usize;
             let previous_fence_value = self.frames[frame_index].fence_value;
             let previous_timing_valid = self.frames[frame_index].timing_valid;
             let previous_timing_generation_id = self.frames[frame_index].timing_generation_id;
@@ -3602,11 +3748,11 @@ impl Dx12Renderer {
                 self.submit_pcl_marker(token, PCL_RENDER_SUBMIT_END)?;
                 self.submit_pcl_marker(token, PCL_PRESENT_START)?;
             }
-            if let Err(error) = self.active_swap_chain().Present(1, DXGI_PRESENT(0)).ok() {
-                return Err(device_removed_error(&self.device, error));
+            if let Err(error) = self.hooked_swap_chain().Present(1, DXGI_PRESENT(0)).ok() {
+                return Err(device_removed_error(self.native_device(), error));
             }
             #[cfg(feature = "streamline")]
-            if self.streamline_swap_chain.is_some() {
+            if self.swap_chain.is_proxied() {
                 // The upgraded swap-chain proxy invokes Streamline common's
                 // presentCommon exactly once for this successful Present.
                 self.reflex_present_common_count =
@@ -3689,7 +3835,7 @@ impl Dx12Renderer {
         let mut row_size = 0;
         let mut total_bytes = 0;
         unsafe {
-            self.device.GetCopyableFootprints(
+            self.native_device().GetCopyableFootprints(
                 &description,
                 0,
                 1,
@@ -3739,7 +3885,7 @@ impl Dx12Renderer {
         };
         let mut readback: Option<ID3D12Resource> = None;
         unsafe {
-            self.device.CreateCommittedResource(
+            self.native_device().CreateCommittedResource(
                 &heap,
                 D3D12_HEAP_FLAG_NONE,
                 &readback_description,
@@ -3924,7 +4070,7 @@ impl Dx12Renderer {
             self.stable_plane_counter_telemetry = Default::default();
             // 命令列表会持有上一帧 Back Buffer 的引用；重置后再释放资源，
             // 否则 ResizeBuffers 会因仍有外部引用而返回 DXGI_ERROR_INVALID_CALL。
-            let frame_index = self.active_swap_chain().GetCurrentBackBufferIndex() as usize;
+            let frame_index = self.hooked_swap_chain().GetCurrentBackBufferIndex() as usize;
             self.frames[frame_index].allocator.Reset()?;
             self.command_list.Reset(
                 &self.frames[frame_index].allocator,
@@ -3932,7 +4078,7 @@ impl Dx12Renderer {
             )?;
             self.command_list.Close()?;
             self.render_targets = [None, None, None];
-            self.active_swap_chain().ResizeBuffers(
+            self.hooked_swap_chain().ResizeBuffers(
                 FRAME_COUNT as u32,
                 width,
                 height,
@@ -3991,7 +4137,7 @@ impl Dx12Renderer {
             }
             let generation_id = self.next_generation_id;
             let new_generation = RenderResourceGeneration::new(
-                &self.device,
+                self.native_device(),
                 &self._textures,
                 &self._scene_geometry,
                 &self._acceleration_structures,
@@ -4160,7 +4306,7 @@ impl Dx12Renderer {
 
         let generation_id = self.next_generation_id;
         let new_generation = RenderResourceGeneration::new(
-            &self.device,
+            self.native_device(),
             &self._textures,
             &self._scene_geometry,
             &self._acceleration_structures,
@@ -4294,7 +4440,7 @@ impl Dx12Renderer {
             );
             let generation_id = self.next_generation_id;
             let new_generation = RenderResourceGeneration::new(
-                &self.device,
+                self.native_device(),
                 &self._textures,
                 &self._scene_geometry,
                 &self._acceleration_structures,
@@ -4415,7 +4561,7 @@ impl Dx12Renderer {
 
         let generation_id = self.next_generation_id;
         let new_generation = RenderResourceGeneration::new(
-            &self.device,
+            self.native_device(),
             &self._textures,
             &self._scene_geometry,
             &self._acceleration_structures,
@@ -4757,12 +4903,12 @@ impl Dx12Renderer {
         self.retired_generations.len()
     }
 
-    fn active_swap_chain(&self) -> &IDXGISwapChain3 {
-        #[cfg(feature = "streamline")]
-        if let Some(swap_chain) = self.streamline_swap_chain.as_ref() {
-            return swap_chain;
-        }
-        &self.swap_chain
+    fn native_device(&self) -> &ID3D12Device {
+        self.device_interfaces.native()
+    }
+
+    fn hooked_swap_chain(&self) -> &IDXGISwapChain3 {
+        self.swap_chain.hooked()
     }
 
     pub fn benchmark_json(&self, duration_seconds: u64, warmup_valid_frames: u32) -> String {
@@ -5476,9 +5622,9 @@ impl Dx12Renderer {
     unsafe fn create_render_targets(&mut self) -> Result<()> {
         for index in 0..FRAME_COUNT {
             let resource: ID3D12Resource =
-                unsafe { self.active_swap_chain().GetBuffer(index as u32)? };
+                unsafe { self.hooked_swap_chain().GetBuffer(index as u32)? };
             let handle = self.rtv_heap.cpu_handle(index);
-            unsafe { self.device.CreateRenderTargetView(&resource, None, handle) };
+            unsafe { self.native_device().CreateRenderTargetView(&resource, None, handle) };
             self.render_targets[index] = Some(TrackedResource::new(
                 resource,
                 D3D12_RESOURCE_STATE_PRESENT,
@@ -6247,9 +6393,9 @@ impl Dx12Renderer {
                 height: 0,
             };
         }
-        let raytracing = RaytracingPipeline::new(&self.device, &shaders.raytracing)?;
+        let raytracing = RaytracingPipeline::new(self.native_device(), &shaders.raytracing)?;
         let temporal = ComputePipeline::new(
-            &self.device,
+            self.native_device(),
             &shaders.temporal,
             18,
             10,
@@ -6257,7 +6403,7 @@ impl Dx12Renderer {
             "阶段 6 时域重投影",
         )?;
         let atrous_baseline = ComputePipeline::new(
-            &self.device,
+            self.native_device(),
             &shaders.atrous,
             8,
             2,
@@ -6265,7 +6411,7 @@ impl Dx12Renderer {
             "阶段 8 À-Trous Baseline",
         )?;
         let atrous_shared = ComputePipeline::new(
-            &self.device,
+            self.native_device(),
             &shaders.atrous_shared,
             8,
             2,
@@ -6273,7 +6419,7 @@ impl Dx12Renderer {
             "阶段 8 À-Trous Shared 1/2",
         )?;
         let tonemap = ComputePipeline::new(
-            &self.device,
+            self.native_device(),
             &shaders.tonemap,
             14,
             1,
@@ -6281,7 +6427,7 @@ impl Dx12Renderer {
             "Tone Map 与调试视图",
         )?;
         let stable_plane_build = ComputePipeline::new_with_root_srv(
-            &self.device,
+            self.native_device(),
             &shaders.stable_plane_build,
             4,
             6,
@@ -6291,7 +6437,7 @@ impl Dx12Renderer {
         )?;
         #[cfg(feature = "streamline")]
         let dlss_compose = ComputePipeline::new(
-            &self.device,
+            self.native_device(),
             &shaders.dlss_compose,
             2,
             2,
@@ -6300,7 +6446,7 @@ impl Dx12Renderer {
         )?;
         #[cfg(feature = "streamline-rr")]
         let rr_input = ComputePipeline::new(
-            &self.device,
+            self.native_device(),
             &shaders.rr_input,
             3,
             3,
@@ -6309,7 +6455,7 @@ impl Dx12Renderer {
         )?;
         #[cfg(feature = "streamline-rr")]
         let rr_stable_input = ComputePipeline::new(
-            &self.device,
+            self.native_device(),
             &shaders.rr_stable_input,
             7,
             6,
@@ -6318,7 +6464,7 @@ impl Dx12Renderer {
         )?;
         #[cfg(feature = "streamline-rr")]
         let rr_emissive = ComputePipeline::new(
-            &self.device,
+            self.native_device(),
             &shaders.rr_emissive,
             3,
             1,
@@ -6327,7 +6473,7 @@ impl Dx12Renderer {
         )?;
         #[cfg(feature = "streamline-rr")]
         let rr_primary_visibility = ComputePipeline::new(
-            &self.device,
+            self.native_device(),
             &shaders.rr_primary_visibility,
             5,
             3,
@@ -6336,7 +6482,7 @@ impl Dx12Renderer {
         )?;
         #[cfg(feature = "streamline-rr")]
         let rr_boundary_resolve = ComputePipeline::new(
-            &self.device,
+            self.native_device(),
             &shaders.rr_boundary_resolve,
             7,
             2,
@@ -6345,7 +6491,7 @@ impl Dx12Renderer {
         )?;
         #[cfg(feature = "nrd")]
         let nrd_prep = ComputePipeline::new(
-            &self.device,
+            self.native_device(),
             &shaders.nrd_prep,
             11,
             7,
@@ -6354,7 +6500,7 @@ impl Dx12Renderer {
         )?;
         #[cfg(feature = "nrd")]
         let nrd_compose = ComputePipeline::new(
-            &self.device,
+            self.native_device(),
             &shaders.nrd_compose,
             11,
             2,
@@ -6363,7 +6509,7 @@ impl Dx12Renderer {
         )?;
         #[cfg(feature = "nrd")]
         let nrd_stable_prep = ComputePipeline::new(
-            &self.device,
+            self.native_device(),
             &shaders.nrd_stable_prep,
             4,
             7,
@@ -6372,7 +6518,7 @@ impl Dx12Renderer {
         )?;
         #[cfg(feature = "nrd")]
         let nrd_stable_compose = ComputePipeline::new(
-            &self.device,
+            self.native_device(),
             &shaders.nrd_stable_compose,
             6,
             2,
@@ -6702,11 +6848,17 @@ impl Drop for Dx12Renderer {
                 // shutdown has finished, then release its owned reference.
                 streamline.shutdown_after_gpu();
             }
-            #[cfg(feature = "streamline")]
-            drop(self.streamline_swap_chain.take());
             if cfg!(debug_assertions) {
-                report_debug_messages(&self.device);
+                report_debug_messages(self.native_device());
             }
+            // The proxy/native pairs use independent AddRefs. Drop them only
+            // after slShutdown so the interposer cannot observe dead owners.
+            drop(self.swap_chain.proxy.take());
+            drop(self.swap_chain.native.take());
+            drop(self.factory_interfaces.proxy.take());
+            drop(self.factory_interfaces.native.take());
+            drop(self.device_interfaces.proxy.take());
+            drop(self.device_interfaces.native.take());
             let _ = CloseHandle(self.fence_event);
         }
     }
@@ -6983,6 +7135,22 @@ mod tests {
         assert!(generation_ready < denoiser_commit);
         assert!(denoiser_commit < path_space_commit);
         assert!(path_space_commit < history_reset);
+    }
+
+    #[test]
+    fn manual_hooking_interfaces_have_explicit_native_and_proxy_owners() {
+        let complete_source = include_str!("d3d12.rs");
+        let source = &complete_source[..complete_source.find("#[cfg(test)]").unwrap()];
+        assert!(source.contains("struct StreamlineDeviceInterfaces"));
+        assert!(source.contains("struct StreamlineFactoryInterfaces"));
+        assert!(source.contains("struct SwapChainInterfaces"));
+        assert!(source.contains("unsafe fn get_native_interface<T: Interface>"));
+        assert!(source.contains("drop(self.swap_chain.proxy.take())"));
+        assert!(source.contains("drop(self.factory_interfaces.proxy.take())"));
+        assert!(source.contains("drop(self.device_interfaces.proxy.take())"));
+        assert!(!source.contains("self.streamline_swap_chain"));
+        assert!(!source.contains("streamline_swap_chain: Option"));
+        assert!(!source.contains("fn active_swap_chain"));
     }
 
     #[test]
