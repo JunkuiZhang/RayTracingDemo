@@ -3,7 +3,7 @@
 use std::{ffi::c_void, ptr::NonNull};
 
 pub const SDK_VERSION: &str = "2.12.0";
-pub const ABI_VERSION: u32 = 5;
+pub const ABI_VERSION: u32 = 6;
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_INVALID_ARGUMENT: u32 = 1;
 pub const STATUS_SDK_ERROR: u32 = 2;
@@ -292,6 +292,8 @@ unsafe extern "C" {
         estimate_options: *const FrameGenerationOptions,
         out: *mut FrameGenerationState,
     ) -> u32;
+    pub fn streamline_bridge_fg_set_loaded(bridge: *mut RawBridge, loaded: u32) -> u32;
+    pub fn streamline_bridge_fg_is_loaded(bridge: *mut RawBridge, out_loaded: *mut u32) -> u32;
     pub fn streamline_bridge_get_frame_token(
         bridge: *mut RawBridge,
         frame_index: u32,
@@ -444,7 +446,7 @@ mod tests {
 
     #[test]
     fn invalid_bridge_statuses_are_stable() {
-        assert_eq!(ABI_VERSION, 5);
+        assert_eq!(ABI_VERSION, 6);
         assert_eq!(STATUS_OK, 0);
         assert_eq!(STATUS_INVALID_ARGUMENT, 1);
         assert_eq!(size_of::<RawBridge>(), 0);
@@ -559,10 +561,45 @@ mod tests {
         assert!(bridge.contains("slDLSSGSetOptions"));
         assert!(bridge.contains("slDLSSGGetState"));
         assert!(bridge.contains("sl::kFeatureDLSS_G"));
-        assert!(!bridge.contains("slSetFeatureLoaded"));
         assert!(!bridge.contains("slDLSSGEvaluateFeature"));
         assert!(lock.contains("include/sl_dlss_g.h"));
         assert!(lock.contains("bin/x64/sl.dlss_g.dll"));
         assert!(lock.contains("bin/x64/nvngx_dlssg.dll"));
+    }
+
+    #[cfg(not(feature = "streamline-fg"))]
+    #[test]
+    fn feature_off_fg_loaded_entry_points_return_unsupported_without_sdk_state() {
+        let set_status = unsafe {
+            streamline_bridge_fg_set_loaded(std::ptr::null_mut(), 1)
+        };
+        let mut loaded = 0xFFFF_FFFF;
+        let get_status = unsafe {
+            streamline_bridge_fg_is_loaded(std::ptr::null_mut(), &mut loaded)
+        };
+        assert_eq!(set_status, STATUS_UNSUPPORTED);
+        assert_eq!(get_status, STATUS_UNSUPPORTED);
+        assert_eq!(loaded, 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn frame_generation_loaded_state_source_contract_is_narrow() {
+        let bridge = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/native/streamline_bridge/src/streamline_bridge.cpp"
+        ));
+        assert!(bridge.contains(
+            "slSetFeatureLoaded(\n            sl::kFeatureDLSS_G, loaded != 0)"
+        ));
+        assert!(bridge.contains(
+            "slIsFeatureLoaded(\n            sl::kFeatureDLSS_G, verified_loaded)"
+        ));
+        assert!(bridge.contains("loaded > 1"));
+        assert!(bridge.contains("*out_loaded = 0"));
+        assert!(bridge.contains("#if STREAMLINE_ENABLE_FG\nStreamlineBridgeStatus streamline_bridge_fg_set_loaded"));
+        assert!(bridge.contains("#else\nStreamlineBridgeStatus streamline_bridge_fg_set_loaded"));
+        assert!(!bridge.contains(
+            "slSetFeatureLoaded(\n            sl::kFeatureDLSS_RR"
+        ));
     }
 }

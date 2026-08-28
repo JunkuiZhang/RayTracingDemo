@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define STREAMLINE_BRIDGE_ABI_VERSION UINT32_C(5)
+#define STREAMLINE_BRIDGE_ABI_VERSION UINT32_C(6)
 
 typedef struct StreamlineBridge StreamlineBridge;
 
@@ -277,6 +277,12 @@ StreamlineBridgeStatus streamline_bridge_fg_get_state(
     const StreamlineBridgeViewport* viewport,
     const StreamlineBridgeFrameGenerationOptions* estimate_options,
     StreamlineBridgeFrameGenerationState* out_state);
+StreamlineBridgeStatus streamline_bridge_fg_set_loaded(
+    StreamlineBridge* bridge,
+    uint32_t loaded);
+StreamlineBridgeStatus streamline_bridge_fg_is_loaded(
+    StreamlineBridge* bridge,
+    uint32_t* out_loaded);
 StreamlineBridgeStatus streamline_bridge_get_frame_token(
     StreamlineBridge* bridge,
     uint32_t frame_index,

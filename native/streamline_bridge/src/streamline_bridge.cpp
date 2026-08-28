@@ -625,6 +625,85 @@ StreamlineBridgeStatus streamline_bridge_fg_get_state(
 }
 #endif
 
+#if STREAMLINE_ENABLE_FG
+StreamlineBridgeStatus streamline_bridge_fg_set_loaded(
+    StreamlineBridge* bridge,
+    uint32_t loaded) {
+    if (check_bridge(bridge) != STREAMLINE_BRIDGE_STATUS_OK)
+        return STREAMLINE_BRIDGE_STATUS_NOT_INITIALIZED;
+    if (loaded > 1)
+        return set_error(bridge, "invalid DLSS-G loaded value");
+    if (!bridge->fg_requested)
+        return STREAMLINE_BRIDGE_STATUS_UNSUPPORTED;
+    if (!bridge->device_set)
+        return STREAMLINE_BRIDGE_STATUS_NOT_INITIALIZED;
+    try {
+        const sl::Result result = slSetFeatureLoaded(
+            sl::kFeatureDLSS_G, loaded != 0);
+        if (result != sl::Result::eOk)
+            return set_error(bridge, "slSetFeatureLoaded(kFeatureDLSS_G) failed", result);
+
+        bool verified_loaded = false;
+        const sl::Result verify_result = slIsFeatureLoaded(
+            sl::kFeatureDLSS_G, verified_loaded);
+        if (verify_result != sl::Result::eOk)
+            return set_error(bridge, "slIsFeatureLoaded(kFeatureDLSS_G) failed", verify_result);
+        if (verified_loaded != (loaded != 0)) {
+            bridge->last_error = "slSetFeatureLoaded(kFeatureDLSS_G) verification mismatch";
+            return set_error(
+                bridge,
+                "slSetFeatureLoaded(kFeatureDLSS_G) verification mismatch",
+                sl::Result::eErrorInvalidState);
+        }
+        return STREAMLINE_BRIDGE_STATUS_OK;
+    } catch (...) {
+        return STREAMLINE_BRIDGE_STATUS_EXCEPTION;
+    }
+}
+
+StreamlineBridgeStatus streamline_bridge_fg_is_loaded(
+    StreamlineBridge* bridge,
+    uint32_t* out_loaded) {
+    if (out_loaded != nullptr)
+        *out_loaded = 0;
+    if (check_bridge(bridge) != STREAMLINE_BRIDGE_STATUS_OK || out_loaded == nullptr)
+        return out_loaded == nullptr
+            ? STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT
+            : STREAMLINE_BRIDGE_STATUS_NOT_INITIALIZED;
+    if (!bridge->fg_requested)
+        return STREAMLINE_BRIDGE_STATUS_UNSUPPORTED;
+    if (!bridge->device_set)
+        return STREAMLINE_BRIDGE_STATUS_NOT_INITIALIZED;
+    try {
+        bool loaded = false;
+        const sl::Result result = slIsFeatureLoaded(sl::kFeatureDLSS_G, loaded);
+        if (result != sl::Result::eOk)
+            return set_error(bridge, "slIsFeatureLoaded(kFeatureDLSS_G) failed", result);
+        *out_loaded = loaded ? 1 : 0;
+        return STREAMLINE_BRIDGE_STATUS_OK;
+    } catch (...) {
+        *out_loaded = 0;
+        return STREAMLINE_BRIDGE_STATUS_EXCEPTION;
+    }
+}
+#else
+StreamlineBridgeStatus streamline_bridge_fg_set_loaded(
+    StreamlineBridge* bridge,
+    uint32_t loaded) {
+    (void)bridge;
+    (void)loaded;
+    return STREAMLINE_BRIDGE_STATUS_UNSUPPORTED;
+}
+
+StreamlineBridgeStatus streamline_bridge_fg_is_loaded(
+    StreamlineBridge* bridge,
+    uint32_t* out_loaded) {
+    (void)bridge;
+    (void)out_loaded;
+    return STREAMLINE_BRIDGE_STATUS_UNSUPPORTED;
+}
+#endif
+
 StreamlineBridgeStatus streamline_bridge_allocate_resources(
     StreamlineBridge* bridge,
     const StreamlineBridgeViewport* viewport,
