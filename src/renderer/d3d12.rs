@@ -420,10 +420,6 @@ impl StreamlineRuntime {
         Ok(unsafe { T::from_raw(upgraded.cast()) })
     }
 
-    unsafe fn upgrade_interface<T: Interface>(&self, interface: T) -> Result<T> {
-        unsafe { Self::upgrade_interface_with_bridge(&self.bridge, interface) }
-    }
-
     /// `slGetNativeInterface` returns a new AddRef. Construct exactly one Rust
     /// owner from that returned reference; never derive a second owner from a
     /// proxy's raw pointer.
@@ -458,6 +454,43 @@ impl StreamlineRuntime {
 
     fn pcl_supported(&self) -> bool {
         self._support.pcl_supported != 0
+    }
+
+    #[cfg(feature = "streamline-fg")]
+    unsafe fn set_frame_generation_loaded(&self, loaded: bool) -> Result<()> {
+        let status = unsafe {
+            crate::streamline::streamline_bridge_fg_set_loaded(
+                self.bridge.as_raw(),
+                u32::from(loaded),
+            )
+        };
+        if status != crate::streamline::STATUS_OK {
+            return Err(streamline_error_with_detail(
+                "设置 DLSS-G loaded 状态",
+                status,
+                self.bridge.last_error(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "streamline-fg")]
+    unsafe fn frame_generation_loaded(&self) -> Result<bool> {
+        let mut loaded = 0;
+        let status = unsafe {
+            crate::streamline::streamline_bridge_fg_is_loaded(
+                self.bridge.as_raw(),
+                &mut loaded,
+            )
+        };
+        if status != crate::streamline::STATUS_OK {
+            return Err(streamline_error_with_detail(
+                "复核 DLSS-G loaded 状态",
+                status,
+                self.bridge.last_error(),
+            ));
+        }
+        Ok(loaded != 0)
     }
 
     unsafe fn get_frame_token(&self, frame_index: u32) -> Result<crate::streamline::FrameToken> {
@@ -1049,6 +1082,30 @@ impl StreamlineRuntime {
     }
 }
 
+unsafe fn create_swap_chain_interfaces(
+    factory: &StreamlineFactoryInterfaces,
+    command_queue: &ID3D12CommandQueue,
+    hwnd: HWND,
+    description: &DXGI_SWAP_CHAIN_DESC1,
+    #[cfg(feature = "streamline")] runtime: Option<&StreamlineRuntime>,
+) -> Result<SwapChainInterfaces> {
+    let created: IDXGISwapChain3 = unsafe {
+        factory
+            .hooked()
+            .CreateSwapChainForHwnd(command_queue, hwnd, description, None, None)
+    }
+    .map_err(|error| dx_error("创建交换链（manual-hooking factory）", error))?
+    .cast()
+    .map_err(|error| dx_error("获取 IDXGISwapChain3", error))?;
+
+    #[cfg(feature = "streamline")]
+    if let Some(runtime) = runtime {
+        let native = unsafe { runtime.get_native_interface(&created) }?;
+        return Ok(SwapChainInterfaces::new(native, Some(created)));
+    }
+    Ok(SwapChainInterfaces::new(created, None))
+}
+
 #[cfg(feature = "streamline")]
 impl StreamlineViewport {
     fn optimal_extent(&self) -> Extent2D {
@@ -1596,7 +1653,7 @@ pub struct Dx12Renderer {
     _adapter: IDXGIAdapter1,
     gpu_name: String,
     factory_interfaces: StreamlineFactoryInterfaces,
-    command_queue: ID3D12CommandQueue,
+    command_queue: Option<ID3D12CommandQueue>,
     swap_chain: SwapChainInterfaces,
     rtv_heap: DescriptorHeap,
     render_targets: [Option<TrackedResource>; FRAME_COUNT],
@@ -1894,21 +1951,47 @@ impl Dx12Renderer {
                 AlphaMode: DXGI_ALPHA_MODE_UNSPECIFIED,
                 Flags: 0,
             };
-            let native_swap_chain: IDXGISwapChain3 = factory_interfaces
-                .native()
-                .CreateSwapChainForHwnd(&command_queue, hwnd, &swap_chain_description, None, None)
-                .map_err(|error| dx_error("创建交换链", error))?
-                .cast()
-                .map_err(|error| dx_error("获取 IDXGISwapChain3", error))?;
+            #[cfg(feature = "streamline-fg")]
+            if let Some(runtime) = streamline.as_ref() {
+                // The proxy device must create the application queue while
+                // DLSS-G is loaded. Unload before the first swap-chain hook so
+                // the default path cannot acquire FG's off-screen buffers.
+                runtime.set_frame_generation_loaded(false)?;
+                let loaded = runtime.frame_generation_loaded()?;
+                if loaded {
+                    return Err(streamline_error(
+                        "DLSS-G unload 复核失败",
+                        crate::streamline::STATUS_SDK_ERROR,
+                    ));
+                }
+            }
             #[cfg(feature = "streamline")]
-            let proxy_swap_chain = if let Some(runtime) = streamline.as_ref() {
-                Some(runtime.upgrade_interface(native_swap_chain.clone())?)
-            } else {
-                None
+            let swap_chain = {
+                create_swap_chain_interfaces(
+                    &factory_interfaces,
+                    &command_queue,
+                    hwnd,
+                    &swap_chain_description,
+                    streamline.as_ref(),
+                )?
             };
             #[cfg(not(feature = "streamline"))]
-            let proxy_swap_chain = None;
-            let swap_chain = SwapChainInterfaces::new(native_swap_chain, proxy_swap_chain);
+            let swap_chain = {
+                create_swap_chain_interfaces(
+                    &factory_interfaces,
+                    &command_queue,
+                    hwnd,
+                    &swap_chain_description,
+                )?
+            };
+            eprintln!(
+                "streamline_swap_chain state=created manual_hooking={} proxy={} fg_loaded={} output={}x{}",
+                u32::from(cfg!(feature = "streamline")),
+                u32::from(swap_chain.is_proxied()),
+                if cfg!(feature = "streamline-fg") { "0" } else { "N/A" },
+                width,
+                height,
+            );
             factory_interfaces
                 .native()
                 .MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER)
@@ -2246,7 +2329,7 @@ impl Dx12Renderer {
                 _adapter: adapter,
                 gpu_name,
                 factory_interfaces,
-                command_queue,
+                command_queue: Some(command_queue),
                 swap_chain,
                 rtv_heap,
                 render_targets: [None, None, None],
@@ -3741,7 +3824,7 @@ impl Dx12Renderer {
             );
 
             let command_list: ID3D12CommandList = self.command_list.cast()?;
-            self.command_queue
+            self.application_command_queue()
                 .ExecuteCommandLists(&[Some(command_list)]);
             #[cfg(feature = "streamline")]
             if let Some(token) = frame_token.as_ref() {
@@ -3765,7 +3848,7 @@ impl Dx12Renderer {
 
             let fence_value = self.next_fence_value;
             self.next_fence_value += 1;
-            self.command_queue.Signal(&self.fence, fence_value)?;
+            self.application_command_queue().Signal(&self.fence, fence_value)?;
             if let Some(mut pending_capture) = pending_capture {
                 pending_capture.fence_value = fence_value;
                 self.capture_request = None;
@@ -4905,6 +4988,12 @@ impl Dx12Renderer {
 
     fn native_device(&self) -> &ID3D12Device {
         self.device_interfaces.native()
+    }
+
+    fn application_command_queue(&self) -> &ID3D12CommandQueue {
+        self.command_queue
+            .as_ref()
+            .expect("application command queue owner is alive")
     }
 
     fn hooked_swap_chain(&self) -> &IDXGISwapChain3 {
@@ -6588,7 +6677,7 @@ impl Dx12Renderer {
         let fence_value = self.next_fence_value;
         self.next_fence_value += 1;
         unsafe {
-            self.command_queue.Signal(&self.fence, fence_value)?;
+            self.application_command_queue().Signal(&self.fence, fence_value)?;
             self.fence
                 .SetEventOnCompletion(fence_value, self.fence_event)?;
             WaitForSingleObject(self.fence_event, INFINITE);
@@ -6855,6 +6944,7 @@ impl Drop for Dx12Renderer {
             // after slShutdown so the interposer cannot observe dead owners.
             drop(self.swap_chain.proxy.take());
             drop(self.swap_chain.native.take());
+            drop(self.command_queue.take());
             drop(self.factory_interfaces.proxy.take());
             drop(self.factory_interfaces.native.take());
             drop(self.device_interfaces.proxy.take());
@@ -7151,6 +7241,30 @@ mod tests {
         assert!(!source.contains("self.streamline_swap_chain"));
         assert!(!source.contains("streamline_swap_chain: Option"));
         assert!(!source.contains("fn active_swap_chain"));
+    }
+
+    #[test]
+    fn manual_hooking_routes_creation_and_swap_chain_hooks_without_fg_options() {
+        let complete_source = include_str!("d3d12.rs");
+        let source = &complete_source[..complete_source.find("#[cfg(test)]").unwrap()];
+        let queue_creation = source.find(".CreateCommandQueue(&queue_description)").unwrap();
+        let unload = source
+            .find("runtime.set_frame_generation_loaded(false)")
+            .unwrap();
+        let chain_creation = source[unload..]
+            .find("let swap_chain = {")
+            .map(|offset| unload + offset)
+            .unwrap();
+        assert!(source.contains("create_swap_chain_interfaces("));
+        assert!(source.contains("factory\n            .hooked()"));
+        assert!(source.contains("runtime.get_native_interface(&created)"));
+        assert!(source.contains("self.hooked_swap_chain().Present"));
+        assert!(source.contains("self.hooked_swap_chain().ResizeBuffers"));
+        assert!(source.contains("self.hooked_swap_chain().GetCurrentBackBufferIndex"));
+        assert!(source.contains("self.hooked_swap_chain().GetBuffer"));
+        assert!(unload > queue_creation && unload < chain_creation);
+        assert!(!source.contains("--frame-generation"));
+        assert!(!source.contains("slDLSSGSetOptions"));
     }
 
     #[test]
