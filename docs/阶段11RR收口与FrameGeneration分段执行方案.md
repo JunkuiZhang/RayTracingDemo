@@ -224,6 +224,9 @@ C++ 侧只在 `STREAMLINE_ENABLE_FG` 时包含 `sl_dlss_g.h` 和引用 `kFeature
 
 ## 6. 11G-B：manual-hooking 和 swap chain 创建边界
 
+详细实施、提交拆分和验收硬门槛见
+[`阶段11FrameGeneration-11G-B-ManualHooking与交换链边界执行方案.md`](阶段11FrameGeneration-11G-B-ManualHooking与交换链边界执行方案.md)。
+
 ### 6.1 当前缺口
 
 当前代码先用 native factory/device 创建 command queue 和 swap chain，之后才升级 swap chain。
