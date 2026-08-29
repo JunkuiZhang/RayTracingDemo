@@ -72,6 +72,123 @@ impl FrameGenerationMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameGenerationLifecycle {
+    Unavailable,
+    OffNative,
+    EnablingProxy,
+    OnProxy,
+    SuspendedProxy,
+    Disabling,
+    FaultPendingDisable(u32),
+}
+
+impl FrameGenerationLifecycle {
+    #[cfg(feature = "streamline-fg")]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::OffNative => "off-native",
+            Self::EnablingProxy => "enabling-proxy",
+            Self::OnProxy => "on-proxy",
+            Self::SuspendedProxy => "suspended-proxy",
+            Self::Disabling => "disabling",
+            Self::FaultPendingDisable(_) => "fault-pending-disable",
+        }
+    }
+
+    pub const fn proxy_loaded(self) -> bool {
+        matches!(
+            self,
+            Self::EnablingProxy | Self::OnProxy | Self::SuspendedProxy | Self::Disabling
+        )
+    }
+}
+
+/// The only owner of FG requested/runtime transitions. Keeping these rules in
+/// one small state machine prevents F5, debug views, and Present errors from
+/// inventing independent loaded/active/tagged flags.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameGenerationController {
+    requested: FrameGenerationMode,
+    lifecycle: FrameGenerationLifecycle,
+}
+
+impl FrameGenerationController {
+    pub const fn new(requested: FrameGenerationMode, supported: bool) -> Self {
+        let lifecycle = match (requested, supported) {
+            (FrameGenerationMode::Off, _) => FrameGenerationLifecycle::OffNative,
+            (FrameGenerationMode::On, true) => FrameGenerationLifecycle::EnablingProxy,
+            (FrameGenerationMode::On, false) => FrameGenerationLifecycle::Unavailable,
+        };
+        Self { requested, lifecycle }
+    }
+
+    pub const fn requested(self) -> FrameGenerationMode {
+        self.requested
+    }
+
+    pub const fn lifecycle(self) -> FrameGenerationLifecycle {
+        self.lifecycle
+    }
+
+    #[cfg(feature = "streamline-fg")]
+    pub const fn set_requested(&mut self, requested: FrameGenerationMode) {
+        self.requested = requested;
+    }
+
+    pub fn request_enable(&mut self) -> Result<(), &'static str> {
+        if self.lifecycle != FrameGenerationLifecycle::OffNative {
+            return Err("FG 只能从 OffNative 开始启用");
+        }
+        self.requested = FrameGenerationMode::On;
+        self.lifecycle = FrameGenerationLifecycle::EnablingProxy;
+        Ok(())
+    }
+
+    pub fn request_disable(&mut self) -> Result<(), &'static str> {
+        if !self.lifecycle.proxy_loaded() {
+            return Err("FG 当前没有 loaded proxy chain");
+        }
+        self.requested = FrameGenerationMode::Off;
+        self.lifecycle = FrameGenerationLifecycle::Disabling;
+        Ok(())
+    }
+
+    pub const fn complete_disable(&mut self) {
+        self.requested = FrameGenerationMode::Off;
+        self.lifecycle = FrameGenerationLifecycle::OffNative;
+    }
+
+    pub fn suspend(&mut self) -> Result<(), &'static str> {
+        match self.lifecycle {
+            FrameGenerationLifecycle::EnablingProxy | FrameGenerationLifecycle::OnProxy => {
+                self.lifecycle = FrameGenerationLifecycle::SuspendedProxy;
+                Ok(())
+            }
+            FrameGenerationLifecycle::SuspendedProxy => Ok(()),
+            _ => Err("FG 只有 loaded proxy chain 才能暂停"),
+        }
+    }
+
+    pub fn accept_complete_frame(&mut self) -> Result<(), &'static str> {
+        match self.lifecycle {
+            FrameGenerationLifecycle::EnablingProxy | FrameGenerationLifecycle::SuspendedProxy => {
+                self.lifecycle = FrameGenerationLifecycle::OnProxy;
+                Ok(())
+            }
+            FrameGenerationLifecycle::OnProxy => Ok(()),
+            _ => Err("FG 当前没有等待完整输入的 proxy chain"),
+        }
+    }
+
+    pub fn fault(&mut self, raw_status: u32) {
+        if self.lifecycle.proxy_loaded() {
+            self.lifecycle = FrameGenerationLifecycle::FaultPendingDisable(raw_status);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReflexMode {
     Off,
@@ -144,6 +261,53 @@ impl CommandRecordingMode {
             Self::Baseline => "baseline",
             Self::Optimized => "optimized",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FrameGenerationController, FrameGenerationLifecycle, FrameGenerationMode};
+
+    #[test]
+    fn frame_generation_state_machine_covers_enable_suspend_resume_disable() {
+        let mut controller = FrameGenerationController::new(FrameGenerationMode::On, true);
+        assert_eq!(
+            controller.lifecycle(),
+            FrameGenerationLifecycle::EnablingProxy
+        );
+        assert!(controller.accept_complete_frame().is_ok());
+        assert_eq!(controller.lifecycle(), FrameGenerationLifecycle::OnProxy);
+        assert!(controller.suspend().is_ok());
+        assert_eq!(
+            controller.lifecycle(),
+            FrameGenerationLifecycle::SuspendedProxy
+        );
+        assert!(controller.accept_complete_frame().is_ok());
+        assert!(controller.request_disable().is_ok());
+        assert_eq!(controller.lifecycle(), FrameGenerationLifecycle::Disabling);
+        controller.complete_disable();
+        assert_eq!(controller.lifecycle(), FrameGenerationLifecycle::OffNative);
+        assert_eq!(controller.requested(), FrameGenerationMode::Off);
+    }
+
+    #[test]
+    fn unsupported_and_invalid_transitions_do_not_change_state() {
+        let mut unavailable = FrameGenerationController::new(FrameGenerationMode::On, false);
+        assert_eq!(
+            unavailable.lifecycle(),
+            FrameGenerationLifecycle::Unavailable
+        );
+        assert!(unavailable.request_disable().is_err());
+        assert_eq!(
+            unavailable.lifecycle(),
+            FrameGenerationLifecycle::Unavailable
+        );
+
+        let mut off = FrameGenerationController::new(FrameGenerationMode::Off, true);
+        assert!(off.accept_complete_frame().is_err());
+        assert!(off.request_enable().is_ok());
+        off.fault(17);
+        assert_eq!(off.lifecycle(), FrameGenerationLifecycle::FaultPendingDisable(17));
     }
 }
 

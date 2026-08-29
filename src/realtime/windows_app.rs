@@ -277,6 +277,13 @@ impl ApplicationHandler for RealtimeApplication {
                                 eprintln!("切换 DLSS/DLAA 失败：{error}");
                             }
                         }
+                        PhysicalKey::Code(KeyCode::F5) if !event.repeat => {
+                            if self.benchmark.is_none()
+                                && let Err(error) = renderer.toggle_frame_generation()
+                            {
+                                eprintln!("切换 DLSS Frame Generation 失败：{error}");
+                            }
+                        }
                         _ => {}
                     }
                 }

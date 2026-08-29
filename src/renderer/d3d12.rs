@@ -53,6 +53,10 @@ use crate::{
     scene::{MAX_SCENE_SAMPLERS, SceneAsset, gltf_loader},
     upscaler::UpscalerMode,
 };
+#[cfg(feature = "streamline-fg")]
+use crate::realtime::{
+    FrameGenerationController, FrameGenerationLifecycle, FrameGenerationMode,
+};
 
 use self::{
     capture::{CaptureMetadata, capture_json_line, unpack_rgba8_rows, write_png_atomic},
@@ -289,6 +293,7 @@ struct StreamlineRuntime {
 #[cfg(feature = "streamline")]
 struct StreamlineViewport {
     viewport: crate::streamline::Viewport,
+    #[cfg_attr(not(feature = "streamline-rr"), allow(dead_code))]
     options: crate::streamline::DlssOptions,
     optimal: crate::streamline::OptimalSettings,
     #[cfg(feature = "streamline-rr")]
@@ -509,6 +514,152 @@ impl StreamlineRuntime {
             ));
         }
         Ok(loaded != 0)
+    }
+
+    #[cfg(feature = "streamline-fg")]
+    fn frame_generation_options(
+        output_extent: Extent2D,
+        render_extent: Extent2D,
+        mode: FrameGenerationMode,
+    ) -> crate::streamline::FrameGenerationOptions {
+        crate::streamline::FrameGenerationOptions {
+            struct_size: size_of::<crate::streamline::FrameGenerationOptions>() as u32,
+            abi_version: crate::streamline::ABI_VERSION,
+            mode: match mode {
+                FrameGenerationMode::Off => crate::streamline::FRAME_GENERATION_OFF,
+                FrameGenerationMode::On => crate::streamline::FRAME_GENERATION_ON,
+            },
+            num_frames_to_generate: 1,
+            flags: 0,
+            num_back_buffers: FRAME_COUNT as u32,
+            mvec_depth_width: render_extent.width,
+            mvec_depth_height: render_extent.height,
+            color_width: output_extent.width,
+            color_height: output_extent.height,
+            color_buffer_format: DXGI_FORMAT_R8G8B8A8_UNORM.0 as u32,
+            mvec_buffer_format: DXGI_FORMAT_R16G16_FLOAT.0 as u32,
+            depth_buffer_format: DXGI_FORMAT_R32_FLOAT.0 as u32,
+            hud_less_buffer_format: DXGI_FORMAT_R8G8B8A8_UNORM.0 as u32,
+        }
+    }
+
+    #[cfg(feature = "streamline-fg")]
+    unsafe fn set_frame_generation_options(
+        &self,
+        viewport: &StreamlineViewport,
+        options: &crate::streamline::FrameGenerationOptions,
+    ) -> Result<()> {
+        let status = unsafe {
+            crate::streamline::streamline_bridge_fg_set_options(
+                self.bridge.as_raw(),
+                &viewport.viewport,
+                options,
+            )
+        };
+        if status != crate::streamline::STATUS_OK {
+            return Err(streamline_error_with_detail(
+                "设置 DLSS-G options",
+                status,
+                self.bridge.last_error(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "streamline-fg")]
+    unsafe fn get_frame_generation_state(
+        &self,
+        viewport: &StreamlineViewport,
+        estimate_options: Option<&crate::streamline::FrameGenerationOptions>,
+    ) -> Result<crate::streamline::FrameGenerationState> {
+        let mut state = crate::streamline::FrameGenerationState {
+            struct_size: size_of::<crate::streamline::FrameGenerationState>() as u32,
+            abi_version: crate::streamline::ABI_VERSION,
+            ..Default::default()
+        };
+        let status = unsafe {
+            crate::streamline::streamline_bridge_fg_get_state(
+                self.bridge.as_raw(),
+                &viewport.viewport,
+                estimate_options.map_or(std::ptr::null(), |value| value),
+                &mut state,
+            )
+        };
+        if status != crate::streamline::STATUS_OK {
+            return Err(streamline_error_with_detail(
+                "查询 DLSS-G state",
+                status,
+                self.bridge.last_error(),
+            ));
+        }
+        Ok(state)
+    }
+
+    #[cfg(feature = "streamline-fg")]
+    unsafe fn clear_frame_generation_tags(
+        &self,
+        token: &crate::streamline::FrameToken,
+        viewport_id: u32,
+    ) -> Result<()> {
+        let viewport = crate::streamline::Viewport {
+            struct_size: size_of::<crate::streamline::Viewport>() as u32,
+            abi_version: crate::streamline::ABI_VERSION,
+            id: viewport_id,
+            reserved: 0,
+        };
+        let tags = [
+            streamline_null_resource_tag(0),
+            streamline_null_resource_tag(1),
+            streamline_null_resource_tag(2),
+            streamline_null_resource_tag(23),
+            streamline_null_resource_tag(69),
+        ];
+        let status = unsafe {
+            crate::streamline::streamline_bridge_set_tags(
+                self.bridge.as_raw(),
+                token,
+                &viewport,
+                tags.as_ptr(),
+                tags.len() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        if status != crate::streamline::STATUS_OK {
+            return Err(streamline_error_with_detail(
+                "清除 DLSS-G frame tags",
+                status,
+                self.bridge.last_error(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "streamline-fg")]
+    unsafe fn set_frame_generation_tags(
+        &self,
+        viewport: &StreamlineViewport,
+        token: &crate::streamline::FrameToken,
+        tags: &[crate::streamline::ResourceTag],
+        command_list: &ID3D12GraphicsCommandList,
+    ) -> Result<()> {
+        let status = unsafe {
+            crate::streamline::streamline_bridge_set_tags(
+                self.bridge.as_raw(),
+                token,
+                &viewport.viewport,
+                tags.as_ptr(),
+                tags.len() as u32,
+                command_list.as_raw(),
+            )
+        };
+        if status != crate::streamline::STATUS_OK {
+            return Err(streamline_error_with_detail(
+                "提交 DLSS-G resource tags",
+                status,
+                self.bridge.last_error(),
+            ));
+        }
+        Ok(())
     }
 
     unsafe fn get_frame_token(&self, frame_index: u32) -> Result<crate::streamline::FrameToken> {
@@ -868,8 +1019,9 @@ impl StreamlineRuntime {
         token: &crate::streamline::FrameToken,
         input: &DlssFrameInput,
         camera: CameraPose,
+        rendering_game_frames: bool,
     ) -> Result<crate::streamline::FrameToken> {
-        let constants = dlss_streamline_constants(input, camera);
+        let constants = dlss_streamline_constants(input, camera, rendering_game_frames);
         let status = unsafe {
             crate::streamline::streamline_bridge_set_constants(
                 self.bridge.as_raw(),
@@ -895,8 +1047,11 @@ impl StreamlineRuntime {
         token: &crate::streamline::FrameToken,
         input: &DlssFrameInput,
         camera: CameraPose,
+        rendering_game_frames: bool,
     ) -> Result<crate::streamline::FrameToken> {
-        let _ = unsafe { self.begin_frame(viewport, token, input, camera)? };
+        let _ = unsafe {
+            self.begin_frame(viewport, token, input, camera, rendering_game_frames)?
+        };
         // Keep the v2.12 DLSS + DLSSD option pair ordered on every RR frame.
         // Most fields are stable, but resubmitting both avoids retaining a
         // partially updated plugin state when RR matrices change below.
@@ -947,11 +1102,14 @@ impl StreamlineRuntime {
         token: &crate::streamline::FrameToken,
         input: &DlssFrameInput,
         camera: CameraPose,
+        rendering_game_frames: bool,
     ) -> Result<crate::streamline::FrameToken> {
         if backend == DenoiserBackend::DlssRayReconstruction {
             #[cfg(feature = "streamline-rr")]
             {
-                return unsafe { self.begin_rr_frame(viewport, token, input, camera) };
+                return unsafe {
+                    self.begin_rr_frame(viewport, token, input, camera, rendering_game_frames)
+                };
             }
             #[cfg(not(feature = "streamline-rr"))]
             {
@@ -961,7 +1119,7 @@ impl StreamlineRuntime {
                 ));
             }
         }
-        unsafe { self.begin_frame(viewport, token, input, camera) }
+        unsafe { self.begin_frame(viewport, token, input, camera, rendering_game_frames) }
     }
 
     unsafe fn set_tags_and_evaluate(
@@ -1167,6 +1325,7 @@ fn streamline_error_with_detail(
 fn dlss_streamline_constants(
     input: &DlssFrameInput,
     camera: CameraPose,
+    rendering_game_frames: bool,
 ) -> crate::streamline::Constants {
     let current_view = Mat4::from_cols_array(&input.world_to_view).transpose();
     let previous_view = Mat4::from_cols_array(&input.world_to_view_prev).transpose();
@@ -1208,7 +1367,7 @@ fn dlss_streamline_constants(
         motion_vectors_3d: 0,
         reset: input.reset,
         motion_vectors_jittered: input.motion_vectors_jittered,
-        rendering_game_frames: 0,
+        rendering_game_frames: u32::from(rendering_game_frames),
     }
 }
 
@@ -1245,7 +1404,7 @@ fn streamline_resource_tag(
     }
 }
 
-#[cfg(feature = "streamline")]
+#[cfg(feature = "streamline-fg")]
 fn streamline_null_resource_tag(buffer_type: u32) -> crate::streamline::ResourceTag {
     crate::streamline::ResourceTag {
         struct_size: size_of::<crate::streamline::ResourceTag>() as u32,
@@ -1689,7 +1848,14 @@ pub struct Dx12Renderer {
     gpu_name: String,
     factory_interfaces: StreamlineFactoryInterfaces,
     command_queue: StreamlineCommandQueueInterfaces,
+    #[cfg(feature = "streamline-fg")]
+    swap_chain: Option<SwapChainInterfaces>,
+    #[cfg(not(feature = "streamline-fg"))]
     swap_chain: SwapChainInterfaces,
+    #[cfg(feature = "streamline-fg")]
+    hwnd: HWND,
+    #[cfg(feature = "streamline-fg")]
+    swap_chain_description: DXGI_SWAP_CHAIN_DESC1,
     rtv_heap: DescriptorHeap,
     render_targets: [Option<TrackedResource>; FRAME_COUNT],
     active_generation: RenderResourceGeneration,
@@ -1769,6 +1935,14 @@ pub struct Dx12Renderer {
     active_streamline_viewport: Option<StreamlineViewport>,
     #[cfg(feature = "streamline")]
     next_streamline_viewport_id: u32,
+    #[cfg(feature = "streamline-fg")]
+    frame_generation: FrameGenerationController,
+    #[cfg(feature = "streamline-fg")]
+    fg_last_tags_token: Option<crate::streamline::FrameToken>,
+    #[cfg(feature = "streamline-fg")]
+    fg_last_tags_viewport: Option<u32>,
+    #[cfg(feature = "streamline-fg")]
+    fg_actual_present_confirmed: bool,
     shader_reloader: ShaderReloader,
     frames: Vec<FrameContext>,
     command_list: ID3D12GraphicsCommandList,
@@ -1952,6 +2126,19 @@ impl Dx12Renderer {
             } else {
                 None
             };
+            #[cfg(feature = "streamline-fg")]
+            let frame_generation = {
+                let supported = streamline
+                    .as_ref()
+                    .is_some_and(StreamlineRuntime::frame_generation_supported);
+                if config.frame_generation == FrameGenerationMode::On && !supported {
+                    return Err(streamline_error(
+                        "DLSS-G support",
+                        crate::streamline::STATUS_UNSUPPORTED,
+                    ));
+                }
+                FrameGenerationController::new(config.frame_generation, supported)
+            };
             let memory_telemetry = VideoMemoryTelemetry::new(&adapter);
             configure_info_queue(device_interfaces.native());
 
@@ -1996,7 +2183,9 @@ impl Dx12Renderer {
             };
             #[cfg(feature = "streamline-fg")]
             if let Some(runtime) = streamline.as_ref() {
-                if runtime.frame_generation_supported() {
+                if runtime.frame_generation_supported()
+                    && config.frame_generation == FrameGenerationMode::Off
+                {
                     // The proxy device must create the application queue while
                     // DLSS-G is loaded. Unload before the first swap-chain hook
                     // so the default path cannot acquire FG's off-screen
@@ -2348,6 +2537,42 @@ impl Dx12Renderer {
             );
             #[cfg(not(feature = "streamline"))]
             let render_extent = render_extent(output_extent, initial_scale);
+            #[cfg(feature = "streamline-fg")]
+            if config.frame_generation == FrameGenerationMode::On {
+                let runtime = streamline.as_ref().ok_or_else(|| {
+                    streamline_error("DLSS-G runtime", crate::streamline::STATUS_NOT_INITIALIZED)
+                })?;
+                let viewport = active_streamline_viewport.as_ref().ok_or_else(|| {
+                    streamline_error(
+                        "DLSS-G reconstruction viewport",
+                        crate::streamline::STATUS_NOT_INITIALIZED,
+                    )
+                })?;
+                let estimate = StreamlineRuntime::frame_generation_options(
+                    output_extent,
+                    render_extent,
+                    FrameGenerationMode::On,
+                );
+                let state = runtime.get_frame_generation_state(viewport, Some(&estimate))?;
+                if state.min_width_or_height != 0
+                    && render_extent.width.min(render_extent.height) < state.min_width_or_height
+                {
+                    return Err(streamline_error_with_detail(
+                        "DLSS-G optimal extent",
+                        crate::streamline::STATUS_INVALID_ARGUMENT,
+                        format!(
+                            "内部尺寸 {}x{} 小于 SDK 最小边 {}",
+                            render_extent.width, render_extent.height, state.min_width_or_height
+                        ),
+                    ));
+                }
+                if state.num_frames_to_generate_max < 1 {
+                    return Err(streamline_error(
+                        "DLSS-G frame multiplier",
+                        crate::streamline::STATUS_INVALID_ARGUMENT,
+                    ));
+                }
+            }
             let initial_reconstruction_frame_state =
                 ReconstructionFrameState::from_camera(ReconstructionFrameInput {
                     current_camera: CameraPose {
@@ -2390,7 +2615,14 @@ impl Dx12Renderer {
                 gpu_name,
                 factory_interfaces,
                 command_queue,
+                #[cfg(feature = "streamline-fg")]
+                swap_chain: Some(swap_chain),
+                #[cfg(not(feature = "streamline-fg"))]
                 swap_chain,
+                #[cfg(feature = "streamline-fg")]
+                hwnd,
+                #[cfg(feature = "streamline-fg")]
+                swap_chain_description,
                 rtv_heap,
                 render_targets: [None, None, None],
                 active_generation,
@@ -2485,6 +2717,14 @@ impl Dx12Renderer {
                 active_streamline_viewport,
                 #[cfg(feature = "streamline")]
                 next_streamline_viewport_id,
+                #[cfg(feature = "streamline-fg")]
+                frame_generation,
+                #[cfg(feature = "streamline-fg")]
+                fg_last_tags_token: None,
+                #[cfg(feature = "streamline-fg")]
+                fg_last_tags_viewport: None,
+                #[cfg(feature = "streamline-fg")]
+                fg_actual_present_confirmed: false,
                 shader_reloader: ShaderReloader::new(),
                 frames,
                 command_list,
@@ -2694,6 +2934,12 @@ impl Dx12Renderer {
                 self.submit_pcl_marker(token, PCL_RENDER_SUBMIT_START)?;
             }
 
+            #[cfg(feature = "streamline-fg")]
+            #[cfg(feature = "streamline")]
+            let rendering_game_frames = self.frame_generation.lifecycle().proxy_loaded()
+                && self.debug_view == DebugView::Final;
+            #[cfg(all(not(feature = "streamline-fg"), feature = "streamline"))]
+            let rendering_game_frames = false;
             #[cfg(feature = "streamline")]
             let dlss_token = if let (Some(streamline), Some(viewport), Some(input)) = (
                 self.streamline.as_ref(),
@@ -2716,6 +2962,7 @@ impl Dx12Renderer {
                         yaw: self.camera_yaw,
                         pitch: self.camera_pitch,
                     },
+                    rendering_game_frames,
                 )?)
             } else {
                 None
@@ -3861,9 +4108,114 @@ impl Dx12Renderer {
                 .CopyResource(render_target.resource(), display_output.resource());
             render_target
                 .collect_transition(&mut self.transition_batch, D3D12_RESOURCE_STATE_PRESENT);
+            #[cfg(feature = "streamline-fg")]
+            let fg_tags_live = if self.frame_generation.lifecycle().proxy_loaded()
+                && self.debug_view == DebugView::Final
+                && (dlss_active || rr_active)
+            {
+                let token = frame_token.as_ref().ok_or_else(|| {
+                    streamline_error(
+                        "DLSS-G frame token",
+                        crate::streamline::STATUS_NOT_INITIALIZED,
+                    )
+                })?;
+                let runtime = self.streamline.as_ref().ok_or_else(|| {
+                    streamline_error("DLSS-G runtime", crate::streamline::STATUS_NOT_INITIALIZED)
+                })?;
+                let viewport = self.active_streamline_viewport.as_ref().ok_or_else(|| {
+                    streamline_error(
+                        "DLSS-G viewport",
+                        crate::streamline::STATUS_NOT_INITIALIZED,
+                    )
+                })?;
+                let tags = if dlss_active {
+                    let dlss = self.active_generation.dlss.as_ref().ok_or_else(|| {
+                        streamline_error(
+                            "DLSS-G depth/motion guides",
+                            crate::streamline::STATUS_NOT_INITIALIZED,
+                        )
+                    })?;
+                    [
+                        streamline_resource_tag(
+                            &dlss.depth,
+                            0,
+                            crate::streamline::RESOURCE_LIFECYCLE_VALID_UNTIL_PRESENT,
+                            render_extent,
+                        ),
+                        streamline_resource_tag(
+                            &dlss.motion,
+                            1,
+                            crate::streamline::RESOURCE_LIFECYCLE_VALID_UNTIL_PRESENT,
+                            render_extent,
+                        ),
+                        streamline_resource_tag(
+                            &self.active_generation.display_output,
+                            2,
+                            crate::streamline::RESOURCE_LIFECYCLE_VALID_UNTIL_PRESENT,
+                            output_extent,
+                        ),
+                        streamline_null_resource_tag(23),
+                        streamline_null_resource_tag(69),
+                    ]
+                } else {
+                    #[cfg(feature = "streamline-rr")]
+                    {
+                        let rr = self.active_generation.rr.as_ref().ok_or_else(|| {
+                            streamline_error(
+                                "DLSS-G RR depth/motion guides",
+                                crate::streamline::STATUS_NOT_INITIALIZED,
+                            )
+                        })?;
+                        [
+                            streamline_resource_tag(
+                                &rr.depth,
+                                0,
+                                crate::streamline::RESOURCE_LIFECYCLE_VALID_UNTIL_PRESENT,
+                                render_extent,
+                            ),
+                            streamline_resource_tag(
+                                &rr.motion,
+                                1,
+                                crate::streamline::RESOURCE_LIFECYCLE_VALID_UNTIL_PRESENT,
+                                render_extent,
+                            ),
+                            streamline_resource_tag(
+                                &self.active_generation.display_output,
+                                2,
+                                crate::streamline::RESOURCE_LIFECYCLE_VALID_UNTIL_PRESENT,
+                                output_extent,
+                            ),
+                            streamline_null_resource_tag(23),
+                            streamline_null_resource_tag(69),
+                        ]
+                    }
+                    #[cfg(not(feature = "streamline-rr"))]
+                    {
+                        return Err(streamline_error(
+                            "DLSS-G RR depth/motion guides",
+                            crate::streamline::STATUS_UNSUPPORTED,
+                        ));
+                    }
+                };
+                runtime.set_frame_generation_tags(viewport, token, &tags, &self.command_list)?;
+                self.fg_last_tags_token = Some(*token);
+                self.fg_last_tags_viewport = Some(viewport.viewport.id);
+                true
+            } else {
+                false
+            };
+            #[cfg(not(feature = "streamline-fg"))]
+            let fg_tags_live = false;
             self.active_generation.display_output.collect_transition(
                 &mut self.transition_batch,
-                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                if fg_tags_live {
+                    // eValidUntilPresent tags keep display_output alive until
+                    // the proxy Present returns; the next frame's tracker
+                    // performs the normal transition back to UAV.
+                    D3D12_RESOURCE_STATE_COPY_SOURCE
+                } else {
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+                },
             );
             self.submit_transition_batch(&mut command_recording_stats);
             self.gpu_profiler.resolve_frame(
@@ -3886,6 +4238,46 @@ impl Dx12Renderer {
             let command_list: ID3D12CommandList = self.command_list.cast()?;
             self.application_command_queue()
                 .ExecuteCommandLists(&[Some(command_list)]);
+            #[cfg(feature = "streamline-fg")]
+            if self.frame_generation.lifecycle().proxy_loaded() {
+                let runtime = self.streamline.as_ref().ok_or_else(|| {
+                    streamline_error("DLSS-G runtime", crate::streamline::STATUS_NOT_INITIALIZED)
+                })?;
+                let viewport = self.active_streamline_viewport.as_ref().ok_or_else(|| {
+                    streamline_error("DLSS-G viewport", crate::streamline::STATUS_NOT_INITIALIZED)
+                })?;
+                let options = StreamlineRuntime::frame_generation_options(
+                    output_extent,
+                    render_extent,
+                    if fg_tags_live {
+                        FrameGenerationMode::On
+                    } else {
+                        FrameGenerationMode::Off
+                    },
+                );
+                runtime.set_frame_generation_options(viewport, &options)?;
+                if fg_tags_live {
+                    self.frame_generation
+                        .accept_complete_frame()
+                        .map_err(|_error| {
+                            streamline_error(
+                                "DLSS-G lifecycle resume",
+                                crate::streamline::STATUS_INVALID_ARGUMENT,
+                            )
+                        })?;
+                } else if matches!(
+                    self.frame_generation.lifecycle(),
+                    FrameGenerationLifecycle::EnablingProxy
+                        | FrameGenerationLifecycle::OnProxy
+                ) {
+                    self.frame_generation.suspend().map_err(|_error| {
+                        streamline_error(
+                            "DLSS-G lifecycle suspend",
+                            crate::streamline::STATUS_INVALID_ARGUMENT,
+                        )
+                    })?;
+                }
+            }
             #[cfg(feature = "streamline")]
             if let Some(token) = frame_token.as_ref() {
                 self.submit_pcl_marker(token, PCL_RENDER_SUBMIT_END)?;
@@ -3895,7 +4287,7 @@ impl Dx12Renderer {
                 return Err(device_removed_error(self.native_device(), error));
             }
             #[cfg(feature = "streamline")]
-            if self.swap_chain.is_proxied() {
+            if self.swap_chain_is_proxied() {
                 // The upgraded swap-chain proxy invokes Streamline common's
                 // presentCommon exactly once for this successful Present.
                 self.reflex_present_common_count =
@@ -3904,6 +4296,34 @@ impl Dx12Renderer {
             #[cfg(feature = "streamline")]
             if let Some(token) = frame_token.as_ref() {
                 self.submit_pcl_marker(token, PCL_PRESENT_END)?;
+            }
+            #[cfg(feature = "streamline-fg")]
+            if self.frame_generation.lifecycle().proxy_loaded()
+                && let (Some(runtime), Some(viewport)) = (
+                    self.streamline.as_ref(),
+                    self.active_streamline_viewport.as_ref(),
+                )
+            {
+                let state = runtime.get_frame_generation_state(viewport, None)?;
+                eprintln!(
+                    "frame_generation_state status={} actual_presented={} max_generated={} requested={} state={}",
+                    state.status_raw,
+                    state.num_frames_actually_presented,
+                    state.num_frames_to_generate_max,
+                    self.frame_generation.requested().as_str(),
+                    self.frame_generation_state_name(),
+                );
+                if state.status_raw != 0 {
+                    self.frame_generation.fault(state.status_raw);
+                } else if state.num_frames_actually_presented >= 2
+                    && !self.fg_actual_present_confirmed
+                {
+                    self.fg_actual_present_confirmed = true;
+                    eprintln!(
+                        "frame_generation_confirmed status=0 num_frames_actually_presented={}",
+                        state.num_frames_actually_presented
+                    );
+                }
             }
 
             let fence_value = self.next_fence_value;
@@ -5055,7 +5475,27 @@ impl Dx12Renderer {
     }
 
     fn hooked_swap_chain(&self) -> &IDXGISwapChain3 {
+        #[cfg(feature = "streamline-fg")]
+        {
+            return self
+                .swap_chain
+                .as_ref()
+                .expect("swap chain is available outside its explicit recreation boundary")
+                .hooked();
+        }
+        #[cfg(not(feature = "streamline-fg"))]
         self.swap_chain.hooked()
+    }
+
+    #[cfg(feature = "streamline")]
+    fn swap_chain_is_proxied(&self) -> bool {
+        #[cfg(feature = "streamline-fg")]
+        return self
+            .swap_chain
+            .as_ref()
+            .is_some_and(SwapChainInterfaces::is_proxied);
+        #[cfg(not(feature = "streamline-fg"))]
+        self.swap_chain.is_proxied()
     }
 
     pub fn benchmark_json(&self, duration_seconds: u64, warmup_valid_frames: u32) -> String {
@@ -5764,6 +6204,148 @@ impl Dx12Renderer {
 
     pub fn debug_view_name(&self) -> &'static str {
         self.debug_view.title()
+    }
+
+    #[cfg(feature = "streamline-fg")]
+    pub fn frame_generation_state_name(&self) -> &'static str {
+        self.frame_generation.lifecycle().as_str()
+    }
+
+    #[cfg(not(feature = "streamline-fg"))]
+    pub fn toggle_frame_generation(&mut self) -> Result<()> {
+        Err(WindowsError::new(
+            windows::core::HRESULT(0x80070057_u32 as i32),
+            "F5 帧生成需要使用 cargo run --features streamline-fg 构建",
+        ))
+    }
+
+    #[cfg(feature = "streamline-fg")]
+    pub fn toggle_frame_generation(&mut self) -> Result<()> {
+        match self.frame_generation.lifecycle() {
+            FrameGenerationLifecycle::OffNative => {
+                if let Err(error) = self.frame_generation.request_enable() {
+                    return Err(WindowsError::new(
+                        windows::core::HRESULT(0x80070057_u32 as i32),
+                        error,
+                    ));
+                }
+                if !self.upscaler.uses_streamline() {
+                    self.frame_generation = FrameGenerationController::new(
+                        FrameGenerationMode::On,
+                        false,
+                    );
+                    return Err(WindowsError::new(
+                        windows::core::HRESULT(0x80070057_u32 as i32),
+                        "F5 开启 FG 需要现有 DLSS/DLAA reconstruction guides",
+                    ));
+                }
+                unsafe { self.recreate_swap_chain_for_frame_generation(true, "F5-on") }
+            }
+            FrameGenerationLifecycle::Unavailable => {
+                eprintln!(
+                    "frame_generation_toggle rejected state=unavailable reason=SDK/GPU unsupported"
+                );
+                Ok(())
+            }
+            FrameGenerationLifecycle::EnablingProxy
+            | FrameGenerationLifecycle::OnProxy
+            | FrameGenerationLifecycle::SuspendedProxy
+            | FrameGenerationLifecycle::FaultPendingDisable(_) => {
+                if self.frame_generation.lifecycle().proxy_loaded() {
+                    let _ = self.frame_generation.request_disable();
+                } else {
+                    self.frame_generation.set_requested(FrameGenerationMode::Off);
+                }
+                unsafe { self.recreate_swap_chain_for_frame_generation(false, "F5-off") }
+            }
+            FrameGenerationLifecycle::Disabling => Ok(()),
+        }
+    }
+
+    #[cfg(feature = "streamline-fg")]
+    unsafe fn recreate_swap_chain_for_frame_generation(
+        &mut self,
+        target_loaded: bool,
+        reason: &str,
+    ) -> Result<()> {
+        let idle_waits_before = self.gpu_idle_wait_count;
+        if let (Some(runtime), Some(viewport)) = (
+            self.streamline.as_ref(),
+            self.active_streamline_viewport.as_ref(),
+        ) {
+            let options = StreamlineRuntime::frame_generation_options(
+                self.active_generation.output_extent,
+                self.active_generation.render_extent,
+                FrameGenerationMode::Off,
+            );
+            unsafe { runtime.set_frame_generation_options(viewport, &options)? };
+            if let (Some(token), Some(viewport_id)) = (
+                self.fg_last_tags_token.as_ref(),
+                self.fg_last_tags_viewport,
+            ) {
+                unsafe { runtime.clear_frame_generation_tags(token, viewport_id)? };
+            }
+        }
+        // Loading/unloading a DLSS-G proxy changes swap-chain ownership. This
+        // is an explicit F5 boundary, so one idle wait is allowed here; the
+        // normal render loop never calls this helper.
+        unsafe { self.wait_for_gpu()? };
+        self.gpu_profiler.invalidate();
+        self.render_targets = [None, None, None];
+        let old_chain = self.swap_chain.take();
+        drop(old_chain);
+        if let Some(runtime) = self.streamline.as_ref() {
+            unsafe { runtime.set_frame_generation_loaded(target_loaded)? };
+            let loaded = unsafe { runtime.frame_generation_loaded()? };
+            if loaded != target_loaded {
+                self.frame_generation.fault(crate::streamline::STATUS_SDK_ERROR);
+                return Err(streamline_error(
+                    "DLSS-G loaded 状态复核",
+                    crate::streamline::STATUS_SDK_ERROR,
+                ));
+            }
+        }
+        let new_chain = unsafe {
+            create_swap_chain_interfaces(
+                &self.factory_interfaces,
+                self.command_queue.hooked(),
+                self.hwnd,
+                &self.swap_chain_description,
+                self.streamline.as_ref(),
+            )?
+        };
+        self.swap_chain = Some(new_chain);
+        unsafe { self.create_render_targets()? };
+        for frame in &mut self.frames {
+            frame.fence_value = 0;
+            frame.timing_valid = false;
+            frame.timing_generation_id = 0;
+            frame.timing_passes = [false; profiler::PASS_COUNT];
+        }
+        self.fg_last_tags_token = None;
+        self.fg_last_tags_viewport = None;
+        self.history_index = 0;
+        self.accumulated_frames = 0;
+        self.request_history_reset();
+        if target_loaded {
+            self.frame_generation.set_requested(FrameGenerationMode::On);
+            self.frame_generation = FrameGenerationController::new(
+                FrameGenerationMode::On,
+                true,
+            );
+        } else {
+            self.frame_generation.complete_disable();
+        }
+        eprintln!(
+            "frame_generation_chain_recreated reason={reason} requested={} state={} fg_loaded={} extent={}x{} idle_wait_delta={}",
+            self.frame_generation.requested().as_str(),
+            self.frame_generation_state_name(),
+            u32::from(target_loaded),
+            self.width,
+            self.height,
+            self.gpu_idle_wait_count.saturating_sub(idle_waits_before),
+        );
+        Ok(())
     }
 
     unsafe fn create_render_targets(&mut self) -> Result<()> {
@@ -7000,7 +7582,19 @@ impl Drop for Dx12Renderer {
                 streamline.shutdown_after_gpu();
             }
 
-            drop(self.swap_chain.proxy.take());
+            #[cfg(feature = "streamline-fg")]
+            {
+                let swap_chain = self.swap_chain.take();
+                if let Some(mut swap_chain) = swap_chain {
+                    drop(swap_chain.proxy.take());
+                    drop(swap_chain.native.take());
+                }
+            }
+            #[cfg(not(feature = "streamline-fg"))]
+            {
+                drop(self.swap_chain.proxy.take());
+                drop(self.swap_chain.native.take());
+            }
             drop(self.command_queue.proxy.take());
             drop(self.factory_interfaces.proxy.take());
             drop(self.device_interfaces.proxy.take());
@@ -7008,7 +7602,6 @@ impl Drop for Dx12Renderer {
             // Native D3D12/DXGI objects outlive Streamline itself. Other
             // renderer resources keep their own native COM references until
             // Rust drops the remaining fields after this method returns.
-            drop(self.swap_chain.native.take());
             drop(self.command_queue.native.take());
             drop(self.factory_interfaces.native.take());
             drop(self.device_interfaces.native.take());
@@ -7308,24 +7901,24 @@ mod tests {
         ));
         assert!(source.contains("runtime.get_native_interface(&created_command_queue)"));
         assert!(!source.contains("upgrade_interface_with_bridge"));
-        assert!(source.contains("drop(self.swap_chain.proxy.take())"));
+        assert!(source.contains("drop(swap_chain.proxy.take())"));
         assert!(source.contains("drop(self.command_queue.proxy.take())"));
         assert!(source.contains("drop(self.factory_interfaces.proxy.take())"));
         assert!(source.contains("drop(self.device_interfaces.proxy.take())"));
         let drop_body = &source[source.find("impl Drop for Dx12Renderer").unwrap()..];
         let shutdown = drop_body.find("streamline.shutdown_after_gpu()").unwrap();
         let first_proxy_release = drop_body
-            .find("drop(self.swap_chain.proxy.take())")
+            .find("drop(swap_chain.proxy.take())")
             .unwrap();
         let last_proxy_release = drop_body
             .find("drop(self.device_interfaces.proxy.take())")
             .unwrap();
         let first_native_release = drop_body
-            .find("drop(self.swap_chain.native.take())")
+            .find("drop(swap_chain.native.take())")
             .unwrap();
         assert!(shutdown < first_proxy_release);
-        assert!(first_proxy_release < last_proxy_release);
-        assert!(last_proxy_release < first_native_release);
+        assert!(first_proxy_release < first_native_release);
+        assert!(first_native_release < last_proxy_release);
         assert!(!source.contains("self.streamline_swap_chain"));
         assert!(!source.contains("streamline_swap_chain: Option"));
         assert!(!source.contains("fn active_swap_chain"));
