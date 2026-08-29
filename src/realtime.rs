@@ -72,6 +72,7 @@ impl FrameGenerationMode {
     }
 }
 
+#[cfg(feature = "streamline-fg")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameGenerationLifecycle {
     Unavailable,
@@ -83,6 +84,7 @@ pub enum FrameGenerationLifecycle {
     FaultPendingDisable(u32),
 }
 
+#[cfg(feature = "streamline-fg")]
 impl FrameGenerationLifecycle {
     #[cfg(feature = "streamline-fg")]
     pub const fn as_str(self) -> &'static str {
@@ -108,12 +110,14 @@ impl FrameGenerationLifecycle {
 /// The only owner of FG requested/runtime transitions. Keeping these rules in
 /// one small state machine prevents F5, debug views, and Present errors from
 /// inventing independent loaded/active/tagged flags.
+#[cfg(feature = "streamline-fg")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameGenerationController {
     requested: FrameGenerationMode,
     lifecycle: FrameGenerationLifecycle,
 }
 
+#[cfg(feature = "streamline-fg")]
 impl FrameGenerationController {
     pub const fn new(requested: FrameGenerationMode, supported: bool) -> Self {
         let lifecycle = match (requested, supported) {
@@ -264,7 +268,7 @@ impl CommandRecordingMode {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "streamline-fg"))]
 mod tests {
     use super::{FrameGenerationController, FrameGenerationLifecycle, FrameGenerationMode};
 
