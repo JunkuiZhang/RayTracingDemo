@@ -2225,11 +2225,23 @@ impl Dx12Renderer {
                     &swap_chain_description,
                 )?
             };
+            #[cfg(feature = "streamline-fg")]
+            let fg_loaded = if let Some(runtime) = streamline.as_ref() {
+                if runtime.frame_generation_supported() {
+                    u32::from(runtime.frame_generation_loaded()?)
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            #[cfg(not(feature = "streamline-fg"))]
+            let fg_loaded = "N/A";
             eprintln!(
                 "streamline_swap_chain state=created manual_hooking={} proxy={} fg_loaded={} output={}x{}",
                 u32::from(cfg!(feature = "streamline")),
                 u32::from(swap_chain.is_proxied()),
-                if cfg!(feature = "streamline-fg") { "0" } else { "N/A" },
+                fg_loaded,
                 width,
                 height,
             );
@@ -2801,6 +2813,18 @@ impl Dx12Renderer {
         }
         self.poll_shader_reload();
         if self.minimized || self.width == 0 || self.height == 0 {
+            return Ok(());
+        }
+        #[cfg(feature = "streamline-fg")]
+        if matches!(
+            self.frame_generation.lifecycle(),
+            FrameGenerationLifecycle::FaultPendingDisable(_)
+        ) {
+            // A non-OK SDK state is not allowed to keep presenting with stale
+            // generated-frame inputs. Handle it at the next safe boundary,
+            // where the single explicit helper performs the required wait and
+            // returns to the native chain.
+            self.toggle_frame_generation()?;
             return Ok(());
         }
         self.memory_telemetry.poll(false);
@@ -6324,6 +6348,7 @@ impl Dx12Renderer {
         }
         self.fg_last_tags_token = None;
         self.fg_last_tags_viewport = None;
+        self.fg_actual_present_confirmed = false;
         self.history_index = 0;
         self.accumulated_frames = 0;
         self.request_history_reset();
