@@ -215,6 +215,33 @@ impl StreamlineFactoryInterfaces {
 
 }
 
+/// Owns the native application queue and the Streamline proxy returned by the
+/// manual-hooking device. Only `CreateSwapChainForHwnd` consumes the proxy;
+/// normal queue work must stay on the native D3D12 interface.
+struct StreamlineCommandQueueInterfaces {
+    native: Option<ID3D12CommandQueue>,
+    proxy: Option<ID3D12CommandQueue>,
+}
+
+impl StreamlineCommandQueueInterfaces {
+    fn new(native: ID3D12CommandQueue, proxy: Option<ID3D12CommandQueue>) -> Self {
+        Self {
+            native: Some(native),
+            proxy,
+        }
+    }
+
+    fn native(&self) -> &ID3D12CommandQueue {
+        self.native
+            .as_ref()
+            .expect("native Streamline command queue owner is alive")
+    }
+
+    fn hooked(&self) -> &ID3D12CommandQueue {
+        self.proxy.as_ref().unwrap_or_else(|| self.native())
+    }
+}
+
 struct SwapChainInterfaces {
     native: Option<IDXGISwapChain3>,
     proxy: Option<IDXGISwapChain3>,
@@ -1653,7 +1680,7 @@ pub struct Dx12Renderer {
     _adapter: IDXGIAdapter1,
     gpu_name: String,
     factory_interfaces: StreamlineFactoryInterfaces,
-    command_queue: Option<ID3D12CommandQueue>,
+    command_queue: StreamlineCommandQueueInterfaces,
     swap_chain: SwapChainInterfaces,
     rtv_heap: DescriptorHeap,
     render_targets: [Option<TrackedResource>; FRAME_COUNT],
@@ -1928,11 +1955,21 @@ impl Dx12Renderer {
                 Flags: D3D12_COMMAND_QUEUE_FLAG_NONE,
                 NodeMask: 0,
             };
-            let command_queue: ID3D12CommandQueue =
+            let created_command_queue: ID3D12CommandQueue =
                 device_interfaces
                     .hooked()
                     .CreateCommandQueue(&queue_description)
                     .map_err(|error| dx_error("创建命令队列", error))?;
+            #[cfg(feature = "streamline")]
+            let command_queue = if let Some(runtime) = streamline.as_ref() {
+                let native = runtime.get_native_interface(&created_command_queue)?;
+                StreamlineCommandQueueInterfaces::new(native, Some(created_command_queue))
+            } else {
+                StreamlineCommandQueueInterfaces::new(created_command_queue, None)
+            };
+            #[cfg(not(feature = "streamline"))]
+            let command_queue =
+                StreamlineCommandQueueInterfaces::new(created_command_queue, None);
 
             let hwnd = window_hwnd(window)?;
             let swap_chain_description = DXGI_SWAP_CHAIN_DESC1 {
@@ -1969,7 +2006,7 @@ impl Dx12Renderer {
             let swap_chain = {
                 create_swap_chain_interfaces(
                     &factory_interfaces,
-                    &command_queue,
+                    command_queue.hooked(),
                     hwnd,
                     &swap_chain_description,
                     streamline.as_ref(),
@@ -1979,7 +2016,7 @@ impl Dx12Renderer {
             let swap_chain = {
                 create_swap_chain_interfaces(
                     &factory_interfaces,
-                    &command_queue,
+                    command_queue.hooked(),
                     hwnd,
                     &swap_chain_description,
                 )?
@@ -2012,8 +2049,12 @@ impl Dx12Renderer {
                 true,
             )
             .map_err(|error| dx_error("创建 sampler 描述符堆", error))?;
-            let gpu_profiler = GpuProfiler::new(device_interfaces.native(), &command_queue, FRAME_COUNT)
-                .map_err(|error| dx_error("创建 GPU 计时器", error))?;
+            let gpu_profiler = GpuProfiler::new(
+                device_interfaces.native(),
+                command_queue.native(),
+                FRAME_COUNT,
+            )
+            .map_err(|error| dx_error("创建 GPU 计时器", error))?;
             let stable_plane_counter_readback = create_readback_buffer(
                 device_interfaces.native(),
                 (FRAME_COUNT * crate::path_space::STABLE_PLANE_COUNTER_COUNT * size_of::<u32>())
@@ -2225,8 +2266,10 @@ impl Dx12Renderer {
                 .CreateFence(0, D3D12_FENCE_FLAG_NONE)?;
             let fence_event = CreateEventW(None, false, false, None)?;
             let initialization_list: ID3D12CommandList = command_list.cast()?;
-            command_queue.ExecuteCommandLists(&[Some(initialization_list)]);
-            command_queue.Signal(&fence, 1)?;
+            command_queue
+                .native()
+                .ExecuteCommandLists(&[Some(initialization_list)]);
+            command_queue.native().Signal(&fence, 1)?;
             fence.SetEventOnCompletion(1, fence_event)?;
             WaitForSingleObject(fence_event, INFINITE);
             frames[0].allocator.Reset()?;
@@ -2236,8 +2279,10 @@ impl Dx12Renderer {
                 .map_err(|error| dx_error("构建 DXR 加速结构 Phase B", error))?;
             command_list.Close()?;
             let phase_b_list: ID3D12CommandList = command_list.cast()?;
-            command_queue.ExecuteCommandLists(&[Some(phase_b_list)]);
-            command_queue.Signal(&fence, 2)?;
+            command_queue
+                .native()
+                .ExecuteCommandLists(&[Some(phase_b_list)]);
+            command_queue.native().Signal(&fence, 2)?;
             fence.SetEventOnCompletion(2, fence_event)?;
             WaitForSingleObject(fence_event, INFINITE);
             scene_geometry.release_uploads();
@@ -2329,7 +2374,7 @@ impl Dx12Renderer {
                 _adapter: adapter,
                 gpu_name,
                 factory_interfaces,
-                command_queue: Some(command_queue),
+                command_queue,
                 swap_chain,
                 rtv_heap,
                 render_targets: [None, None, None],
@@ -4991,9 +5036,7 @@ impl Dx12Renderer {
     }
 
     fn application_command_queue(&self) -> &ID3D12CommandQueue {
-        self.command_queue
-            .as_ref()
-            .expect("application command queue owner is alive")
+        self.command_queue.native()
     }
 
     fn hooked_swap_chain(&self) -> &IDXGISwapChain3 {
@@ -6930,24 +6973,28 @@ impl Drop for Dx12Renderer {
             ) {
                 runtime.free_resources(viewport);
             }
-            #[cfg(feature = "streamline")]
-            if let Some(streamline) = self.streamline.take() {
-                // Streamline requires slShutdown before destroying DXGI/D3D12
-                // components. Keep the upgraded proxy swap chain alive until
-                // shutdown has finished, then release its owned reference.
-                streamline.shutdown_after_gpu();
-            }
             if cfg!(debug_assertions) {
                 report_debug_messages(self.native_device());
             }
-            // The proxy/native pairs use independent AddRefs. Drop them only
-            // after slShutdown so the interposer cannot observe dead owners.
+
+            // Streamline proxy Release implementations still dispatch plugin
+            // destruction hooks. Release every proxy while the plugin manager
+            // is alive, but retain all native owners through slShutdown.
             drop(self.swap_chain.proxy.take());
-            drop(self.swap_chain.native.take());
-            drop(self.command_queue.take());
+            drop(self.command_queue.proxy.take());
             drop(self.factory_interfaces.proxy.take());
-            drop(self.factory_interfaces.native.take());
             drop(self.device_interfaces.proxy.take());
+            #[cfg(feature = "streamline")]
+            if let Some(streamline) = self.streamline.take() {
+                streamline.shutdown_after_gpu();
+            }
+
+            // Native D3D12/DXGI objects outlive Streamline itself. Other
+            // renderer resources keep their own native COM references until
+            // Rust drops the remaining fields after this method returns.
+            drop(self.swap_chain.native.take());
+            drop(self.command_queue.native.take());
+            drop(self.factory_interfaces.native.take());
             drop(self.device_interfaces.native.take());
             let _ = CloseHandle(self.fence_event);
         }
@@ -7233,11 +7280,24 @@ mod tests {
         let source = &complete_source[..complete_source.find("#[cfg(test)]").unwrap()];
         assert!(source.contains("struct StreamlineDeviceInterfaces"));
         assert!(source.contains("struct StreamlineFactoryInterfaces"));
+        assert!(source.contains("struct StreamlineCommandQueueInterfaces"));
         assert!(source.contains("struct SwapChainInterfaces"));
         assert!(source.contains("unsafe fn get_native_interface<T: Interface>"));
+        assert!(source.contains("runtime.get_native_interface(&created_command_queue)"));
         assert!(source.contains("drop(self.swap_chain.proxy.take())"));
+        assert!(source.contains("drop(self.command_queue.proxy.take())"));
         assert!(source.contains("drop(self.factory_interfaces.proxy.take())"));
         assert!(source.contains("drop(self.device_interfaces.proxy.take())"));
+        let drop_body = &source[source.find("impl Drop for Dx12Renderer").unwrap()..];
+        let last_proxy_release = drop_body
+            .find("drop(self.device_interfaces.proxy.take())")
+            .unwrap();
+        let shutdown = drop_body.find("streamline.shutdown_after_gpu()").unwrap();
+        let first_native_release = drop_body
+            .find("drop(self.swap_chain.native.take())")
+            .unwrap();
+        assert!(last_proxy_release < shutdown);
+        assert!(shutdown < first_native_release);
         assert!(!source.contains("self.streamline_swap_chain"));
         assert!(!source.contains("streamline_swap_chain: Option"));
         assert!(!source.contains("fn active_swap_chain"));
@@ -7255,8 +7315,13 @@ mod tests {
             .find("let swap_chain = {")
             .map(|offset| unload + offset)
             .unwrap();
+        let swap_chain_helper = &source[source
+            .find("unsafe fn create_swap_chain_interfaces(")
+            .unwrap()..source.find("impl StreamlineViewport").unwrap()];
         assert!(source.contains("create_swap_chain_interfaces("));
-        assert!(source.contains("factory\n            .hooked()"));
+        assert!(swap_chain_helper.contains(".hooked()"));
+        assert!(source.contains("command_queue.hooked()"));
+        assert!(source.contains("self.command_queue.native()"));
         assert!(source.contains("runtime.get_native_interface(&created)"));
         assert!(source.contains("self.hooked_swap_chain().Present"));
         assert!(source.contains("self.hooked_swap_chain().ResizeBuffers"));
