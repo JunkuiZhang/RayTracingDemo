@@ -4626,12 +4626,18 @@ impl Dx12Renderer {
 
     pub fn shutdown(&mut self) -> Result<()> {
         unsafe {
+            #[cfg(feature = "streamline-fg")]
+            self.suspend_frame_generation_for_reconfiguration()?;
             self.wait_for_gpu()?;
         }
         self.poll_pending_capture()
     }
 
     pub fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+        #[cfg(feature = "streamline-fg")]
+        if self.frame_generation.lifecycle().proxy_loaded() {
+            unsafe { self.suspend_frame_generation_for_reconfiguration()? };
+        }
         if width == 0 || height == 0 {
             self.minimized = true;
             eprintln!(
@@ -4991,6 +4997,8 @@ impl Dx12Renderer {
 
         #[cfg(feature = "streamline")]
         {
+            #[cfg(feature = "streamline-fg")]
+            unsafe { self.suspend_frame_generation_for_reconfiguration()? };
             let old = self.upscaler;
             let next = if self.denoiser == DenoiserBackend::DlssRayReconstruction {
                 old.next_ray_reconstruction_mode().ok_or_else(|| {
@@ -5096,6 +5104,8 @@ impl Dx12Renderer {
     /// replaced; the old generation keeps its bridge and descriptors until
     /// its last submitted fence is complete.
     pub fn cycle_denoiser(&mut self) -> Result<()> {
+        #[cfg(feature = "streamline-fg")]
+        unsafe { self.suspend_frame_generation_for_reconfiguration()? };
         #[cfg(feature = "streamline-rr")]
         let rr_loaded = self
             .streamline
@@ -6236,6 +6246,11 @@ impl Dx12Renderer {
     }
 
     #[cfg(not(feature = "streamline-fg"))]
+    pub fn frame_generation_state_name(&self) -> &'static str {
+        "unavailable"
+    }
+
+    #[cfg(not(feature = "streamline-fg"))]
     pub fn toggle_frame_generation(&mut self) -> Result<()> {
         Err(WindowsError::new(
             windows::core::HRESULT(0x80070057_u32 as i32),
@@ -7325,6 +7340,42 @@ impl Dx12Renderer {
         self.reset_history = true;
     }
 
+    #[cfg(feature = "streamline-fg")]
+    unsafe fn suspend_frame_generation_for_reconfiguration(&mut self) -> Result<()> {
+        let Some(runtime) = self.streamline.as_ref() else {
+            return Ok(());
+        };
+        let Some(viewport) = self.active_streamline_viewport.as_ref() else {
+            return Ok(());
+        };
+        let options = StreamlineRuntime::frame_generation_options(
+            self.active_generation.output_extent,
+            self.active_generation.render_extent,
+            FrameGenerationMode::Off,
+        );
+        unsafe { runtime.set_frame_generation_options(viewport, &options)? };
+        if let (Some(token), Some(viewport_id)) = (
+            self.fg_last_tags_token.as_ref(),
+            self.fg_last_tags_viewport,
+        ) {
+            unsafe { runtime.clear_frame_generation_tags(token, viewport_id)? };
+        }
+        if matches!(
+            self.frame_generation.lifecycle(),
+            FrameGenerationLifecycle::EnablingProxy | FrameGenerationLifecycle::OnProxy
+        ) {
+            self.frame_generation.suspend().map_err(|_error| {
+                streamline_error(
+                    "DLSS-G lifecycle suspend",
+                    crate::streamline::STATUS_INVALID_ARGUMENT,
+                )
+            })?;
+        }
+        self.fg_last_tags_token = None;
+        self.fg_last_tags_viewport = None;
+        Ok(())
+    }
+
     unsafe fn wait_for_frame(&self, frame_index: usize) -> Result<()> {
         let fence_value = self.frames[frame_index].fence_value;
         if fence_value != 0 && unsafe { self.fence.GetCompletedValue() } < fence_value {
@@ -7585,6 +7636,12 @@ fn require_raytracing_tier_1_1(device: &ID3D12Device) -> Result<String> {
 impl Drop for Dx12Renderer {
     fn drop(&mut self) {
         unsafe {
+            #[cfg(feature = "streamline-fg")]
+            if self.frame_generation.lifecycle().proxy_loaded() {
+                if let Err(error) = self.suspend_frame_generation_for_reconfiguration() {
+                    eprintln!("DLSS-G 退出前清理失败：{error}");
+                }
+            }
             let _ = self.wait_for_gpu();
             #[cfg(feature = "streamline")]
             self.reclaim_retired_generations();
