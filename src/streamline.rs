@@ -527,6 +527,8 @@ mod tests {
         assert!(bridge.contains("slDLSSGGetState"));
         assert!(bridge.contains("*out_native_interface = nullptr"));
         assert!(bridge.contains("slGetNativeInterface"));
+        assert!(bridge.contains("sl::PreferenceFlags::eAllowOTA"));
+        assert!(bridge.contains("sl::PreferenceFlags::eLoadDownloadedPlugins"));
         assert!(cmake.contains("option(STREAMLINE_ENABLE_FG"));
         assert!(build.contains("optional_feature"));
         assert!(build.contains("未知 optional_feature"));

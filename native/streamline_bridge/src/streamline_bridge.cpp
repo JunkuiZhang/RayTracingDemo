@@ -319,7 +319,11 @@ StreamlineBridgeStatus streamline_bridge_create(
         preferences.flags = sl::PreferenceFlags::eDisableCLStateTracking |
                             sl::PreferenceFlags::eDisableDebugText |
                             sl::PreferenceFlags::eUseManualHooking |
-                            sl::PreferenceFlags::eUseFrameBasedResourceTagging;
+                            sl::PreferenceFlags::eUseFrameBasedResourceTagging |
+                            // NVIDIA recommends OTA so new drivers can select
+                            // compatible signed NGX/Streamline revisions.
+                            sl::PreferenceFlags::eAllowOTA |
+                            sl::PreferenceFlags::eLoadDownloadedPlugins;
         preferences.featuresToLoad = features.data();
         // Build the list explicitly so RR and FG are independently opt-in;
         // truncating one optional feature from a shared tail could silently
