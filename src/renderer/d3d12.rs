@@ -196,23 +196,31 @@ struct StreamlineFactoryInterfaces {
 }
 
 impl StreamlineFactoryInterfaces {
-    fn new(native: IDXGIFactory6, proxy: Option<IDXGIFactory6>) -> Self {
+    #[cfg(not(feature = "streamline"))]
+    fn from_native(native: IDXGIFactory6) -> Self {
         Self {
             native: Some(native),
-            proxy,
+            proxy: None,
         }
     }
 
-    fn native(&self) -> &IDXGIFactory6 {
-        self.native
-            .as_ref()
-            .expect("native Streamline factory owner is alive")
+    #[cfg(feature = "streamline")]
+    fn from_linked_proxy(proxy: IDXGIFactory6) -> Self {
+        Self {
+            native: None,
+            proxy: Some(proxy),
+        }
     }
 
+    /// `sl.interposer.lib` replaces CreateDXGIFactory2, so Streamline builds
+    /// receive a proxy directly. Factory methods that are not hooks forward to
+    /// DXGI; swap-chain creation must deliberately stay on this proxy.
     fn hooked(&self) -> &IDXGIFactory6 {
-        self.proxy.as_ref().unwrap_or_else(|| self.native())
+        self.proxy
+            .as_ref()
+            .or(self.native.as_ref())
+            .expect("Streamline factory owner is alive")
     }
-
 }
 
 /// Owns the native application queue and the Streamline proxy returned by the
@@ -415,55 +423,26 @@ impl StreamlineRuntime {
         })
     }
 
-    /// Upgrade a COM interface immediately after creation for the manual
-    /// hooking path. The input owner is consumed exactly once; a successful
-    /// proxy result becomes the sole owner of the returned COM reference.
-    unsafe fn upgrade_interface_with_bridge<T: Interface>(
+    /// `sl.interposer.lib` returns proxies from the imported D3D12/DXGI create
+    /// functions. Unwrap one AddRef'd native owner before the runtime is fully
+    /// attached so normal renderer work never traverses Streamline hooks.
+    unsafe fn get_native_interface_with_bridge<T: Interface>(
         bridge: &crate::streamline::Bridge,
-        interface: T,
+        proxy: &T,
     ) -> Result<T> {
-        let original = interface.into_raw();
-        let mut upgraded = original;
-        let status = unsafe {
-            crate::streamline::streamline_bridge_upgrade_interface(
-                bridge.as_raw(),
-                &mut upgraded,
-            )
-        };
-        if status == crate::streamline::STATUS_ALREADY_UPGRADED {
-            return Ok(unsafe { T::from_raw(original) });
-        }
-        if status != crate::streamline::STATUS_OK {
-            unsafe { drop(T::from_raw(original)) };
-            return Err(streamline_error_with_detail(
-                "升级 Streamline manual-hooking interface",
-                status,
-                bridge.last_error(),
-            ));
-        }
-        if !std::ptr::eq(upgraded, original) {
-            unsafe { drop(T::from_raw(original)) };
-        }
-        Ok(unsafe { T::from_raw(upgraded.cast()) })
-    }
-
-    /// `slGetNativeInterface` returns a new AddRef. Construct exactly one Rust
-    /// owner from that returned reference; never derive a second owner from a
-    /// proxy's raw pointer.
-    unsafe fn get_native_interface<T: Interface>(&self, proxy: &T) -> Result<T> {
         let mut native = std::ptr::null_mut();
         let status = unsafe {
             crate::streamline::streamline_bridge_get_native_interface(
-                self.bridge.as_raw(),
+                bridge.as_raw(),
                 proxy.as_raw(),
                 &mut native,
             )
         };
         if status != crate::streamline::STATUS_OK {
             return Err(streamline_error_with_detail(
-                "获取 Streamline manual-hooking native interface",
+                "获取 Streamline linked-interposer native interface",
                 status,
-                self.bridge.last_error(),
+                bridge.last_error(),
             ));
         }
         if native.is_null() {
@@ -473,6 +452,13 @@ impl StreamlineRuntime {
             ));
         }
         Ok(unsafe { T::from_raw(native.cast()) })
+    }
+
+    /// `slGetNativeInterface` returns a new AddRef. Construct exactly one Rust
+    /// owner from that returned reference; never derive a second owner from a
+    /// proxy's raw pointer.
+    unsafe fn get_native_interface<T: Interface>(&self, proxy: &T) -> Result<T> {
+        unsafe { Self::get_native_interface_with_bridge(&self.bridge, proxy) }
     }
 
     fn reflex_supported(&self) -> bool {
@@ -1906,7 +1892,7 @@ impl Dx12Renderer {
             } else {
                 DXGI_CREATE_FACTORY_FLAGS(0)
             };
-            let native_factory: IDXGIFactory6 = match CreateDXGIFactory2(factory_flags) {
+            let created_factory: IDXGIFactory6 = match CreateDXGIFactory2(factory_flags) {
                 Ok(factory) => factory,
                 Err(error) if cfg!(debug_assertions) => {
                     eprintln!("DXGI 调试 Factory 不可用，将使用普通 Factory：{error}");
@@ -1916,27 +1902,25 @@ impl Dx12Renderer {
                 Err(error) => return Err(dx_error("创建 DXGI Factory", error)),
             };
             #[cfg(feature = "streamline")]
-            let factory_proxy = streamline_bridge
-                .as_ref()
-                .map(|bridge| {
-                    StreamlineRuntime::upgrade_interface_with_bridge(bridge, native_factory.clone())
-                })
-                .transpose()?;
+            let factory_interfaces =
+                StreamlineFactoryInterfaces::from_linked_proxy(created_factory);
             #[cfg(not(feature = "streamline"))]
-            let factory_proxy = None;
-            let factory_interfaces = StreamlineFactoryInterfaces::new(native_factory, factory_proxy);
-            let (native_device, adapter, gpu_name) =
-                create_hardware_device(factory_interfaces.native())
+            let factory_interfaces = StreamlineFactoryInterfaces::from_native(created_factory);
+            let (created_device, adapter, gpu_name) =
+                create_hardware_device(factory_interfaces.hooked())
                     .map_err(|error| dx_error("创建设备", error))?;
             #[cfg(feature = "streamline")]
-            let device_proxy = streamline_bridge
-                .as_ref()
-                .map(|bridge| {
-                    StreamlineRuntime::upgrade_interface_with_bridge(bridge, native_device.clone())
-                })
-                .transpose()?;
+            let (native_device, device_proxy) = if let Some(bridge) = streamline_bridge.as_ref() {
+                let native = StreamlineRuntime::get_native_interface_with_bridge(
+                    bridge,
+                    &created_device,
+                )?;
+                (native, Some(created_device))
+            } else {
+                (created_device, None)
+            };
             #[cfg(not(feature = "streamline"))]
-            let device_proxy = None;
+            let (native_device, device_proxy) = (created_device, None);
             let device_interfaces = StreamlineDeviceInterfaces::new(native_device, device_proxy);
             #[cfg(feature = "streamline")]
             let streamline = if let Some(bridge) = streamline_bridge {
@@ -2044,7 +2028,7 @@ impl Dx12Renderer {
                 height,
             );
             factory_interfaces
-                .native()
+                .hooked()
                 .MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER)
                 .map_err(|error| dx_error("设置窗口关联", error))?;
 
@@ -6991,17 +6975,18 @@ impl Drop for Dx12Renderer {
                 report_debug_messages(self.native_device());
             }
 
-            // Streamline proxy Release implementations still dispatch plugin
-            // destruction hooks. Release every proxy while the plugin manager
-            // is alive, but retain all native owners through slShutdown.
-            drop(self.swap_chain.proxy.take());
-            drop(self.command_queue.proxy.take());
-            drop(self.factory_interfaces.proxy.take());
-            drop(self.device_interfaces.proxy.take());
+            // NVIDIA requires slShutdown while every D3D12/DXGI interface is
+            // still alive. Feature plug-ins may retain references to both the
+            // interposer proxies and their native interfaces until shutdown.
             #[cfg(feature = "streamline")]
             if let Some(streamline) = self.streamline.take() {
                 streamline.shutdown_after_gpu();
             }
+
+            drop(self.swap_chain.proxy.take());
+            drop(self.command_queue.proxy.take());
+            drop(self.factory_interfaces.proxy.take());
+            drop(self.device_interfaces.proxy.take());
 
             // Native D3D12/DXGI objects outlive Streamline itself. Other
             // renderer resources keep their own native COM references until
@@ -7289,29 +7274,41 @@ mod tests {
     }
 
     #[test]
-    fn manual_hooking_interfaces_have_explicit_native_and_proxy_owners() {
+    fn linked_interposer_interfaces_have_explicit_native_and_proxy_owners() {
         let complete_source = include_str!("d3d12.rs");
         let source = &complete_source[..complete_source.find("#[cfg(test)]").unwrap()];
         assert!(source.contains("struct StreamlineDeviceInterfaces"));
         assert!(source.contains("struct StreamlineFactoryInterfaces"));
         assert!(source.contains("struct StreamlineCommandQueueInterfaces"));
         assert!(source.contains("struct SwapChainInterfaces"));
+        assert!(source.contains("unsafe fn get_native_interface_with_bridge<T: Interface>"));
         assert!(source.contains("unsafe fn get_native_interface<T: Interface>"));
+        assert!(source.contains(
+            "StreamlineFactoryInterfaces::from_linked_proxy(created_factory)"
+        ));
+        assert!(source.contains(
+            "get_native_interface_with_bridge(\n                    bridge,\n                    &created_device"
+        ));
         assert!(source.contains("runtime.get_native_interface(&created_command_queue)"));
+        assert!(!source.contains("upgrade_interface_with_bridge"));
         assert!(source.contains("drop(self.swap_chain.proxy.take())"));
         assert!(source.contains("drop(self.command_queue.proxy.take())"));
         assert!(source.contains("drop(self.factory_interfaces.proxy.take())"));
         assert!(source.contains("drop(self.device_interfaces.proxy.take())"));
         let drop_body = &source[source.find("impl Drop for Dx12Renderer").unwrap()..];
+        let shutdown = drop_body.find("streamline.shutdown_after_gpu()").unwrap();
+        let first_proxy_release = drop_body
+            .find("drop(self.swap_chain.proxy.take())")
+            .unwrap();
         let last_proxy_release = drop_body
             .find("drop(self.device_interfaces.proxy.take())")
             .unwrap();
-        let shutdown = drop_body.find("streamline.shutdown_after_gpu()").unwrap();
         let first_native_release = drop_body
             .find("drop(self.swap_chain.native.take())")
             .unwrap();
-        assert!(last_proxy_release < shutdown);
-        assert!(shutdown < first_native_release);
+        assert!(shutdown < first_proxy_release);
+        assert!(first_proxy_release < last_proxy_release);
+        assert!(last_proxy_release < first_native_release);
         assert!(!source.contains("self.streamline_swap_chain"));
         assert!(!source.contains("streamline_swap_chain: Option"));
         assert!(!source.contains("fn active_swap_chain"));
