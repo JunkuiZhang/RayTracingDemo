@@ -195,6 +195,12 @@ cargo run --release --features streamline-rr --locked -- --output-size 1280x720 
 或相机运动区域应显示非零运动。`specular-hit-distance` 仍用于检查备用距离，但 RR 不再提交该
 tag。详细短测见 [`docs/阶段11短测记录.md`](docs/阶段11短测记录.md)。
 
+Frame Generation 的 11G-A SDK/部署与 11G-B manual-hooking 交换链边界已经完成；当前仍默认关闭且
+尚未提交 FG 输入，所以不会生成中间帧。下一包是
+[`11G-C 输入、选项与生命周期`](docs/阶段11FrameGeneration-11G-C-输入选项与生命周期执行方案.md)：
+第一版固定 2x display，并把启动/F5、resize、最小化、资源 generation、null tag 和退出统一到显式
+状态机。正式 base/display FPS 与 generated/dropped 统计留在 11G-D。
+
 ### RTXPT-style stable planes（NRD/RR 默认路径）
 
 阶段 11 的 `stable-planes` 路径空间在理想反射/折射处分解路径，每像素最多
