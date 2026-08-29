@@ -484,6 +484,11 @@ impl StreamlineRuntime {
     }
 
     #[cfg(feature = "streamline-fg")]
+    fn frame_generation_supported(&self) -> bool {
+        self._support.fg_supported != 0
+    }
+
+    #[cfg(feature = "streamline-fg")]
     unsafe fn set_frame_generation_loaded(&self, loaded: bool) -> Result<()> {
         let status = unsafe {
             crate::streamline::streamline_bridge_fg_set_loaded(
@@ -1990,16 +1995,25 @@ impl Dx12Renderer {
             };
             #[cfg(feature = "streamline-fg")]
             if let Some(runtime) = streamline.as_ref() {
-                // The proxy device must create the application queue while
-                // DLSS-G is loaded. Unload before the first swap-chain hook so
-                // the default path cannot acquire FG's off-screen buffers.
-                runtime.set_frame_generation_loaded(false)?;
-                let loaded = runtime.frame_generation_loaded()?;
-                if loaded {
-                    return Err(streamline_error(
-                        "DLSS-G unload 复核失败",
-                        crate::streamline::STATUS_SDK_ERROR,
-                    ));
+                if runtime.frame_generation_supported() {
+                    // The proxy device must create the application queue while
+                    // DLSS-G is loaded. Unload before the first swap-chain hook
+                    // so the default path cannot acquire FG's off-screen
+                    // buffers. Unsupported adapters must not call
+                    // slSetFeatureLoaded: the SDK rejects even a disable
+                    // request with eErrorNoSupportedAdapterFound.
+                    runtime.set_frame_generation_loaded(false)?;
+                    let loaded = runtime.frame_generation_loaded()?;
+                    if loaded {
+                        return Err(streamline_error(
+                            "DLSS-G unload 复核失败",
+                            crate::streamline::STATUS_SDK_ERROR,
+                        ));
+                    }
+                } else {
+                    eprintln!(
+                        "DLSS-G unsupported; keeping frame generation unavailable and disabled"
+                    );
                 }
             }
             #[cfg(feature = "streamline")]
@@ -7308,6 +7322,9 @@ mod tests {
         let complete_source = include_str!("d3d12.rs");
         let source = &complete_source[..complete_source.find("#[cfg(test)]").unwrap()];
         let queue_creation = source.find(".CreateCommandQueue(&queue_description)").unwrap();
+        let support_guard = source
+            .find("if runtime.frame_generation_supported()")
+            .unwrap();
         let unload = source
             .find("runtime.set_frame_generation_loaded(false)")
             .unwrap();
@@ -7327,7 +7344,9 @@ mod tests {
         assert!(source.contains("self.hooked_swap_chain().ResizeBuffers"));
         assert!(source.contains("self.hooked_swap_chain().GetCurrentBackBufferIndex"));
         assert!(source.contains("self.hooked_swap_chain().GetBuffer"));
-        assert!(unload > queue_creation && unload < chain_creation);
+        assert!(source.contains("fn frame_generation_supported(&self) -> bool"));
+        assert!(queue_creation < support_guard);
+        assert!(support_guard < unload && unload < chain_creation);
         assert!(!source.contains("--frame-generation"));
         assert!(!source.contains("slDLSSGSetOptions"));
     }
