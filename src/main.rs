@@ -620,11 +620,17 @@ mod tests {
             panic!("realtime is the default command");
         };
         assert_eq!(config.frame_generation, realtime::FrameGenerationMode::Off);
-        let mut config = realtime::RealtimeConfig::default();
-        config.frame_generation = realtime::FrameGenerationMode::On;
+        let config = realtime::RealtimeConfig {
+            frame_generation: realtime::FrameGenerationMode::On,
+            ..realtime::RealtimeConfig::default()
+        };
         assert!(validate_frame_generation_request(&config).is_err());
-        config.reflex_mode = realtime::ReflexMode::On;
-        config.upscaler = upscaler::UpscalerMode::DlssQuality;
+        let config = realtime::RealtimeConfig {
+            frame_generation: realtime::FrameGenerationMode::On,
+            reflex_mode: realtime::ReflexMode::On,
+            upscaler: upscaler::UpscalerMode::DlssQuality,
+            ..realtime::RealtimeConfig::default()
+        };
         #[cfg(feature = "streamline-fg")]
         assert!(validate_frame_generation_request(&config).is_ok());
         #[cfg(not(feature = "streamline-fg"))]

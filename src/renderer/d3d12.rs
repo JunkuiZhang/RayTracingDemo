@@ -5508,16 +5508,16 @@ impl Dx12Renderer {
         self.command_queue.native()
     }
 
+    #[cfg(feature = "streamline-fg")]
     fn hooked_swap_chain(&self) -> &IDXGISwapChain3 {
-        #[cfg(feature = "streamline-fg")]
-        {
-            return self
-                .swap_chain
-                .as_ref()
-                .expect("swap chain is available outside its explicit recreation boundary")
-                .hooked();
-        }
-        #[cfg(not(feature = "streamline-fg"))]
+        self.swap_chain
+            .as_ref()
+            .expect("swap chain is available outside its explicit recreation boundary")
+            .hooked()
+    }
+
+    #[cfg(not(feature = "streamline-fg"))]
+    fn hooked_swap_chain(&self) -> &IDXGISwapChain3 {
         self.swap_chain.hooked()
     }
 
@@ -7637,10 +7637,10 @@ impl Drop for Dx12Renderer {
     fn drop(&mut self) {
         unsafe {
             #[cfg(feature = "streamline-fg")]
-            if self.frame_generation.lifecycle().proxy_loaded() {
-                if let Err(error) = self.suspend_frame_generation_for_reconfiguration() {
-                    eprintln!("DLSS-G 退出前清理失败：{error}");
-                }
+            if self.frame_generation.lifecycle().proxy_loaded()
+                && let Err(error) = self.suspend_frame_generation_for_reconfiguration()
+            {
+                eprintln!("DLSS-G 退出前清理失败：{error}");
             }
             let _ = self.wait_for_gpu();
             #[cfg(feature = "streamline")]
