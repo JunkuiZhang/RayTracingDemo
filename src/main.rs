@@ -108,12 +108,13 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                 | "--denoiser"
                 | "--upscaler"
                 | "--reflex-mode"
+                | "--frame-generation"
                 | "--streamline-application-id"
         )
     });
     if cpu_reference_requested && realtime_requested {
         return Err(
-            "--cpu-reference 不能与实时渲染选项（--model、--scene、--animate-model、--benchmark-seconds、--capture-output、--capture-after-spp、--debug-view、--atrous-mode、--output-size、--render-scale、--dynamic-resolution、--target-gpu-ms、--command-recording-mode、--acceleration-structure-mode、--path-space-mode、--denoiser、--upscaler、--reflex-mode、--streamline-application-id）同时使用"
+            "--cpu-reference 不能与实时渲染选项（--model、--scene、--animate-model、--benchmark-seconds、--capture-output、--capture-after-spp、--debug-view、--atrous-mode、--output-size、--render-scale、--dynamic-resolution、--target-gpu-ms、--command-recording-mode、--acceleration-structure-mode、--path-space-mode、--denoiser、--upscaler、--reflex-mode、--frame-generation、--streamline-application-id）同时使用"
                 .to_string(),
         );
     }
@@ -239,6 +240,10 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                     let value = arguments.next().ok_or("--reflex-mode 缺少模式")?;
                     config.reflex_mode = parse_reflex_mode(&value)?;
                 }
+                "--frame-generation" => {
+                    let value = arguments.next().ok_or("--frame-generation 缺少模式")?;
+                    config.frame_generation = parse_frame_generation_mode(&value)?;
+                }
                 "--streamline-application-id" => {
                     let value = arguments
                         .next()
@@ -287,6 +292,7 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
         if config.capture_output.is_none() && config.capture_after_spp.is_some() {
             return Err("--capture-after-spp 只能与 --capture-output 一起使用".to_string());
         }
+        validate_frame_generation_request(&config)?;
         return Ok(Command::Realtime(config));
     }
 
@@ -499,6 +505,57 @@ fn parse_reflex_mode(value: &str) -> Result<realtime::ReflexMode, String> {
     }
 }
 
+fn parse_frame_generation_mode(value: &str) -> Result<realtime::FrameGenerationMode, String> {
+    match value {
+        "off" => Ok(realtime::FrameGenerationMode::Off),
+        "on" => Ok(realtime::FrameGenerationMode::On),
+        _ => Err(format!(
+            "无效的 frame generation 模式：{value}（仅支持 off 或 on）"
+        )),
+    }
+}
+
+fn validate_frame_generation_request(config: &realtime::RealtimeConfig) -> Result<(), String> {
+    let mode = config.frame_generation.as_str();
+    if config.frame_generation == realtime::FrameGenerationMode::Off {
+        return Ok(());
+    }
+    if config.reflex_mode == realtime::ReflexMode::Off {
+        return Err(format!("--frame-generation {mode} 不能与 --reflex-mode off 同时使用"));
+    }
+    if !cfg!(feature = "streamline-fg") {
+        return Err(
+            format!("--frame-generation {mode} 需要使用 --features streamline-fg 构建；不会静默降级为 off")
+                .to_string(),
+        );
+    }
+    let reconstruction_available = if config.denoiser
+        == reconstruction::DenoiserBackend::DlssRayReconstruction
+    {
+        matches!(
+            config.upscaler,
+            upscaler::UpscalerMode::DlssQuality
+                | upscaler::UpscalerMode::DlssBalanced
+                | upscaler::UpscalerMode::DlssPerformance
+        )
+    } else {
+        matches!(
+            config.upscaler,
+            upscaler::UpscalerMode::Dlaa
+                | upscaler::UpscalerMode::DlssQuality
+                | upscaler::UpscalerMode::DlssBalanced
+                | upscaler::UpscalerMode::DlssPerformance
+        )
+    };
+    if !reconstruction_available {
+        return Err(
+            "--frame-generation {mode} 需要 DLSS/DLAA 或 DLSS RR reconstruction，native upscaler 没有可用 guides"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn print_help() {
     println!(
         "RayTracingDemo\n\n\
@@ -526,6 +583,7 @@ fn print_help() {
          --denoiser <后端>       重建后端：svgf、nrd-reblur 或 dlss-rr，默认 svgf；RR 未指定时使用 dlss-quality\n  \
          --upscaler <模式>       上采样：native、dlaa、dlss-quality、dlss-balanced、dlss-performance，默认 native\n  \
          --reflex-mode <模式>    Reflex：off、on 或 on-boost，默认 on；feature-off 时 unavailable\n  \
+         --frame-generation <模式> FG：off 或 on，默认 off；on 需要 streamline-fg 与 DLSS/RR guides\n  \
          --streamline-application-id <ID> 可选的 NVIDIA 分配 NGX application ID；默认使用内置 Project ID\n  \\
          --help, -h             显示帮助"
     );
@@ -541,6 +599,38 @@ mod tests {
         assert_eq!(parse_seed("42").unwrap(), 42);
         assert_eq!(parse_seed("0x2A").unwrap(), 42);
         assert!(parse_seed("0xGG").is_err());
+    }
+
+    #[test]
+    fn parses_frame_generation_mode_and_rejects_invalid_values() {
+        assert_eq!(
+            parse_frame_generation_mode("off").unwrap(),
+            realtime::FrameGenerationMode::Off
+        );
+        assert_eq!(
+            parse_frame_generation_mode("on").unwrap(),
+            realtime::FrameGenerationMode::On
+        );
+        assert!(parse_frame_generation_mode("auto").is_err());
+    }
+
+    #[test]
+    fn frame_generation_defaults_off_and_native_guides_are_rejected() {
+        let Command::Realtime(config) = parse_arguments(Vec::<String>::new()).unwrap() else {
+            panic!("realtime is the default command");
+        };
+        assert_eq!(config.frame_generation, realtime::FrameGenerationMode::Off);
+        let mut config = realtime::RealtimeConfig::default();
+        config.frame_generation = realtime::FrameGenerationMode::On;
+        assert!(validate_frame_generation_request(&config).is_err());
+        config.reflex_mode = realtime::ReflexMode::On;
+        config.upscaler = upscaler::UpscalerMode::DlssQuality;
+        #[cfg(feature = "streamline-fg")]
+        assert!(validate_frame_generation_request(&config).is_ok());
+        #[cfg(not(feature = "streamline-fg"))]
+        assert!(validate_frame_generation_request(&config)
+            .unwrap_err()
+            .contains("streamline-fg"));
     }
 
     #[test]

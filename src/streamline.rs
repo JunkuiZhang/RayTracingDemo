@@ -3,7 +3,7 @@
 use std::{ffi::c_void, ptr::NonNull};
 
 pub const SDK_VERSION: &str = "2.12.0";
-pub const ABI_VERSION: u32 = 6;
+pub const ABI_VERSION: u32 = 7;
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_INVALID_ARGUMENT: u32 = 1;
 pub const STATUS_SDK_ERROR: u32 = 2;
@@ -13,6 +13,7 @@ pub const STATUS_UNSUPPORTED: u32 = 5;
 pub const STATUS_ALREADY_UPGRADED: u32 = 6;
 pub const FRAME_GENERATION_OFF: u32 = 0;
 pub const FRAME_GENERATION_ON: u32 = 1;
+pub const RESOURCE_LIFECYCLE_VALID_UNTIL_PRESENT: u32 = 1;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -162,6 +163,7 @@ pub struct FrameGenerationOptions {
     pub color_buffer_format: u32,
     pub mvec_buffer_format: u32,
     pub depth_buffer_format: u32,
+    pub hud_less_buffer_format: u32,
 }
 
 #[repr(C)]
@@ -202,6 +204,7 @@ pub struct Constants {
     pub motion_vectors_3d: u32,
     pub reset: u32,
     pub motion_vectors_jittered: u32,
+    pub rendering_game_frames: u32,
 }
 
 #[repr(C)]
@@ -431,7 +434,7 @@ mod tests {
         assert_eq!(size_of::<RrOptions>(), 204);
         assert_eq!(size_of::<RrOptimalSettings>(), 36);
         assert_eq!(size_of::<RrState>(), 16);
-        assert_eq!(size_of::<FrameGenerationOptions>(), 52);
+        assert_eq!(size_of::<FrameGenerationOptions>(), 56);
         assert_eq!(offset_of!(FrameGenerationOptions, flags), 16);
         assert_eq!(offset_of!(FrameGenerationOptions, color_width), 32);
         assert_eq!(size_of::<FrameGenerationState>(), 40);
@@ -439,14 +442,14 @@ mod tests {
             offset_of!(FrameGenerationState, estimated_vram_usage_bytes),
             24
         );
-        assert_eq!(size_of::<Constants>(), 364);
+        assert_eq!(size_of::<Constants>(), 368);
         assert_eq!(size_of::<ResourceTag>(), 48);
         assert_eq!(size_of::<ReflexState>(), 20);
     }
 
     #[test]
     fn invalid_bridge_statuses_are_stable() {
-        assert_eq!(ABI_VERSION, 6);
+        assert_eq!(ABI_VERSION, 7);
         assert_eq!(STATUS_OK, 0);
         assert_eq!(STATUS_INVALID_ARGUMENT, 1);
         assert_eq!(size_of::<RawBridge>(), 0);

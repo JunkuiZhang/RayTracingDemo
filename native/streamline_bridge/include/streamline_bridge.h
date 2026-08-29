@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define STREAMLINE_BRIDGE_ABI_VERSION UINT32_C(6)
+#define STREAMLINE_BRIDGE_ABI_VERSION UINT32_C(7)
 
 typedef struct StreamlineBridge StreamlineBridge;
 
@@ -168,6 +168,7 @@ typedef struct StreamlineBridgeFrameGenerationOptions {
     uint32_t color_buffer_format;
     uint32_t mvec_buffer_format;
     uint32_t depth_buffer_format;
+    uint32_t hud_less_buffer_format;
 } StreamlineBridgeFrameGenerationOptions;
 
 typedef struct StreamlineBridgeFrameGenerationState {
@@ -204,6 +205,7 @@ typedef struct StreamlineBridgeConstants {
     uint32_t motion_vectors_3d;
     uint32_t reset;
     uint32_t motion_vectors_jittered;
+    uint32_t rendering_game_frames;
 } StreamlineBridgeConstants;
 
 typedef struct StreamlineBridgeResourceTag {

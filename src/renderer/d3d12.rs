@@ -1208,6 +1208,7 @@ fn dlss_streamline_constants(
         motion_vectors_3d: 0,
         reset: input.reset,
         motion_vectors_jittered: input.motion_vectors_jittered,
+        rendering_game_frames: 0,
     }
 }
 
@@ -1241,6 +1242,22 @@ fn streamline_resource_tag(
         left: 0,
         width: extent.width,
         height: extent.height,
+    }
+}
+
+#[cfg(feature = "streamline")]
+fn streamline_null_resource_tag(buffer_type: u32) -> crate::streamline::ResourceTag {
+    crate::streamline::ResourceTag {
+        struct_size: size_of::<crate::streamline::ResourceTag>() as u32,
+        abi_version: crate::streamline::ABI_VERSION,
+        resource: std::ptr::null_mut(),
+        state: 0,
+        buffer_type,
+        lifecycle: crate::streamline::RESOURCE_LIFECYCLE_VALID_UNTIL_PRESENT,
+        top: 0,
+        left: 0,
+        width: 0,
+        height: 0,
     }
 }
 

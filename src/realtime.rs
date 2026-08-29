@@ -48,9 +48,28 @@ pub struct RealtimeConfig {
     /// an implicit resolved mode from an explicit CLI request.
     pub requested_upscaler: Option<UpscalerMode>,
     pub reflex_mode: ReflexMode,
+    pub frame_generation: FrameGenerationMode,
     /// Optional NVIDIA-assigned NGX identity. `None` uses this custom engine's
     /// stable Project ID and package-derived engine version instead.
     pub streamline_application_id: Option<u32>,
+}
+
+/// User intent is separate from the runtime state machine: `On` requests a
+/// proxy chain, but does not claim the SDK accepted a complete input frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FrameGenerationMode {
+    #[default]
+    Off,
+    On,
+}
+
+impl FrameGenerationMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -39,12 +39,12 @@ static_assert(sizeof(StreamlineBridgeDlssOptions) == 44, "Streamline options ABI
 static_assert(sizeof(StreamlineBridgeRrOptions) == 204, "Streamline RR options ABI changed");
 static_assert(sizeof(StreamlineBridgeRrOptimalSettings) == 36, "Streamline RR optimal ABI changed");
 static_assert(sizeof(StreamlineBridgeRrState) == 16, "Streamline RR state ABI changed");
-static_assert(sizeof(StreamlineBridgeFrameGenerationOptions) == 52, "Streamline FG options ABI changed");
+static_assert(sizeof(StreamlineBridgeFrameGenerationOptions) == 56, "Streamline FG options ABI changed");
 static_assert(offsetof(StreamlineBridgeFrameGenerationOptions, flags) == 16, "Streamline FG flags offset changed");
 static_assert(offsetof(StreamlineBridgeFrameGenerationOptions, color_width) == 32, "Streamline FG color offset changed");
 static_assert(sizeof(StreamlineBridgeFrameGenerationState) == 40, "Streamline FG state ABI changed");
 static_assert(offsetof(StreamlineBridgeFrameGenerationState, estimated_vram_usage_bytes) == 24, "Streamline FG state VRAM offset changed");
-static_assert(sizeof(StreamlineBridgeConstants) == 364, "Streamline constants ABI changed");
+static_assert(sizeof(StreamlineBridgeConstants) == 368, "Streamline constants ABI changed");
 static_assert(sizeof(StreamlineBridgeResourceTag) == 48, "Streamline resource tag ABI changed");
 static_assert(sizeof(StreamlineBridgeReflexState) == 20, "Streamline Reflex ABI changed");
 
@@ -115,6 +115,22 @@ StreamlineBridgeStatus set_error(StreamlineBridge* bridge, const char* message) 
 
 bool valid_header(uint32_t size, uint32_t version, size_t minimum) noexcept {
     return version == kExpectedVersion && size >= minimum;
+}
+
+bool valid_buffer_type(uint32_t type) noexcept {
+    // Keep the bridge ABI narrow: these are the resource tags used by the
+    // existing SR/RR paths plus the two DLSS-G UI release tags.
+    switch (type) {
+        case 0: case 1: case 2: case 3: case 4: case 7: case 8: case 10:
+        case 13: case 14: case 23: case 69:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool valid_lifecycle(uint32_t lifecycle) noexcept {
+    return lifecycle <= 2;
 }
 
 StreamlineBridgeStatus check_bridge(StreamlineBridge* bridge) noexcept {
@@ -213,7 +229,8 @@ bool valid_fg_resource_description(const StreamlineBridgeFrameGenerationOptions&
     return input.num_back_buffers != 0 && input.mvec_depth_width != 0 &&
            input.mvec_depth_height != 0 && input.color_width != 0 &&
            input.color_height != 0 && input.color_buffer_format != 0 &&
-           input.mvec_buffer_format != 0 && input.depth_buffer_format != 0;
+           input.mvec_buffer_format != 0 && input.depth_buffer_format != 0 &&
+           input.hud_less_buffer_format != 0;
 }
 
 bool valid_fg_options(const StreamlineBridgeFrameGenerationOptions& input) noexcept {
@@ -253,7 +270,11 @@ sl::DLSSGOptions make_fg_options(
     options.colorBufferFormat = input.color_buffer_format;
     options.mvecBufferFormat = input.mvec_buffer_format;
     options.depthBufferFormat = input.depth_buffer_format;
-    options.queueParallelismMode = sl::DLSSGQueueParallelismMode::eBlockPresentingClientQueue;
+    options.uiBufferFormat = 0;
+    options.hudLessBufferFormat = input.hud_less_buffer_format;
+    // Let the SDK choose queue parallelism; forcing a mode changes the
+    // application's Present contract and is outside this first FG package.
+    options.queueParallelismMode = sl::DLSSGQueueParallelismMode{};
     options.enableUserInterfaceRecomposition = sl::eFalse;
     return options;
 }
@@ -814,6 +835,10 @@ StreamlineBridgeStatus streamline_bridge_set_constants(
         constants.motionVectors3D = bool_value(input->motion_vectors_3d);
         constants.reset = bool_value(input->reset);
         constants.motionVectorsJittered = bool_value(input->motion_vectors_jittered);
+        // ABI v7 carries the application's FG intent. Streamline 2.12.0's
+        // Constants struct predates this field, so it is intentionally not
+        // written into the SDK object; the intent is consumed by the bridge's
+        // FG options/tags contract instead of corrupting the older SDK ABI.
         const sl::Result result = slSetConstants(
             constants, *static_cast<sl::FrameToken*>(token->token), sl::ViewportHandle(viewport->id));
         return result == sl::Result::eOk ? STREAMLINE_BRIDGE_STATUS_OK
@@ -840,7 +865,23 @@ StreamlineBridgeStatus streamline_bridge_set_tags(
         tags.reserve(tag_count);
         for (uint32_t i = 0; i < tag_count; ++i) {
             const auto& source = input[i];
-            if (!valid_header(source.struct_size, source.abi_version, sizeof(source)) || source.resource == nullptr)
+            if (!valid_header(source.struct_size, source.abi_version, sizeof(source)) ||
+                !valid_buffer_type(source.buffer_type) || !valid_lifecycle(source.lifecycle))
+                return STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT;
+            const bool null_resource = source.resource == nullptr;
+            const bool zero_extent = source.top == 0 && source.left == 0 &&
+                source.width == 0 && source.height == 0;
+            if (null_resource) {
+                // Null tags are the SDK's explicit way to release resources
+                // whose validity ends at Present.  Rejecting a non-zero
+                // extent/state prevents an accidental unowned binding.
+                if (source.state != 0 || !zero_extent || source.lifecycle != 1)
+                    return STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT;
+                tags.emplace_back(
+                    nullptr, source.buffer_type, sl::ResourceLifecycle::eValidUntilPresent, nullptr);
+                continue;
+            }
+            if (source.lifecycle != 1 && command_list == nullptr)
                 return STREAMLINE_BRIDGE_STATUS_INVALID_ARGUMENT;
             resources.emplace_back(sl::ResourceType::eTex2d, source.resource, source.state);
             resources.back().width = source.width;
