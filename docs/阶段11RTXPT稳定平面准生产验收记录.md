@@ -302,3 +302,8 @@ review 随后因 nested 内层液体黑块将本轮标记为阻塞。
 nested dielectric TIR 的最终人工复核，公开 PBR/大模型、PIX UI capture 和 Debug GPU Validation。
 静止 Cornell 场景的灯边缘、墙缝、接地和玻璃稳定性此前已经由用户连续观察确认改善；该观察不
 替代尚未执行的通用场景验收。
+
+> 2026-09-10 后续修正：DLSS 4.5 Preset F 的人工复验确认 stable RR 仍需输出空间
+> `RrPrimaryVisibility`/`RrBoundaryResolve`。它们现已从迁移期 legacy patch 改为所有 RR producer
+> 共用的轮廓/虚拟表面稳定契约；本记录中的旧 pass mask 与历史数值只代表当时提交，不应继续作为
+> 当前 active-pass 预期。

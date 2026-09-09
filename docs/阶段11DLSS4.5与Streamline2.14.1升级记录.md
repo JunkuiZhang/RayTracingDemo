@@ -10,6 +10,8 @@
 - `debb138 feat(stage11): adopt DLSS 4.5 RR preset F`
 - `1bd4994 fix(streamline): scale depth separation for compact scenes`
 - `586d246 fix(path-tracing): keep area-light emission one-sided`
+- `bd93000 fix(scene): restore visible Cornell light surface`
+- `7481df0 fix(stage11): stabilize stable-plane RR boundaries`
 
 结论：项目已从 Streamline 2.12.0 整体升级到 2.14.1，并显式选择本版本新增且作为默认值的
 DLSS Ray Reconstruction `Preset F`。目标机日志确认实际加载 Streamline 2.14.1、
@@ -103,10 +105,16 @@ benchmark gate 的最终单行 JSON。这与既有 NVIDIA NGX telemetry shutdown
   `40.0` 默认值。本项目 near plane 为 `0.001`，该默认值会把约 4 cm 内的深度层视作未充分分离；
   Cornell 灯和顶面只相隔约 3.3 mm。ABI v9 现在显式提交 `1.0`，保留约 1 mm 的线性深度余量。
 - NEE 把 Cornell 面积灯作为朝下的单面发光体，但 BSDF 命中路径曾用 face-forward normal 和
-  `abs(dot(...))` 接受背面发光。灯又被错误标记为 `double_sided`，导致近顶面背侧样本注入非物理能量。
-  现在 procedural winding 明确朝向室内，材质与 BSDF-hit MIS 都使用相同的单面发光支持域。
+  `abs(dot(...))` 接受背面发光。现在 NEE 与 BSDF-hit MIS 都使用固定的室内朝向 `-Y` 发射半球；
+  薄灯卡仍保持 `double_sided`，因为该材质位只负责 DXR 命中可见性，不能同时表达发射方向。
 
-修复后的 Preset F 仍需在静止和连续移动中人工复验，重点观察：
+修复后首次人工复验又暴露了两个独立问题：把薄灯卡改为单面会受当前 DXR face classification
+影响而显示成黑色；stable-plane RR 则直接把 RR output 送入 ToneMap，绕过了输出分辨率边界历史。
+前者已通过拆分“可见双面”和“发光单面”修复；后者已把 `RrPrimaryVisibility` 与
+`RrBoundaryResolve` 提升为所有 RR producer 共用的最终边界契约。该 resolve 只在半径 2 内的真实
+轮廓或虚拟镜面/玻璃表面使用有界历史，其他像素精确直通，不是全屏时域模糊。
+
+上述第二轮修复后的 Preset F 仍需在静止和连续移动中人工复验，重点观察：
 
 - 面积灯边缘、Cornell 三面接缝和细小遮挡边界；
 - 理想镜面、玻璃内部像、物体与地板接触区；

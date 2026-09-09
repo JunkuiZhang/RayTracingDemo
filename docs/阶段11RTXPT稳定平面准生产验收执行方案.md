@@ -71,7 +71,9 @@ RrStableMerge
 - `NrdStableComposeN`：只包住对应 plane 的 compose dispatch；
 - `RrStableMerge`：只包住 stable RR input shader；外层 `RrInputAdapter` 继续作为兼容聚合项；
 - legacy NRD 保持现有聚合 pass，不错误激活 `NrdStable*`；
-- stable RR 中旧的 `RrPrimaryVisibility`/`RrBoundaryResolve` 仍必须 inactive。
+- stable RR 必须启用 `RrPrimaryVisibility`/`RrBoundaryResolve`。它们是与 path-space producer 解耦的
+  输出空间边界契约：仅稳定分类出的轮廓和虚拟表面，内部像素直通。原先要求 inactive 的迁移期
+  约束已被 2026-09-10 的 Preset F 人工边界复验取代。
 
 D3D12 timestamp 可以逻辑嵌套，因此 `PathTrace` 包含 Build/Fill、NRD 聚合项包含其三个子项是
 允许的。禁止把父项改成子项相加；父项必须继续用自己的首尾 timestamp，保留 barrier 与 SDK

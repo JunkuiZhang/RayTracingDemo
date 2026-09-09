@@ -20,8 +20,10 @@
 - DLSS Ray Reconstruction（RR）接收所有稳定平面的合并 radiance，以及由这些平面混合出的
   单套可信 guide；
 - 用带优先级的显式介质列表处理闭合玻璃和嵌套介质，不再依赖 front-face 猜测“空气/玻璃”；
-- 当前 `stage11_rr_primary_visibility.hlsl` 和 `stage11_rr_boundary_resolve.hlsl` 只作为迁移期
-  对照，稳定平面通过验收后删除玻璃/镜面的专用修补分支。
+- `stage11_rr_primary_visibility.hlsl` 和 `stage11_rr_boundary_resolve.hlsl` 不再承担路径空间着色，
+  但保留为 RR 统一的输出空间边界契约：前者生成无 jitter 的输出分辨率可见性，后者只在真实轮廓
+  与虚拟镜面/玻璃表面使用有界历史，非边界像素严格直通。2026-09-10 的 Preset F 人工复验确认，
+  stable-plane radiance 正确并不能替代这个最终的显示边界稳定步骤。
 
 这不是 Frame Generation 工作包。11G 的 proxy swap chain、FG 输入和统计保持独立，不能与
 路径空间重构混在同一提交中。

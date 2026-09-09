@@ -364,6 +364,15 @@ function Test-ActivePassContract(
     if ($Consumer -eq "nrd-stable-planes" -and $null -ne $rrMerge) {
         Add-Failure $Failures "rr_stable_merge must be null for stable NRD"
     }
+    foreach ($passName in @("rr_primary_visibility", "rr_boundary_resolve")) {
+        $pass = Get-PropertyPath $Json "passes.$passName"
+        if ($Consumer -eq "rr-stable-planes" -and $null -eq $pass) {
+            Add-Failure $Failures "$passName must be active for stable RR"
+        }
+        if ($Consumer -eq "nrd-stable-planes" -and $null -ne $pass) {
+            Add-Failure $Failures "$passName must be null for stable NRD"
+        }
+    }
 }
 
 function Test-CounterContract([object]$Json, [System.Collections.Generic.List[string]]$Failures) {
@@ -708,7 +717,7 @@ function Invoke-SelfTest {
         dlss_rr = @{ compiled = $true }
         passes = @{ total = @{ p95_ms = 1 }; stable_plane = @{ build = @{ p95_ms = 1 }; fill = @(@{}, @{}, @{}) }
             nrd_stable = @{ prep = @($null, $null, $null); denoise = @($null, $null, $null); compose = @($null, $null, $null) }
-            rr_stable_merge = @{} }
+            rr_stable_merge = @{}; rr_primary_visibility = @{}; rr_boundary_resolve = @{} }
         upscaler = @{ dlss_optimal = @{ optimal_render_width = 320; optimal_render_height = 180 } }
         memory = @{ status = "available"; budget_bytes = 1 }
         reflex = @{ token_count = 1; sleep_count = 1; present_common_count = 1; marker_counts = @{ render_submit_start = 1; render_submit_end = 1; present_start = 1; present_end = 1 } }
@@ -718,6 +727,7 @@ function Invoke-SelfTest {
     Assert-Reject "RR profile mismatch" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.path_space.consumer = "nrd-stable-planes"; Test-BenchmarkContract ([pscustomobject]@{ exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1; json = $bad; json_error = $null }) $case $f }
     Assert-Reject "requested path-space mismatch" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.path_space.requested = "auto"; Test-BenchmarkContract ([pscustomobject]@{ exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1; json = $bad; json_error = $null }) $case $f }
     Assert-Reject "missing active RR pass" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.passes.rr_stable_merge = $null; Test-BenchmarkContract ([pscustomobject]@{ exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1; json = $bad; json_error = $null }) $case $f }
+    Assert-Reject "missing stable RR boundary pass" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.passes.rr_boundary_resolve = $null; Test-BenchmarkContract ([pscustomobject]@{ exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1; json = $bad; json_error = $null }) $case $f }
     Assert-Reject "hidden NRD cost" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.passes.nrd_stable.prep = @(@{}, @{}, @{}); Test-BenchmarkContract ([pscustomobject]@{ exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1; json = $bad; json_error = $null }) $case $f }
     Assert-Reject "missing nested benchmark counters" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.path_space.counters = $null; Test-BenchmarkContract ([pscustomobject]@{ exit_code = 0; timed_out = $false; stdout_nonempty_lines = 1; json = $bad; json_error = $null }) $case $f }
     Assert-Reject "bad histogram sum" { param($f) $bad = $goodJson | ConvertTo-Json -Depth 40 -Compress | ConvertFrom-Json; $bad.path_space.counters.plane_count_histogram[1] = 1; Test-CounterContract $bad $f }
