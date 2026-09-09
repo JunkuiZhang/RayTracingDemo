@@ -1706,11 +1706,11 @@ impl RenderResourceGeneration {
                 };
 
                 let rr_tonemap_srvs = [
-                    if self.stable_planes.is_some() {
-                        &rr.output_hdr
-                    } else {
-                        &rr.boundary_history[current_index]
-                    },
+                    // Every RR producer terminates in the same output-space
+                    // boundary contract. Interior pixels are exact pass-through;
+                    // only classified silhouettes and virtual surfaces use the
+                    // bounded history written by RrBoundaryResolve.
+                    &rr.boundary_history[current_index],
                     // RR reconstructs the stochastic HDR lobes; directly
                     // visible emission is stabilized independently and added
                     // exactly once by ToneMap's RR-only composite path.

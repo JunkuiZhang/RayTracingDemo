@@ -1764,7 +1764,6 @@ fn active_gpu_passes(
     path: ReconstructionPath,
     dlss_sr_active: bool,
     rr_active: bool,
-    rr_boundary_active: bool,
     stable_plane_active: bool,
 ) -> [bool; profiler::PASS_COUNT] {
     let mut active = [false; profiler::PASS_COUNT];
@@ -1812,8 +1811,11 @@ fn active_gpu_passes(
         ReconstructionPath::DlssRayReconstruction => {
             active[GpuPass::RrInputAdapter as usize] = rr_active;
             active[GpuPass::RrEvaluate as usize] = rr_active;
-            active[GpuPass::RrPrimaryVisibility as usize] = rr_boundary_active;
-            active[GpuPass::RrBoundaryResolve as usize] = rr_boundary_active;
+            // Output-space visibility and the targeted boundary history are
+            // RR invariants. They stabilize only classified silhouettes and
+            // virtual surfaces, independent of the path-space producer.
+            active[GpuPass::RrPrimaryVisibility as usize] = rr_active;
+            active[GpuPass::RrBoundaryResolve as usize] = rr_active;
             active[GpuPass::RrStableMerge as usize] = rr_active && stable_plane_active;
         }
     }
@@ -3362,7 +3364,7 @@ impl Dx12Renderer {
             let output_groups_x = output_extent.width.div_ceil(8);
             let output_groups_y = output_extent.height.div_ceil(8);
             #[cfg(feature = "streamline-rr")]
-            if rr_path && self.active_path_space == ActivePathSpace::Legacy {
+            if rr_path {
                 {
                     let rr = self
                         .active_generation
@@ -4079,7 +4081,7 @@ impl Dx12Renderer {
             }
 
             #[cfg(feature = "streamline-rr")]
-            if rr_active && self.active_path_space == ActivePathSpace::Legacy {
+            if rr_active {
                 {
                     let rr = self
                         .active_generation
@@ -4349,7 +4351,6 @@ impl Dx12Renderer {
                     ReconstructionPath::from_backend(self.denoiser),
                     dlss_active,
                     rr_active,
-                    rr_active && self.active_path_space == ActivePathSpace::Legacy,
                     self.active_path_space.uses_stable_planes(),
                 ),
             );
@@ -4530,7 +4531,6 @@ impl Dx12Renderer {
                 ReconstructionPath::from_backend(self.denoiser),
                 dlss_active,
                 rr_active,
-                rr_active && self.active_path_space == ActivePathSpace::Legacy,
                 self.active_path_space.uses_stable_planes(),
             );
             self.frames[frame_index].stable_counter_pending =
@@ -8179,7 +8179,7 @@ mod tests {
 
     #[test]
     fn explicit_stable_svgf_reports_its_diagnostic_gpu_passes() {
-        let active = active_gpu_passes(ReconstructionPath::Svgf, false, false, false, true);
+        let active = active_gpu_passes(ReconstructionPath::Svgf, false, false, true);
         for pass in [
             GpuPass::StablePlaneBuild,
             GpuPass::StablePlaneFill0,
@@ -8190,6 +8190,23 @@ mod tests {
         }
         assert!(!active[GpuPass::RrStableMerge as usize]);
         assert!(!active[GpuPass::NrdStablePrep0 as usize]);
+    }
+
+    #[test]
+    fn stable_rr_keeps_output_space_boundary_stabilization_active() {
+        let active = active_gpu_passes(
+            ReconstructionPath::DlssRayReconstruction,
+            true,
+            true,
+            true,
+        );
+        for pass in [
+            GpuPass::RrPrimaryVisibility,
+            GpuPass::RrBoundaryResolve,
+            GpuPass::RrStableMerge,
+        ] {
+            assert!(active[pass as usize]);
+        }
     }
 
     #[test]
