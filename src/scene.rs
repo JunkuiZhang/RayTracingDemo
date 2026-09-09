@@ -524,8 +524,8 @@ mod tests {
             .find(|material| material.kind == MaterialKind::Emissive)
             .expect("Cornell scene owns one visible area-light material");
         assert!(
-            !area_light.double_sided,
-            "the sampled area light must not emit through its ceiling-facing back side"
+            area_light.double_sided,
+            "the thin area-light card must remain visible regardless of DXR face classification"
         );
         let area_light_mesh = scene
             .primitives

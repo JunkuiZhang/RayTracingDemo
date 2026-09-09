@@ -32,10 +32,10 @@ fn create_cornell(include_right_glass: bool) -> SceneAsset {
             thin_surface: false,
             absorption_coefficient: [0.0; 3],
             kind: MaterialKind::Emissive,
-            // The procedural winding faces the room. Keep emission one-sided
-            // so BSDF-hit light samples use the same support as explicit NEE;
-            // the back of this near-ceiling quad must never inject energy.
-            double_sided: false,
+            // Keep the thin light card visible from either DXR face. Emission
+            // sidedness is a separate shading contract: NEE and BSDF-hit
+            // emission both use the fixed room-facing -Y light normal.
+            double_sided: true,
             base_color_texture: None,
             metallic_roughness_texture: None,
             normal_texture: None,
