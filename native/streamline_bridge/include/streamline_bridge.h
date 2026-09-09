@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define STREAMLINE_BRIDGE_ABI_VERSION UINT32_C(8)
+#define STREAMLINE_BRIDGE_ABI_VERSION UINT32_C(9)
 
 typedef struct StreamlineBridge StreamlineBridge;
 
@@ -206,6 +206,9 @@ typedef struct StreamlineBridgeConstants {
     uint32_t motion_vectors_3d;
     uint32_t reset;
     uint32_t motion_vectors_jittered;
+    // Streamline linear-depth units. Expose this instead of silently inheriting
+    // the SDK default so small-world renderers can separate nearby surfaces.
+    float min_relative_linear_depth_object_separation;
 } StreamlineBridgeConstants;
 
 typedef struct StreamlineBridgeResourceTag {

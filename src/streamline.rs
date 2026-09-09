@@ -3,7 +3,7 @@
 use std::{ffi::c_void, ptr::NonNull};
 
 pub const SDK_VERSION: &str = "2.14.1";
-pub const ABI_VERSION: u32 = 8;
+pub const ABI_VERSION: u32 = 9;
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_INVALID_ARGUMENT: u32 = 1;
 pub const STATUS_SDK_ERROR: u32 = 2;
@@ -206,6 +206,7 @@ pub struct Constants {
     pub motion_vectors_3d: u32,
     pub reset: u32,
     pub motion_vectors_jittered: u32,
+    pub min_relative_linear_depth_object_separation: f32,
 }
 
 #[repr(C)]
@@ -443,14 +444,14 @@ mod tests {
             offset_of!(FrameGenerationState, estimated_vram_usage_bytes),
             24
         );
-        assert_eq!(size_of::<Constants>(), 372);
+        assert_eq!(size_of::<Constants>(), 376);
         assert_eq!(size_of::<ResourceTag>(), 48);
         assert_eq!(size_of::<ReflexState>(), 20);
     }
 
     #[test]
     fn invalid_bridge_statuses_are_stable() {
-        assert_eq!(ABI_VERSION, 8);
+        assert_eq!(ABI_VERSION, 9);
         assert_eq!(STATUS_OK, 0);
         assert_eq!(STATUS_INVALID_ARGUMENT, 1);
         assert_eq!(size_of::<RawBridge>(), 0);

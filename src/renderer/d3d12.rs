@@ -1394,6 +1394,8 @@ fn dlss_streamline_constants(
         motion_vectors_3d: 0,
         reset: input.reset,
         motion_vectors_jittered: input.motion_vectors_jittered,
+        min_relative_linear_depth_object_separation:
+            DLSS_MIN_LINEAR_DEPTH_OBJECT_SEPARATION,
     }
 }
 
@@ -1598,6 +1600,12 @@ const TONEMAP_INPUT_RR_HDR: u32 = 3;
 const DLSS_GUIDE_MODE_DISABLED: u32 = 0;
 const DLSS_GUIDE_MODE_SR: u32 = 1;
 const DLSS_GUIDE_MODE_RR: u32 = 2;
+// Streamline's default is 40 linear-depth units. With this renderer's 1 mm
+// near plane that merges surfaces separated by roughly 4 cm, including the
+// Cornell lamp and ceiling. One unit keeps a 1 mm safety margin while allowing
+// the SDK to classify the intentionally close, separately shaded surfaces.
+#[cfg(feature = "streamline")]
+const DLSS_MIN_LINEAR_DEPTH_OBJECT_SEPARATION: f32 = 1.0;
 // Streamline 2.14.1 makes Preset F its latest/default DLSS 4.5 RR transformer.
 // Pin the evaluated model explicitly so a later OTA cannot silently change the
 // benchmark and capture baseline; changing this value requires a fresh IQ gate.
@@ -8130,6 +8138,39 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[cfg(feature = "streamline")]
+    #[test]
+    fn streamline_constants_separate_small_scene_depth_layers() {
+        let camera = CameraPose {
+            position: [0.0, 0.0, -2.666_666_7],
+            yaw: 0.0,
+            pitch: 0.0,
+        };
+        let render_extent = Extent2D {
+            width: 853,
+            height: 480,
+        };
+        let input = DlssFrameInput::from_cameras(
+            camera,
+            camera,
+            render_extent,
+            render_extent,
+            Extent2D {
+                width: 1280,
+                height: 720,
+            },
+            1,
+            false,
+        );
+
+        let constants = dlss_streamline_constants(&input, camera);
+        assert_eq!(
+            constants.min_relative_linear_depth_object_separation,
+            DLSS_MIN_LINEAR_DEPTH_OBJECT_SEPARATION
+        );
+        assert!(constants.min_relative_linear_depth_object_separation < 40.0);
+    }
 
     #[test]
     fn camera_constants_match_the_sixteen_dword_root_constant_contract() {

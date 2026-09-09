@@ -55,7 +55,7 @@ static_assert(offsetof(StreamlineBridgeFrameGenerationOptions, flags) == 16, "St
 static_assert(offsetof(StreamlineBridgeFrameGenerationOptions, color_width) == 32, "Streamline FG color offset changed");
 static_assert(sizeof(StreamlineBridgeFrameGenerationState) == 40, "Streamline FG state ABI changed");
 static_assert(offsetof(StreamlineBridgeFrameGenerationState, estimated_vram_usage_bytes) == 24, "Streamline FG state VRAM offset changed");
-static_assert(sizeof(StreamlineBridgeConstants) == 372, "Streamline constants ABI changed");
+static_assert(sizeof(StreamlineBridgeConstants) == 376, "Streamline constants ABI changed");
 static_assert(sizeof(StreamlineBridgeResourceTag) == 48, "Streamline resource tag ABI changed");
 static_assert(sizeof(StreamlineBridgeReflexState) == 20, "Streamline Reflex ABI changed");
 
@@ -850,6 +850,8 @@ StreamlineBridgeStatus streamline_bridge_set_constants(
         constants.motionVectors3D = bool_value(input->motion_vectors_3d);
         constants.reset = bool_value(input->reset);
         constants.motionVectorsJittered = bool_value(input->motion_vectors_jittered);
+        constants.minRelativeLinearDepthObjectSeparation =
+            input->min_relative_linear_depth_object_separation;
         const sl::Result result = slSetConstants(
             constants, *static_cast<sl::FrameToken*>(token->token), sl::ViewportHandle(viewport->id));
         return result == sl::Result::eOk ? STREAMLINE_BRIDGE_STATUS_OK
