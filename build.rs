@@ -238,7 +238,7 @@ fn validate_streamline_sdk(output_directory: &Path, rr_enabled: bool, fg_enabled
     let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let sdk = dependency_path(
         "STREAMLINE_SOURCE_DIR",
-        &repository_root.join("external/streamline-v2.12.0"),
+        &repository_root.join("external/streamline-v2.14.1"),
     );
     validate_streamline_lock(repository_root, &sdk, rr_enabled, fg_enabled);
     let required = [
@@ -387,8 +387,8 @@ fn validate_streamline_lock(
             .unwrap_or_else(|error| panic!("读取 {} 失败：{error}", lock_path.display())),
     )
     .unwrap_or_else(|error| panic!("解析 {} 失败：{error}", lock_path.display()));
-    if lock.get("version").and_then(serde_json::Value::as_str) != Some("2.12.0") {
-        panic!("Streamline lock version 必须固定为 2.12.0");
+    if lock.get("version").and_then(serde_json::Value::as_str) != Some("2.14.1") {
+        panic!("Streamline lock version 必须固定为 2.14.1");
     }
     for group in ["files", "licenses"] {
         let entries = lock
@@ -461,7 +461,7 @@ fn build_streamline_bridge(output_directory: &Path, rr_enabled: bool, fg_enabled
     let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let sdk = dependency_path(
         "STREAMLINE_SOURCE_DIR",
-        &repository_root.join("external/streamline-v2.12.0"),
+        &repository_root.join("external/streamline-v2.14.1"),
     );
     let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
     let build_type = if profile == "release" {

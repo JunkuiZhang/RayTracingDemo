@@ -440,7 +440,7 @@ StreamlineBridgeStatus streamline_bridge_query_support(
     out_support->rr_supported = out_support->rr_result == 0;
     out_support->fg_supported = out_support->fg_result == 0;
     out_support->adapter_luid = bridge->adapter_luid;
-    std::strncpy(out_support->sdk_version, "2.12.0", sizeof(out_support->sdk_version) - 1);
+    std::strncpy(out_support->sdk_version, "2.14.1", sizeof(out_support->sdk_version) - 1);
     return STREAMLINE_BRIDGE_STATUS_OK;
 }
 

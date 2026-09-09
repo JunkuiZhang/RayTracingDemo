@@ -2,7 +2,7 @@
 
 use std::{ffi::c_void, ptr::NonNull};
 
-pub const SDK_VERSION: &str = "2.12.0";
+pub const SDK_VERSION: &str = "2.14.1";
 pub const ABI_VERSION: u32 = 8;
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_INVALID_ARGUMENT: u32 = 1;
@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn locks_streamline_version() {
-        assert_eq!(SDK_VERSION, "2.12.0");
+        assert_eq!(SDK_VERSION, "2.14.1");
     }
 
     #[test]

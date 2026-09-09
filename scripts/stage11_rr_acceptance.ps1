@@ -215,7 +215,7 @@ namespace Stage11Acceptance.Native {
 }
 
 function Get-StreamlineSdkEvidence([string[]]$ExecutablePaths) {
-    $sdkPath = Join-Path $repoRoot "external/streamline-v2.12.0"
+    $sdkPath = Join-Path $repoRoot "external/streamline-v2.14.1"
     $lockPath = Join-Path $repoRoot "third_party/streamline/version.lock.json"
     $lock = $null
     if (Test-Path -LiteralPath $lockPath) {
@@ -326,7 +326,7 @@ function Get-StreamlineSdkFailures(
     [string]$ExpectedFlavor
 ) {
     $failures = [System.Collections.Generic.List[string]]::new()
-    if ([string]$Evidence.version -ne "2.12.0" -or [string]$Evidence.tag -ne "v2.12.0") {
+    if ([string]$Evidence.version -ne "2.14.1" -or [string]$Evidence.tag -ne "v2.14.1") {
         $failures.Add("Streamline lock identity is unavailable or unexpected")
     }
     $common = @(
@@ -918,8 +918,8 @@ function Invoke-SelfTest {
         })
     }
     $runtimeEvidence = [pscustomobject]@{
-        version = "2.12.0"
-        tag = "v2.12.0"
+        version = "2.14.1"
+        tag = "v2.14.1"
         dlls = @($runtimeDlls)
     }
     $runtimeExecutables = [pscustomobject]@{

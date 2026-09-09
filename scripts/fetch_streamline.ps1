@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $lockPath = Join-Path $root 'third_party\streamline\version.lock.json'
 $lock = Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json
-$target = Join-Path $root 'external\streamline-v2.12.0'
+$target = Join-Path $root 'external\streamline-v2.14.1'
 
 function Assert-RelativePath([string]$path) {
     if ([string]::IsNullOrWhiteSpace($path) -or [IO.Path]::IsPathRooted($path) -or $path.Replace('\','/') -match '(^|/)\.\.(/|$)') {
@@ -43,8 +43,8 @@ function Test-VerifiedTree([string]$directory) {
 function Assert-ReleaseUrl {
     $uri = [Uri]$lock.asset_url
     if ($uri.Scheme -ne 'https' -or $uri.Host -ne 'github.com' -or
-        $uri.AbsolutePath -notmatch '/NVIDIA-RTX/Streamline/releases/download/v2\.12\.0/') {
-        throw "asset_url 必须是官方 GitHub v2.12.0 release URL：$($lock.asset_url)"
+        $uri.AbsolutePath -notmatch '/NVIDIA-RTX/Streamline/releases/download/v2\.14\.1/') {
+        throw "asset_url 必须是官方 GitHub v2.14.1 release URL：$($lock.asset_url)"
     }
     if ([IO.Path]::GetFileName($uri.AbsolutePath) -ne $lock.asset_name) {
         throw "asset_name 与 asset_url 不一致"
