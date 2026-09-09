@@ -524,8 +524,22 @@ mod tests {
             .find(|material| material.kind == MaterialKind::Emissive)
             .expect("Cornell scene owns one visible area-light material");
         assert!(
-            area_light.double_sided,
-            "the sampled area light must also remain primary-ray visible"
+            !area_light.double_sided,
+            "the sampled area light must not emit through its ceiling-facing back side"
+        );
+        let area_light_mesh = scene
+            .primitives
+            .iter()
+            .find(|primitive| primitive.name == "area light")
+            .expect("Cornell scene owns one area-light mesh");
+        let position =
+            |index: usize| glam::Vec3::from_array(area_light_mesh.vertices[index].position);
+        let geometric_normal = (position(1) - position(0))
+            .cross(position(2) - position(0))
+            .normalize();
+        assert!(
+            geometric_normal.dot(glam::Vec3::NEG_Y) > 0.999,
+            "the one-sided area-light winding must face the Cornell interior"
         );
     }
 

@@ -1720,6 +1720,8 @@ mod tests {
         );
         assert!(!shader.contains("TraceRay(Scene, RAY_FLAG_NONE"));
         assert!(shader.contains("if (!sampledTransmission && dot(normal, direction) <= 0.0)"));
+        assert!(shader.contains("emissive *= emissionCosine > 0.0 ? 1.0 : 0.0"));
+        assert!(!shader.contains("abs(dot(normal, -WorldRayDirection()))"));
     }
 
     fn split_first_bounce(

@@ -32,13 +32,10 @@ fn create_cornell(include_right_glass: bool) -> SceneAsset {
             thin_surface: false,
             absorption_coefficient: [0.0; 3],
             kind: MaterialKind::Emissive,
-            // This mesh is both the sampled area light and its visible lamp
-            // surface. Keep it camera-visible from the Cornell interior even
-            // if the imported winding convention classifies that side as a
-            // back face; otherwise primary rays expose the near-coplanar
-            // ceiling hotspot behind it and turn 1-SPP direct-light variance
-            // into an unstable fake lamp edge.
-            double_sided: true,
+            // The procedural winding faces the room. Keep emission one-sided
+            // so BSDF-hit light samples use the same support as explicit NEE;
+            // the back of this near-ceiling quad must never inject energy.
+            double_sided: false,
             base_color_texture: None,
             metallic_roughness_texture: None,
             normal_texture: None,

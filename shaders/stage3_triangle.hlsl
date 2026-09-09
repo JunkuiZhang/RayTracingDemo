@@ -1243,12 +1243,19 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
 
     if (kind == 3u)
     {
+        // This renderer samples the Cornell emitter as a one-sided area light.
+        // Use that same support for BSDF-hit emission: the shading normal is
+        // face-forwarded and therefore cannot identify a hit on the back side.
+        float emissionCosine = max(
+            0.0,
+            dot(float3(0, -1, 0), -WorldRayDirection()));
+        emissive *= emissionCosine > 0.0 ? 1.0 : 0.0;
         float weight = 1.0;
-        if (payload.depth > 0 && payload.lastPdf > 0.0)
+        if (emissionCosine > 0.0 && payload.depth > 0 && payload.lastPdf > 0.0)
         {
             const float lightArea = 0.25;
             float lightPdf = RayTCurrent() * RayTCurrent()
-                / max(0.0001, abs(dot(normal, -WorldRayDirection())) * lightArea);
+                / max(0.0001, emissionCosine * lightArea);
             float bsdfSquared = payload.lastPdf * payload.lastPdf;
             weight = bsdfSquared / max(bsdfSquared + lightPdf * lightPdf, 1.0e-7);
         }
@@ -1899,12 +1906,16 @@ void LegacyClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttri
 
     if (kind == 3u)
     {
+        float emissionCosine = max(
+            0.0,
+            dot(float3(0, -1, 0), -WorldRayDirection()));
+        emissive *= emissionCosine > 0.0 ? 1.0 : 0.0;
         float weight = 1.0;
-        if (payload.depth > 0 && payload.lastPdf > 0.0)
+        if (emissionCosine > 0.0 && payload.depth > 0 && payload.lastPdf > 0.0)
         {
             const float lightArea = 0.25;
             float lightPdf = RayTCurrent() * RayTCurrent()
-                / max(0.0001, abs(dot(normal, -WorldRayDirection())) * lightArea);
+                / max(0.0001, emissionCosine * lightArea);
             float bsdfSquared = payload.lastPdf * payload.lastPdf;
             weight = bsdfSquared / (bsdfSquared + lightPdf * lightPdf);
         }
