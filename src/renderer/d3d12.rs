@@ -1152,7 +1152,7 @@ impl StreamlineRuntime {
                 self.bridge.last_error(),
             ));
         }
-        // Do not call slAllocateResources here. Its v2.12.0 API has no frame
+        // Do not call slAllocateResources here. The locked Streamline API has no frame
         // token and therefore looks up frame 0, which is incompatible with our
         // frame-based tags. The first evaluate is the documented lazy-allocation
         // path and consumes the correct token/constants/tags atomically.
@@ -1598,11 +1598,11 @@ const TONEMAP_INPUT_RR_HDR: u32 = 3;
 const DLSS_GUIDE_MODE_DISABLED: u32 = 0;
 const DLSS_GUIDE_MODE_SR: u32 = 1;
 const DLSS_GUIDE_MODE_RR: u32 = 2;
-// Streamline 2.12's latest transformer. A bounded 121..128 static-frame A/B
-// against eDefault and preset D selected E for substantially lower low-frequency
-// RR variation. Pinning it also keeps image quality reproducible across OTA.
+// Streamline 2.14.1 makes Preset F its latest/default DLSS 4.5 RR transformer.
+// Pin the evaluated model explicitly so a later OTA cannot silently change the
+// benchmark and capture baseline; changing this value requires a fresh IQ gate.
 #[cfg(feature = "streamline-rr")]
-const DLSS_RR_RENDER_PRESET: u32 = 5; // DLSSDPreset::ePresetE
+const DLSS_RR_RENDER_PRESET: u32 = 6; // DLSSDPreset::ePresetF
 
 fn dlss_guide_mode(dlss_sr_active: bool, rr_active: bool) -> u32 {
     debug_assert!(!(dlss_sr_active && rr_active));
@@ -4672,11 +4672,10 @@ impl Dx12Renderer {
             .map(|viewport| viewport.viewport.id);
         #[cfg(not(feature = "streamline"))]
         let viewport_id = None;
-        let streamline_sdk_version = if cfg!(feature = "streamline") {
-            Some("2.12.0".to_string())
-        } else {
-            None
-        };
+        #[cfg(feature = "streamline")]
+        let streamline_sdk_version = Some(crate::streamline::SDK_VERSION.to_string());
+        #[cfg(not(feature = "streamline"))]
+        let streamline_sdk_version = None;
 
         Ok(PendingCapture {
             readback,
@@ -8322,6 +8321,7 @@ mod tests {
         assert_eq!(rr.quality_preset, DLSS_RR_RENDER_PRESET);
         assert_eq!(rr.balanced_preset, DLSS_RR_RENDER_PRESET);
         assert_eq!(rr.performance_preset, DLSS_RR_RENDER_PRESET);
+        assert_eq!(DLSS_RR_RENDER_PRESET, 6, "DLSS 4.5 RR must pin Preset F");
     }
 
     #[cfg(feature = "streamline-rr")]

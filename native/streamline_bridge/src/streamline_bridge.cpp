@@ -24,6 +24,17 @@
 #endif
 #include <sl_pcl.h>
 #include <sl_reflex.h>
+#include <sl_version.h>
+
+// Keep the compiled bridge and the Rust-side lock on the same Streamline ABI.
+// A stale include path must fail at compile time instead of loading mixed SDK
+// binaries and reporting an apparently valid runtime version.
+static_assert(SL_VERSION_MAJOR == 2 && SL_VERSION_MINOR == 14 && SL_VERSION_PATCH == 1,
+              "Streamline bridge must be built against SDK 2.14.1");
+#if STREAMLINE_ENABLE_RR
+static_assert(static_cast<uint32_t>(sl::DLSSDPreset::ePresetF) == 6,
+              "DLSS RR Preset F numeric ABI changed");
+#endif
 
 static_assert(sizeof(StreamlineBridgeInitDesc) == 64, "Streamline init ABI changed");
 static_assert(offsetof(StreamlineBridgeInitDesc, enable_dlss_fg) == 24, "Streamline init FG offset changed");
