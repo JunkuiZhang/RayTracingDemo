@@ -6,7 +6,34 @@
 
 基线提交：`6263fb3 fix(streamline): allow signed OTA compatibility updates`
 
-状态：READY FOR LUNA；只实施 11G-C，完成后停止并交给 Codex review
+状态：IMPLEMENTED；Codex review 代码修复完成，真实 generated-frame smoke 通过前不得进入 11G-D
+
+Review 修复提交：`58d7cd6 fix(stage11): harden frame generation integration`。默认、Streamline、
+Streamline+FG、Streamline+RR+FG 的单元/桥接短矩阵分别通过 176/6、186/6、189/6、195/6。
+RTX 4060 Laptop 的短时失焦 smoke 得到 `status=0 actual_presented=1 focused=0 warmup=0`，且 SDK
+明确记录失焦暂停；这证明误超时已修复，但不冒充 `actual_presented>=2` 的聚焦人工验收证据。
+
+11G-C 呈现策略：`bIsVsyncSupportAvailable` 只是 SDK/驱动能力位，不能证明当前窗口已经处于
+Independent Flip。11G-C 尚未提供独立的 VSync/IFLIP 策略，因此 FG 链加载期间固定使用
+`SyncInterval=0`，FG 关闭时维持原有 `SyncInterval=1`。后续若加入用户可控 VSync，必须同时
+验证 FrameView PresentMode/IFLIP，不能仅凭该能力位自动开启。
+
+VSync off 不是只把 `Present` 的 interval 改为 0：必须先用
+`IDXGIFactory5::CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING)` 查询能力，并在交换链创建和
+每次 `ResizeBuffers` 时保留 `DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING`，随后才可在 `Present(0, ...)`
+传入 `DXGI_PRESENT_ALLOW_TEARING`。三处必须共享同一契约；否则 Streamline 内部补齐 present flag
+时会遇到一个未 opt-in 的交换链，可能令 proxy Present 失败或卡住。
+
+短测曾连续得到 `numFramesActuallyPresented=1`。开启 SDK 文件日志后，Streamline 明确报告
+`DLSS-G disabled: window not focused`：失焦是驱动主动暂停插帧，不是集成失败。窗口失焦期间仍查询
+state，但不消耗 120 个 application Present 的 warm-up 预算；重新聚焦后继续确认。只有窗口聚焦且
+连续 120 个完整 Present 仍未观测到至少 2 帧时才判为失败。不能用硬编码 60 Hz Reflex limiter 掩盖
+这个状态；帧率策略应留给后续显示刷新率/用户上限设计。
+
+设置环境变量 `RAY_TRACING_STREAMLINE_LOG`（值可为空）可让 Release 构建在可执行文件目录生成
+`sl.log`，便于复核驱动侧暂停原因；默认 Release 保持安静。SDK 日志还要求中心针孔相机显式提交
+`cameraPinholeOffset=(0,0)`，并建议用 null backbuffer resource + 全输出 extent 明确 full-frame FG
+区域。本实现已同时满足这两项，避免把默认 invalid sentinel 或 0×0 backbuffer extent 留给 SDK 猜测。
 
 ## 1. 当前基线与本包目标
 
@@ -44,12 +71,14 @@ PresentMon、完整人工切换矩阵和最终验收属于 11G-E。
 
 - 每个 application render frame 只取得一个 `FrameToken`；生成帧不取得 token，不执行 render、相机、
   动画、路径追踪、SPP、history 或 profiler pass。
-- 同一 frame/viewport 的 common constants 只调用一次。FG 必需的
-  `Constants::renderingGameFrames` 必须由桥接层显式赋值，不能继续依赖 SDK 默认值。
+- 同一 frame/viewport 的 common constants 只调用一次。锁定的 Streamline v2.12.0
+  `include/sl_consts.h` 已没有旧文档片段中的 `Constants::renderingGameFrames`；不能修改 SDK 布局或在
+  bridge ABI 中提供一个被静默丢弃的假字段。是否正在渲染有效游戏帧由本版本的 FG options/tag
+  契约表达：无完整 guides、暂停、debug view、resize/minimize 时必须 options-off 并清空 tags。
 - `eDepth`、`eMotionVectors` 和 `eHUDLessColor` 使用 `eValidUntilPresent`。在其资源被重用、resize、
   generation/viewport 被替换、FG 关闭或 Streamline shutdown 前，必须以同 frame token 提交 null
   tag，释放 Streamline 持有的引用。
-- 全分辨率渲染时不 tag backbuffer；proxy Present 已知道 backbuffer。项目无 GPU HUD，必须清空
+- 用 null resource 的 backbuffer tag 显式提供全输出 extent；proxy Present 已知道资源 owner。项目无 GPU HUD，必须清空
   `eUIColorAndAlpha` 与 `eUIAlpha` stale tag，并保持
   `enableUserInterfaceRecomposition=false`，不能创建无意义的全尺寸透明 UI 纹理。
 - `slDLSSGSetOptions` 在 Present 所在线程、目标 Present 之前调用。应用只调用一次 proxy
@@ -109,7 +138,7 @@ DLSS-G 是否 loaded：
 
 - 不做 11G-D 的完整 application/display/generated/dropped FPS 统计与 JSON schema；
 - 不做 Dynamic Multi Frame Generation，`numFramesToGenerate` 永远为 1；
-- 不加入 GPU UI、ImGui、UI mask 或 backbuffer subrect；
+- 不加入 GPU UI、ImGui、UI mask 或非全屏 backbuffer subrect；
 - 不修改 RR/NRD/SVGF、stable planes、路径采样、曝光、ToneMap 数学或 DLSS preset；
 - 不新增 FG depth/motion/color 复制资源；
 - 不用窗口 FPS、options-on、proxy pointer 或窗口观感单独证明 FG 生效；
@@ -119,7 +148,7 @@ DLSS-G 是否 loaded：
 - 不运行 30/600/1800 秒长测，单个测试/进程外层 timeout 不超过 60 秒；
 - 不提前进入 11G-D/E 或阶段 12。
 
-## 5. 工作包 C1：配置、ABI v7 与窄桥接契约
+## 5. 工作包 C1：配置、ABI v8 与窄桥接契约
 
 ### 5.1 强类型配置
 
@@ -146,14 +175,11 @@ FrameGenerationMode::{Off, On}
 先在纯配置函数中验证静态组合，再在 device attach 后验证真实 `fg_supported`。不要把这些条件散落
 在构造函数和 F5 handler 中。
 
-### 5.2 ABI 从 v6 升到 v7
+### 5.2 ABI 从 v6 升到 v8
 
-在 C/Rust 两侧同步升到 7，并只追加字段，保留既有字段 offset：
+在 C/Rust 两侧同步升到 7，并只追加 HUD-less format，保留既有字段 offset：
 
 ```text
-StreamlineBridgeConstants
-  + rendering_game_frames: uint32
-
 StreamlineBridgeFrameGenerationOptions
   + hud_less_buffer_format: uint32
 ```
@@ -192,13 +218,13 @@ on 与带 estimate 的 get-state 必须验证完整 resource description；off �
 
 ### 5.4 common constants
 
-`dlss_streamline_constants` 设置 `rendering_game_frames = 1`。最小化、无 Present 或没有有效 guides 时
-不创建 frame，因此不提交一份假的 `renderingGameFrames=true` constants。不要为了 FG 第二次调用
-`slSetConstants`；FG 与 SR/RR 必须复用现有一次调用。
+FG 与 SR/RR 必须复用现有每 frame/viewport 唯一一次 `slSetConstants`。不要为了 FG 第二次提交
+constants，也不要依据已从 v2.12.0 实际头文件删除的 `renderingGameFrames` 成员手工扩展 SDK 对象。
+最小化或没有有效 guides 时不 Present，并通过 options-off/null tags 表达暂停。
 
 建议提交：
 
-`feat(stage11): add frame generation config and ABI v7`
+`feat(stage11): add frame generation config and ABI v8`
 
 ## 6. 工作包 C2：唯一生命周期状态机与 chain 重建
 
@@ -300,7 +326,7 @@ specular motion，不新增副本。
 2. `display_output` 保持 `COPY_SOURCE`；
 3. 用 tracked state 创建三个 `eValidUntilPresent` tag；
 4. 同次调用追加 `eUIColorAndAlpha`、`eUIAlpha` 的 null tag；
-5. full-frame 模式不提交 backbuffer tag；
+5. full-frame 模式提交 null backbuffer resource + 全输出 extent，不重复持有 swap-chain buffer；
 6. 调用 `slSetTagForFrame` 时使用本帧唯一 token、active reconstruction viewport 和当前 command list；
 7. 在 Present 返回前，不再把 `display_output` 切回 UAV，也不重用 depth/motion；下一 application
    frame 在第一次写入前由现有 tracker 正常转回目标状态。
@@ -319,7 +345,7 @@ display_output: COPY_SOURCE -> UNORDERED_ACCESS（Present 前）
 每个有效 application frame：
 
 1. 获取一次 frame token，并按现有 Reflex/PCL 顺序开始 frame；
-2. 用同 token/viewport 调用一次 common constants，包含 `renderingGameFrames=true`；
+2. 用同 token/viewport 调用一次 v2.12.0 实际 `sl::Constants`；
 3. 记录 SR/RR evaluate、ToneMap、swap-chain copy 和 FG tags；
 4. Close/Execute application command list；
 5. `RenderSubmitEnd`；
@@ -420,8 +446,8 @@ resize 入口。不要从 window callback 并发调用 Streamline/DXGI；所有�
 
 至少覆盖：
 
-1. C/Rust ABI 均为 v7，追加字段 offset/size 一致，旧字段 offset 不变；
-2. `rendering_game_frames` 映射到 `sl::Constants::renderingGameFrames`；
+1. C/Rust ABI 均为 v8，`cameraPinholeOffset` 后的新版 layout 与 size 一致，不再接受旧 v7 layout；
+2. C/Rust constants ABI 与锁定的 v2.12.0 `sl_consts.h` 一致，不存在被 bridge 静默丢弃的字段；
 3. HUD-less format 映射到 `DLSSGOptions::hudLessBufferFormat`；
 4. on options 固定 1 个 generated frame、UI recomposition=false、D3D12 默认 queue mode；
 5. null tag 合法、out/错误契约正确，全 null 允许 null command list；
@@ -504,7 +530,7 @@ HAGS、驱动、显示链或 SDK support 不满足时记录真实 external block
 
 不要 squash，建议 4 个提交：
 
-1. `feat(stage11): add frame generation config and ABI v7`
+1. `feat(stage11): add frame generation config and ABI v8`
    - 强类型 CLI、组合验证、constants/HUD-less/null-tag ABI 与测试；
 2. `feat(stage11): add frame generation lifecycle state machine`
    - 状态机、startup/F5、chain 重建与显式 idle 边界；
@@ -526,20 +552,22 @@ docs/阶段11FrameGeneration-11G-C-输入选项与生命周期执行方案.md
 review 修复已经完成，不要重新设计 linked interposer，不要再次 slUpgradeInterface，不要改 SDK lock、
 下载脚本、DLL feature-set 部署或 build.rs。
 
-实现默认 off 的 FrameGenerationMode、--frame-generation off|on 和交互 F5。将 bridge ABI 升到 v7，
-补齐 Constants::renderingGameFrames、DLSSGOptions::hudLessBufferFormat，并让 frame-based resource tag
-支持 NVIDIA 要求的 null-tag 释放。使用单一显式状态机管理 startup、F5、suspend/resume、fault；不要
-用多个漂移 bool。
+实现默认 off 的 FrameGenerationMode、--frame-generation off|on 和交互 F5。将 bridge ABI 升到 v8，
+补齐 DLSSGOptions::hudLessBufferFormat 和 `Constants::cameraPinholeOffset`，并让 frame-based resource
+tag 支持 NVIDIA 要求的 null-tag 释放与 null backbuffer extent。不要向 v2.12.0 实际
+`sl::Constants` 添加头文件中不存在的成员。使用单一显式状态机管理
+startup、F5、suspend/resume、fault；不要用多个漂移 bool。
 
 FG 只复用已有 DLSS SR/RR depth、motion 和 ToneMap 后 output-resolution display_output；不要新增输入
-副本。三个输入都用 eValidUntilPresent，同次清空 UIColorAndAlpha/UIAlpha，full-frame 不 tag
-backbuffer。tag 必须在 ToneMap 与 swap-chain copy 记录后、Close 前提交，资源 state 来自 tracker。
+副本。三个输入都用 eValidUntilPresent，同次清空 UIColorAndAlpha/UIAlpha，并以 null resource +
+全输出 extent 标记 full-frame backbuffer。tag 必须在 ToneMap 与 swap-chain copy 记录后、Close 前提交，资源 state 来自 tracker。
 live tags 存在时 display_output 在 Present 前必须保持 COPY_SOURCE，下一 application frame再转 UAV。
 
 同一 application frame 只取得一个 token、只提交一次 common constants、一次 PresentStart/End 和一次
 proxy Present。FG options-on 在 Present 线程、完整 tags 之后、目标 Present 之前；第一版固定只生成
 1 个中间帧。generated frame 不运行任何 render/camera/animation/SPP/history。每次 Present 后只做
-健康状态查询；至少输出一次 status=0 且 numFramesActuallyPresented>=2 的真实确认，但不要提前实现
+健康状态查询；失焦期间不得消耗 warm-up 预算，聚焦后至少输出一次 status=0 且
+numFramesActuallyPresented>=2 的真实确认。不得用硬编码 Reflex limiter 掩盖失焦，也不要提前实现
 11G-D 的正式 FPS/JSON 累计统计。
 
 F5 off 必须 options-off/null tags/wait/release chain/unload/recreate；startup-on 直接保持 loaded 创建
