@@ -8,6 +8,8 @@
 
 - `25bf5ae build(stage11): upgrade Streamline to 2.14.1`
 - `debb138 feat(stage11): adopt DLSS 4.5 RR preset F`
+- `1bd4994 fix(streamline): scale depth separation for compact scenes`
+- `586d246 fix(path-tracing): keep area-light emission one-sided`
 
 结论：项目已从 Streamline 2.12.0 整体升级到 2.14.1，并显式选择本版本新增且作为默认值的
 DLSS Ray Reconstruction `Preset F`。目标机日志确认实际加载 Streamline 2.14.1、
@@ -61,6 +63,8 @@ Authenticode 签名和许可文件。C++ bridge 还会在编译期检查 SDK 必
 | `cargo build --release --locked --features streamline-rr,streamline-fg` | PASS |
 | `scripts/stage11_rr_acceptance.ps1 -SelfTest` | PASS |
 | `scripts/fetch_streamline.ps1` | PASS：lock、hash、签名和许可 |
+| 修复后 `cargo test --all-targets --features streamline-rr --locked` | PASS：193 + 6 |
+| 修复后 `cargo build --release --features streamline-rr,streamline-fg --locked` | PASS |
 
 仓库级 `cargo fmt --all -- --check` 仍会报告大量本次升级前已经存在的格式差异。本次没有执行全局
 自动格式化，以免把无关代码混入 SDK 升级提交；这属于单独的格式债务，不是上述测试失败。
@@ -90,14 +94,28 @@ benchmark gate 的最终单行 JSON。这与既有 NVIDIA NGX telemetry shutdown
 
 ### 5.2 RR 人工画质
 
-需要在静止和连续移动中人工复验 Preset F，重点观察：
+首次 Preset F 人工复验为 **FAIL**：静止/移动画面仍有边界抖动，并且面积灯左侧顶面出现错误的
+分区亮度。相同现象在 FG off/on 下都存在，因此不能归因于 Frame Generation。
+
+排查确认了两个应先修正的输入根因：
+
+- bridge 此前没有暴露 `sl::Constants::minRelativeLinearDepthObjectSeparation`，因而继承 SDK 的
+  `40.0` 默认值。本项目 near plane 为 `0.001`，该默认值会把约 4 cm 内的深度层视作未充分分离；
+  Cornell 灯和顶面只相隔约 3.3 mm。ABI v9 现在显式提交 `1.0`，保留约 1 mm 的线性深度余量。
+- NEE 把 Cornell 面积灯作为朝下的单面发光体，但 BSDF 命中路径曾用 face-forward normal 和
+  `abs(dot(...))` 接受背面发光。灯又被错误标记为 `double_sided`，导致近顶面背侧样本注入非物理能量。
+  现在 procedural winding 明确朝向室内，材质与 BSDF-hit MIS 都使用相同的单面发光支持域。
+
+修复后的 Preset F 仍需在静止和连续移动中人工复验，重点观察：
 
 - 面积灯边缘、Cornell 三面接缝和细小遮挡边界；
 - 理想镜面、玻璃内部像、物体与地板接触区；
 - 相机停止后是否稳定收敛，运动中是否出现拖影、抽动或水波纹；
 - 与升级前固定机位 capture 的曝光、细节和残余噪声是否合理。
 
-自动单元测试不能替代这项画质判断。
+自动单元测试不能替代这项画质判断。`stable-planes` 当前仍有意不启用旧的 post-RR boundary
+history pass；若上述输入修复后仍有残余抖动，应先用 depth/normal/motion debug view 证明 guide
+不连续，再决定是否实现 stable-aware 输出边界方案，不能直接用全屏时域滤波遮盖错误输入。
 
 ### 5.3 Frame Generation 重新验收
 
@@ -134,7 +152,7 @@ $env:RAY_TRACING_STREAMLINE_LOG = '1'
 
 ## 7. 下一步
 
-先完成 5.2 和 5.3 两项短人工门禁。若 Preset F 画质无明显回退且聚焦 FG 证明
+先用本节命令完成修复后的 5.2 和 5.3 两项短人工门禁。若 Preset F 画质无明显回退且聚焦 FG 证明
 `numFramesActuallyPresented>=2`，阶段 11 下一代码包进入 11G-D：建立 application/base FPS、
 display FPS、generated/dropped frame 和 Reflex latency 的统一实时/JSON 统计。之后再做 11G-E 的
 resize、最小化/恢复、开关往返、Debug Layer 和短稳定性验收；在这些完成前不进入阶段 12。
