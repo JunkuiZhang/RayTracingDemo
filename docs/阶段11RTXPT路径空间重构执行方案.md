@@ -203,6 +203,11 @@ RR 一帧只 evaluate 一次：
 混合权重必须是可调常量并有诊断视图。第一版使用固定、跨帧确定的权重，不引入基于单帧 noisy
 radiance 的主层选择。
 
+2026-09-10 画质修正已落实上述 guide 契约：参考 RTXPT 的第一版常量为 throughput `0.2`、
+有效层均衡 `0.01`、主导平面偏置 `0.05`。权重在 build pass 由稳定的路径 throughput 计算，并由
+fill/RR input 原样消费；禁止在 fill 或 RR input 阶段根据当帧 radiance 重新选择主层。材质 guide
+使用混合权重，depth/motion 继续使用主导平面，两类信号不可混为一套规则。
+
 ## 8. 迁移开关与回退
 
 新增 `--path-space-mode legacy|stable-planes`：

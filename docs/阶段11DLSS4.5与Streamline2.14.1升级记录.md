@@ -12,6 +12,9 @@
 - `586d246 fix(path-tracing): keep area-light emission one-sided`
 - `bd93000 fix(scene): restore visible Cornell light surface`
 - `7481df0 fix(stage11): stabilize stable-plane RR boundaries`
+- `86be567 fix(scene): integrate area light into ceiling`
+- `81cca50 fix(stage11): mix stable-plane RR guides`
+- `98132c1 test(scene): generalize Cornell geometry checks`
 
 结论：项目已从 Streamline 2.12.0 整体升级到 2.14.1，并显式选择本版本新增且作为默认值的
 DLSS Ray Reconstruction `Preset F`。目标机日志确认实际加载 Streamline 2.14.1、
@@ -65,7 +68,7 @@ Authenticode 签名和许可文件。C++ bridge 还会在编译期检查 SDK 必
 | `cargo build --release --locked --features streamline-rr,streamline-fg` | PASS |
 | `scripts/stage11_rr_acceptance.ps1 -SelfTest` | PASS |
 | `scripts/fetch_streamline.ps1` | PASS：lock、hash、签名和许可 |
-| 修复后 `cargo test --all-targets --features streamline-rr --locked` | PASS：193 + 6 |
+| 第三轮修复后 `cargo test --all-targets --features streamline-rr --locked` | PASS：195 + 6 |
 | 修复后 `cargo build --release --features streamline-rr,streamline-fg --locked` | PASS |
 
 仓库级 `cargo fmt --all -- --check` 仍会报告大量本次升级前已经存在的格式差异。本次没有执行全局
@@ -114,7 +117,21 @@ benchmark gate 的最终单行 JSON。这与既有 NVIDIA NGX telemetry shutdown
 `RrBoundaryResolve` 提升为所有 RR producer 共用的最终边界契约。该 resolve 只在半径 2 内的真实
 轮廓或虚拟镜面/玻璃表面使用有界历史，其他像素精确直通，不是全屏时域模糊。
 
-上述第二轮修复后的 Preset F 仍需在静止和连续移动中人工复验，重点观察：
+第二轮修复后的人工反馈确认普通边界已经稳定，但玻璃箱顶面仍有水波纹，面积灯左侧顶棚仍有错误
+亮度。第三轮排查确认它们是两个独立根因：
+
+- Cornell 面积灯原本是悬在完整顶棚下约 3.3 mm 的薄片，形成了非物理的窄遮挡腔。现在顶棚拆成
+  四个互不重叠的面片，灯面与精确开口共面，使 NEE、BSDF 命中和实际可见几何使用同一个发光域；
+- Stable Plane RR 原本合并全部平面的 noisy radiance，却只提交主导平面的 normal、roughness 和
+  albedo。玻璃顶面的反射与透射因此使用了不匹配的单层 guide。现在按本地 RTXPT 参考使用稳定的
+  throughput 权重、有效层均衡项和主导层偏置，使用同一组归一化权重混合 normal、roughness、
+  diffuse/specular albedo；depth 和 motion 仍只取主导平面，避免破坏已稳定的轮廓契约。
+
+第三轮代码的自动门禁已通过，动态画质仍需在目标机人工确认。重点检查玻璃顶面在相机停止后是否
+稳定，以及灯左侧顶棚是否不再出现矩形暗区；若二者通过，同时还应确认上一轮已经稳定的外轮廓没有
+回退。
+
+上述修复后的 Preset F 仍需在静止和连续移动中人工复验，重点观察：
 
 - 面积灯边缘、Cornell 三面接缝和细小遮挡边界；
 - 理想镜面、玻璃内部像、物体与地板接触区；
