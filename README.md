@@ -150,7 +150,7 @@ cargo run --release --features nrd -- --benchmark-seconds 3 --denoiser nrd-reblu
 
 ## 阶段 10：DLSS Super Resolution 与 Reflex（验收未完成）
 
-阶段 10 已加入可选 Streamline v2.12.0、DLSS/DLAA 模式、独立 DLSS 输入资源、按 optimal settings 创建的 viewport、fence 退休和 Reflex/PCL 对账。默认构建完全不加载 Streamline，`nrd` 与 `streamline` feature 正交；未实现 DLSS RR、Frame Generation 或 Reflex 2 Frame Warp。Review 已修正 application identity、manual proxy、allocation 顺序、Native guide 开销和验收门禁；旧 result 32/25 是接入缺陷，不是 RTX 4060 Laptop 不支持 DLSS。自研引擎默认使用固定 GUID Project ID、`eCustom` 和 Cargo package version 初始化 NGX；只有 NVIDIA 明确分配数值 Application ID 时才需要 `--streamline-application-id <ID>` 覆盖。目标 RTX 4060 Laptop 上的 DLAA、DLSS Quality/Balanced/Performance 和 DLSS Quality+NRD 1 秒独立短测均已运行成功；完整证据和未完成人工项目见 [`docs/阶段10验收记录.md`](docs/阶段10验收记录.md)。
+阶段 10 最初基于 Streamline v2.12.0 加入可选 DLSS/DLAA 模式、独立 DLSS 输入资源、按 optimal settings 创建的 viewport、fence 退休和 Reflex/PCL 对账；阶段 11 已把整套 SDK 统一升级到 v2.14.1。默认构建完全不加载 Streamline，`nrd` 与 `streamline` feature 正交；Reflex 2 Frame Warp 仍未实现。Review 已修正 application identity、manual proxy、allocation 顺序、Native guide 开销和验收门禁；旧 result 32/25 是接入缺陷，不是 RTX 4060 Laptop 不支持 DLSS。自研引擎默认使用固定 GUID Project ID、`eCustom` 和 Cargo package version 初始化 NGX；只有 NVIDIA 明确分配数值 Application ID 时才需要 `--streamline-application-id <ID>` 覆盖。目标 RTX 4060 Laptop 上的 DLAA、DLSS Quality/Balanced/Performance 和 DLSS Quality+NRD 1 秒独立短测均已运行成功；完整证据和未完成人工项目见 [`docs/阶段10验收记录.md`](docs/阶段10验收记录.md)。
 
 编译并启动 DLSS Quality（内置 SVGF 降噪）：
 
@@ -167,8 +167,8 @@ cargo run --release --all-features --locked -- --output-size 1920x1080 --denoise
 ```
 
 这里的 DLSS 是 DLSS Super Resolution（时域抗锯齿与超分），不是路径追踪降噪器。
-当前可选降噪器是内置 `SVGF` 和 NVIDIA `NRD REBLUR`；真正取代传统降噪器的 NVIDIA
-方案叫 DLSS Ray Reconstruction（DLSS RR），本阶段尚未接入。
+当前可选降噪器是内置 `SVGF`、NVIDIA `NRD REBLUR` 和阶段 11 接入的 DLSS Ray Reconstruction
+（DLSS RR）；RR 自身融合降噪与超分，不能再与 SVGF/NRD 或 DLSS SR 串联。
 
 短验收建议每个 case 独立执行，把 `quality_svgf` 依次替换为 `native_svgf`、`dlaa_svgf`、`balanced_svgf`、`performance_svgf`；`quality_nrd` 还需提供 `-NrdExe`：
 
@@ -180,7 +180,8 @@ cargo build --release --all-features --locked
 
 ## 阶段 11：DLSS Ray Reconstruction
 
-可选 `streamline-rr` feature 已接入融合降噪与超分的 DLSS Ray Reconstruction。RR 直接消费
+当前锁定的 Streamline v2.14.1 和 NGX 310.9.1 已接入可选 `streamline-rr` feature；RR 显式使用
+DLSS 4.5 的 `Preset F`，并融合降噪与超分。RR 直接消费
 1 SPP 线性 noisy HDR、材质和几何 guides，不与 SVGF/NRD 或 DLSS SR 串联。镜面重投影使用
 `kBufferTypeSpecularMotionVectors`：着色器通过独立、无能量贡献的 dominant-reflection
 `RayQuery` 跟踪同一反射几何在当前/上一帧的位置，静态场景的镜面运动严格为零；RR 的 noisy
@@ -193,13 +194,15 @@ cargo run --release --features streamline-rr --locked -- --output-size 1280x720 
 
 `--debug-view specular-motion` 显示 RR 实际提交的镜面运动 guide；静态 Cornell 应全黑，动画
 或相机运动区域应显示非零运动。`specular-hit-distance` 仍用于检查备用距离，但 RR 不再提交该
-tag。详细短测见 [`docs/阶段11短测记录.md`](docs/阶段11短测记录.md)。
+tag。详细短测见 [`docs/阶段11短测记录.md`](docs/阶段11短测记录.md)，本次 SDK、模型和真机加载
+证据见 [`docs/阶段11DLSS4.5与Streamline2.14.1升级记录.md`](docs/阶段11DLSS4.5与Streamline2.14.1升级记录.md)。
 
-Frame Generation 的 11G-A SDK/部署与 11G-B manual-hooking 交换链边界已经完成；当前仍默认关闭且
-尚未提交 FG 输入，所以不会生成中间帧。下一包是
-[`11G-C 输入、选项与生命周期`](docs/阶段11FrameGeneration-11G-C-输入选项与生命周期执行方案.md)：
-第一版固定 2x display，并把启动/F5、resize、最小化、资源 generation、null tag 和退出统一到显式
-状态机。正式 base/display FPS 与 generated/dropped 统计留在 11G-D。
+Frame Generation 的 11G-A SDK/部署、11G-B manual-hooking 交换链边界和 11G-C
+[`输入、选项与生命周期`](docs/阶段11FrameGeneration-11G-C-输入选项与生命周期执行方案.md)均已实现；
+当前仍默认关闭，启用时固定单生成帧的 2x display，并通过显式状态机处理启动/F5、resize、最小化、
+资源 generation、null tag 和退出。Streamline 2.14.1 升级后仍需取得窗口聚焦时
+`status=0`、`numFramesActuallyPresented>=2` 的真机证据；正式 base/display FPS 与
+generated/dropped 统计是下一包 11G-D。
 
 ### RTXPT-style stable planes（NRD/RR 默认路径）
 

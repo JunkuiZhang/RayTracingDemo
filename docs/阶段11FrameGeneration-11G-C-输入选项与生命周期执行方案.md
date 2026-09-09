@@ -8,6 +8,12 @@
 
 状态：IMPLEMENTED；Codex review 代码修复完成，真实 generated-frame smoke 通过前不得进入 11G-D
 
+后续依赖升级（2026-09-10）：项目已整体切换到 Streamline 2.14.1/NGX 310.9.1，且 RR 使用
+DLSS 4.5 `Preset F`。本文件中 v2.12.0 的路径和字段描述是 11G-C 实施时的历史基线，不应据此
+把当前依赖降级。短测试矩阵已在 2.14.1 上重新通过，但窗口聚焦的 FG 2x 门禁必须重新取得
+`status=0`、`numFramesActuallyPresented>=2` 的真机证据；详见
+[`阶段11DLSS4.5与Streamline2.14.1升级记录.md`](阶段11DLSS4.5与Streamline2.14.1升级记录.md)。
+
 Review 修复提交：`58d7cd6 fix(stage11): harden frame generation integration`。默认、Streamline、
 Streamline+FG、Streamline+RR+FG 的单元/桥接短矩阵分别通过 176/6、186/6、189/6、195/6。
 RTX 4060 Laptop 的短时失焦 smoke 得到 `status=0 actual_presented=1 focused=0 warmup=0`，且 SDK
