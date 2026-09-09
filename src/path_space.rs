@@ -578,6 +578,9 @@ mod tests {
         assert!(shader.contains("float4 data3;"));
         assert!(shader.contains("uint PackStableHdr(float3 value)"));
         assert!(shader.contains("float3 UnpackStableHdr(uint packed)"));
+        assert!(shader.contains("float EncodeStableMaterialAndGuideWeight("));
+        assert!(shader.contains("uint DecodeStableMaterialKind("));
+        assert!(shader.contains("float DecodeStableGuideWeight("));
     }
 
     #[test]

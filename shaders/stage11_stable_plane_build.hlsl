@@ -130,6 +130,7 @@ void ProcessStablePlanePixel(uint2 pixel, uint2 extent)
     uint planeCount = 0u;
     uint dominantPlane = 0u;
     float dominantWeight = -1.0;
+    float3 planeAverageThroughput = 0.0;
 
     while (head < tail && planeCount < STABLE_PLANE_COUNT)
     {
@@ -217,6 +218,7 @@ void ProcessStablePlanePixel(uint2 pixel, uint2 extent)
                 StablePlaneRecords[address] = record;
                 StablePlaneHeaders[uint3(pixel, planeCount)] = state.branchId;
                 float weight = AverageThroughput(state.throughput);
+                planeAverageThroughput[planeCount] = weight;
                 if (weight > dominantWeight)
                 {
                     dominantWeight = weight;
@@ -341,6 +343,40 @@ void ProcessStablePlanePixel(uint2 pixel, uint2 extent)
     InterlockedAdd(
         StablePlaneGroupCounters[STABLE_COUNTER_PLANE_COUNT_0 + planeCount],
         1u);
+
+    // Match RTXPT's RR preparation principle: radiance from all stable planes
+    // needs one deterministic, correspondingly mixed set of material guides.
+    // Plane zero is the primary continuation; secondary lobe throughput is
+    // subtracted from its residual share before equalization and the stable
+    // dominant-plane bias are applied.
+    float3 available = 0.0;
+    float3 throughputWeights = float3(1.0, 0.0, 0.0);
+    [unroll]
+    for (uint plane = 0u; plane < STABLE_PLANE_COUNT; ++plane)
+    {
+        if (plane < planeCount)
+            available[plane] = 1.0;
+        if (plane > 0u && plane < planeCount)
+        {
+            float branchWeight = saturate(planeAverageThroughput[plane]);
+            throughputWeights[plane] = branchWeight;
+            throughputWeights[0] = saturate(throughputWeights[0] - branchWeight);
+        }
+    }
+    float3 guideWeights = throughputWeights * 0.2 + available * 0.01;
+    guideWeights[dominantPlane] += 0.05;
+    guideWeights *= available;
+    guideWeights /= max(guideWeights.x + guideWeights.y + guideWeights.z, 1.0e-6);
+    [unroll]
+    for (uint plane = 0u; plane < STABLE_PLANE_COUNT; ++plane)
+    {
+        if (plane >= planeCount)
+            continue;
+        uint address = StablePlaneAddress(pixel, plane, extent);
+        StablePlaneRecord restart = StablePlaneRecords[address];
+        restart.data2.w = guideWeights[plane];
+        StablePlaneRecords[address] = restart;
+    }
 
     // Alpha carries only an exact small integer and is not radiance. P3/P4 use
     // it to select the primary guide after all planes have been filled.

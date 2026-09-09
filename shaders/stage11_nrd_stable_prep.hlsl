@@ -59,7 +59,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     float3 diffuseFactor = max(guide.data1.xyz, 0.0.xxx);
     float viewZ = guide.data1.w;
     float3 specularFactor = max(guide.data2.xyz, 0.0.xxx);
-    float materialId = clamp(round(guide.data2.w), 0.0, 3.0);
+    float materialId = float(DecodeStableMaterialKind(guide.data2.w));
     float3 motion = guide.data3.xyz;
     float3 emissive = UnpackStableHdr(asuint(guide.data3.w));
     float4 noisyDiffuse = PlaneNoisyDiffuse.Load(int4(pixel, PlaneIndex, 0));

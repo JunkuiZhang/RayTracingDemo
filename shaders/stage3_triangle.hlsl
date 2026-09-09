@@ -610,27 +610,27 @@ void WriteStablePlaneGuides(
         NoV,
         diffuseFactor,
         specularFactor);
+    float guideWeight = saturate(restart.data2.w);
 
     StablePlaneRecord guide;
     guide.data0 = float4(normal, roughness);
     guide.data1 = float4(FiniteNonNegative(diffuseFactor), viewZ);
-    guide.data2 = float4(FiniteNonNegative(specularFactor), float(kind));
+    guide.data2 = float4(
+        FiniteNonNegative(specularFactor),
+        EncodeStableMaterialAndGuideWeight(kind, guideWeight));
     guide.data3 = float4(motion, asfloat(PackStableHdr(
         payload.psrThroughput * FiniteNonNegative(emissive))));
     StablePlaneRecords[address] = guide;
-    uint dominantPlane = min(
-        uint(round(StableRadiance[pixel].w)),
-        STABLE_PLANE_COUNT - 1u);
-    if (StablePlaneIndex == dominantPlane)
-    {
-        float3 f0 = lerp(0.04.xxx, baseColor, metallic);
-        StableDiffuseAlbedo[pixel] = float4(
-            FiniteNonNegative(baseColor * (1.0 - metallic)), 1.0);
-        StableSpecularAlbedo[pixel] = float4(
-            FiniteNonNegative(ComputeReconstructionSpecularAlbedo(
-                f0, roughness, NoV)),
-            1.0);
-    }
+    // Fill dispatches are serialized in reverse plane order with UAV barriers,
+    // so every plane can contribute to the single guide set RR consumes.
+    float3 f0 = lerp(0.04.xxx, baseColor, metallic);
+    StableDiffuseAlbedo[pixel] += float4(
+        guideWeight * FiniteNonNegative(baseColor * (1.0 - metallic)),
+        guideWeight);
+    StableSpecularAlbedo[pixel] += float4(
+        guideWeight * FiniteNonNegative(ComputeReconstructionSpecularAlbedo(
+            f0, roughness, NoV)),
+        guideWeight);
 }
 
 float4 MakeMirrorPlane(float3 normal, float3 planePoint)
@@ -961,9 +961,9 @@ void StableFillRayGen()
 {
     uint2 pixel = DispatchRaysIndex().xy;
     uint2 extent = DispatchRaysDimensions().xy;
-    // Plane fills run in reverse order. Clear the one-per-pixel dominant
-    // guides in the first dispatch so any later valid dominant plane replaces
-    // them without an extra full-screen clear pass.
+    // Plane fills run in reverse order. Clear the one-per-pixel mixed guides
+    // in the first dispatch, then accumulate each valid plane after the UAV
+    // barrier between dispatches without an extra full-screen clear pass.
     if (StablePlaneIndex + 1u == STABLE_PLANE_COUNT)
     {
         StableDiffuseAlbedo[pixel] = 0.0;

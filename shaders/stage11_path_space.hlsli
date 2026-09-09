@@ -80,6 +80,26 @@ float3 UnpackStableHdr(uint packed)
     return float3(mantissa) * exp2(float(exponent) - 9.0);
 }
 
+// The fill pass no longer needs the restart vertex depth once it reaches a
+// stable surface. Store the material class and its deterministic RR guide
+// weight together without growing the 64-byte record. The quarter-unit range
+// keeps round(encoded) equal to the integer material class for NRD.
+float EncodeStableMaterialAndGuideWeight(uint materialKind, float guideWeight)
+{
+    return float(min(materialKind, 3u)) + saturate(guideWeight) * 0.25;
+}
+
+uint DecodeStableMaterialKind(float encoded)
+{
+    return min(uint(round(max(encoded, 0.0))), 3u);
+}
+
+float DecodeStableGuideWeight(float encoded)
+{
+    float materialKind = float(DecodeStableMaterialKind(encoded));
+    return saturate((encoded - materialKind) * 4.0);
+}
+
 uint StableHashUint(uint value)
 {
     value ^= value >> 16u;

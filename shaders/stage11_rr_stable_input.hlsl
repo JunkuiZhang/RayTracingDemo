@@ -37,6 +37,9 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
 
     float3 noisyHdr = 0.0;
     float3 primaryEmissive = 0.0;
+    float3 mixedNormal = 0.0;
+    float mixedRoughness = 0.0;
+    float mixedGuideWeight = 0.0;
     [unroll]
     for (uint planeIndex = 0u; planeIndex < STABLE_PLANE_COUNT; ++planeIndex)
     {
@@ -48,11 +51,20 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
         float3 planeDiffuse = PlaneNoisyDiffuse.Load(int4(pixel, planeIndex, 0)).xyz;
         float3 planeSpecular = PlaneNoisySpecular.Load(int4(pixel, planeIndex, 0)).xyz;
         float3 planeEmissive = UnpackStableHdr(asuint(guide.data3.w));
+        uint materialKind = DecodeStableMaterialKind(guide.data2.w);
+        float guideWeight = DecodeStableGuideWeight(guide.data2.w);
+        float3 guideNormal = guide.data0.xyz;
+        if (all(isfinite(guideNormal)) && dot(guideNormal, guideNormal) > 1.0e-8)
+        {
+            mixedNormal += normalize(guideNormal) * guideWeight;
+            mixedRoughness += saturate(guide.data0.w) * guideWeight;
+            mixedGuideWeight += guideWeight;
+        }
         // Only a root-plane emissive hit is deterministic direct coverage.
         // Emission reached through a delta branch remains part of RR's noisy
         // path signal so reflected/refracted lights reconstruct normally.
         bool directEmissive = branchId == STABLE_BRANCH_ROOT
-            && abs(guide.data2.w - 3.0) < 0.25;
+            && materialKind == 3u;
         primaryEmissive += directEmissive ? planeEmissive : 0.0;
         noisyHdr += planeDiffuse + planeSpecular - (directEmissive ? planeEmissive : 0.0);
     }
@@ -73,7 +85,15 @@ void main(uint3 dispatchId : SV_DispatchThreadID)
         uint address = StablePlaneAddress(pixel, dominantPlane, extent);
         StablePlaneRecord guide = PlaneGuides[address];
         float3 normal = normalize(guide.data0.xyz);
-        PackedNormalRoughness[pixel] = float4(normal, saturate(guide.data0.w));
+        float roughness = saturate(guide.data0.w);
+        if (mixedGuideWeight > 1.0e-6
+            && all(isfinite(mixedNormal))
+            && dot(mixedNormal, mixedNormal) > 1.0e-8)
+        {
+            normal = normalize(mixedNormal);
+            roughness = saturate(mixedRoughness / mixedGuideWeight);
+        }
+        PackedNormalRoughness[pixel] = float4(normal, roughness);
         RrDepth[pixel] = Stage11DeviceDepthFromViewZ(guide.data1.w);
         float2 motion = ResetHistory != 0u ? 0.0 : guide.data3.xy;
         RrMotion[pixel] = motion;

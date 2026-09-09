@@ -8209,6 +8209,28 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "streamline-rr")]
+    #[test]
+    fn stable_rr_mixes_material_guides_with_deterministic_throughput_weights() {
+        let build = include_str!("../../shaders/stage11_stable_plane_build.hlsl");
+        assert!(build.contains("throughputWeights * 0.2 + available * 0.01"));
+        assert!(build.contains("guideWeights[dominantPlane] += 0.05"));
+        assert!(build.contains("restart.data2.w = guideWeights[plane]"));
+
+        let fill = include_str!("../../shaders/stage3_triangle.hlsl");
+        assert!(fill.contains("EncodeStableMaterialAndGuideWeight(kind, guideWeight)"));
+        assert!(fill.contains("StableDiffuseAlbedo[pixel] += float4("));
+        assert!(fill.contains("StableSpecularAlbedo[pixel] += float4("));
+
+        let rr_input = include_str!("../../shaders/stage11_rr_stable_input.hlsl");
+        assert!(rr_input.contains("mixedNormal += normalize(guideNormal) * guideWeight"));
+        assert!(rr_input.contains("mixedRoughness += saturate(guide.data0.w) * guideWeight"));
+        assert!(rr_input.contains("DecodeStableMaterialKind(guide.data2.w)"));
+
+        let nrd_input = include_str!("../../shaders/stage11_nrd_stable_prep.hlsl");
+        assert!(nrd_input.contains("DecodeStableMaterialKind(guide.data2.w)"));
+    }
+
     #[test]
     fn denoiser_switch_commits_path_space_as_one_generation_transaction() {
         let source = include_str!("d3d12.rs");
