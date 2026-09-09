@@ -548,10 +548,9 @@ fn validate_frame_generation_request(config: &realtime::RealtimeConfig) -> Resul
         )
     };
     if !reconstruction_available {
-        return Err(
+        return Err(format!(
             "--frame-generation {mode} 需要 DLSS/DLAA 或 DLSS RR reconstruction，native upscaler 没有可用 guides"
-                .to_string(),
-        );
+        ));
     }
     Ok(())
 }

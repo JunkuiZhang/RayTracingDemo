@@ -73,6 +73,23 @@ impl FrameGenerationMode {
 }
 
 #[cfg(feature = "streamline-fg")]
+pub const FRAME_GENERATION_WARMUP_PRESENT_LIMIT: u32 = 120;
+
+#[cfg(feature = "streamline-fg")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameGenerationActivation {
+    Startup,
+    Interactive,
+}
+
+#[cfg(feature = "streamline-fg")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameGenerationFault {
+    SdkStatus(u32),
+    WarmupTimeout,
+}
+
+#[cfg(feature = "streamline-fg")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameGenerationLifecycle {
     Unavailable,
@@ -81,7 +98,7 @@ pub enum FrameGenerationLifecycle {
     OnProxy,
     SuspendedProxy,
     Disabling,
-    FaultPendingDisable(u32),
+    FaultPendingDisable(FrameGenerationFault),
 }
 
 #[cfg(feature = "streamline-fg")]
@@ -99,12 +116,31 @@ impl FrameGenerationLifecycle {
         }
     }
 
+    /// Whether the renderer still owns an FG-loaded proxy chain.
+    ///
+    /// A fault changes health, not ownership: options and tags still have to
+    /// be released before the plug-in and swap chain can be torn down.
     pub const fn proxy_loaded(self) -> bool {
         matches!(
             self,
-            Self::EnablingProxy | Self::OnProxy | Self::SuspendedProxy | Self::Disabling
+            Self::EnablingProxy
+                | Self::OnProxy
+                | Self::SuspendedProxy
+                | Self::Disabling
+                | Self::FaultPendingDisable(_)
         )
     }
+}
+
+#[cfg(feature = "streamline-fg")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameGenerationObservation {
+    NotActive,
+    Ineligible,
+    Pending,
+    Confirmed,
+    AlreadyConfirmed,
+    WarmupExpired(FrameGenerationActivation),
 }
 
 /// The only owner of FG requested/runtime transitions. Keeping these rules in
@@ -115,17 +151,31 @@ impl FrameGenerationLifecycle {
 pub struct FrameGenerationController {
     requested: FrameGenerationMode,
     lifecycle: FrameGenerationLifecycle,
+    activation: Option<FrameGenerationActivation>,
+    warmup_presents: u32,
+    confirmed: bool,
 }
 
 #[cfg(feature = "streamline-fg")]
 impl FrameGenerationController {
     pub const fn new(requested: FrameGenerationMode, supported: bool) -> Self {
         let lifecycle = match (requested, supported) {
-            (FrameGenerationMode::Off, _) => FrameGenerationLifecycle::OffNative,
+            (FrameGenerationMode::Off, true) => FrameGenerationLifecycle::OffNative,
+            (FrameGenerationMode::Off, false) => FrameGenerationLifecycle::Unavailable,
             (FrameGenerationMode::On, true) => FrameGenerationLifecycle::EnablingProxy,
             (FrameGenerationMode::On, false) => FrameGenerationLifecycle::Unavailable,
         };
-        Self { requested, lifecycle }
+        let activation = match (requested, supported) {
+            (FrameGenerationMode::On, true) => Some(FrameGenerationActivation::Startup),
+            _ => None,
+        };
+        Self {
+            requested,
+            lifecycle,
+            activation,
+            warmup_presents: 0,
+            confirmed: false,
+        }
     }
 
     pub const fn requested(self) -> FrameGenerationMode {
@@ -136,16 +186,23 @@ impl FrameGenerationController {
         self.lifecycle
     }
 
-    #[cfg(feature = "streamline-fg")]
-    pub const fn set_requested(&mut self, requested: FrameGenerationMode) {
-        self.requested = requested;
-    }
-
     pub fn request_enable(&mut self) -> Result<(), &'static str> {
         if self.lifecycle != FrameGenerationLifecycle::OffNative {
             return Err("FG 只能从 OffNative 开始启用");
         }
         self.requested = FrameGenerationMode::On;
+        self.activation = Some(FrameGenerationActivation::Interactive);
+        self.warmup_presents = 0;
+        self.confirmed = false;
+        Ok(())
+    }
+
+    pub fn complete_enable(&mut self) -> Result<(), &'static str> {
+        if self.lifecycle != FrameGenerationLifecycle::OffNative
+            || self.requested != FrameGenerationMode::On
+        {
+            return Err("FG loaded chain 只能完成一次待处理的启用请求");
+        }
         self.lifecycle = FrameGenerationLifecycle::EnablingProxy;
         Ok(())
     }
@@ -162,6 +219,9 @@ impl FrameGenerationController {
     pub const fn complete_disable(&mut self) {
         self.requested = FrameGenerationMode::Off;
         self.lifecycle = FrameGenerationLifecycle::OffNative;
+        self.activation = None;
+        self.warmup_presents = 0;
+        self.confirmed = false;
     }
 
     pub fn suspend(&mut self) -> Result<(), &'static str> {
@@ -188,8 +248,55 @@ impl FrameGenerationController {
 
     pub fn fault(&mut self, raw_status: u32) {
         if self.lifecycle.proxy_loaded() {
-            self.lifecycle = FrameGenerationLifecycle::FaultPendingDisable(raw_status);
+            self.lifecycle = FrameGenerationLifecycle::FaultPendingDisable(
+                FrameGenerationFault::SdkStatus(raw_status),
+            );
         }
+    }
+
+    pub fn warmup_timeout(&mut self) {
+        if self.lifecycle.proxy_loaded() {
+            self.lifecycle =
+                FrameGenerationLifecycle::FaultPendingDisable(FrameGenerationFault::WarmupTimeout);
+        }
+    }
+
+    pub fn observe_present(
+        &mut self,
+        actual_presented: u32,
+        interpolation_eligible: bool,
+    ) -> FrameGenerationObservation {
+        if self.lifecycle != FrameGenerationLifecycle::OnProxy {
+            return FrameGenerationObservation::NotActive;
+        }
+        if actual_presented >= 2 {
+            if self.confirmed {
+                return FrameGenerationObservation::AlreadyConfirmed;
+            }
+            self.confirmed = true;
+            return FrameGenerationObservation::Confirmed;
+        }
+        if self.confirmed {
+            return FrameGenerationObservation::AlreadyConfirmed;
+        }
+        // DLSS-G intentionally pauses interpolation while the application
+        // window is not focused. Such Presents are not evidence of a broken
+        // integration and must not consume the bounded validation budget.
+        if !interpolation_eligible {
+            return FrameGenerationObservation::Ineligible;
+        }
+        self.warmup_presents = self.warmup_presents.saturating_add(1);
+        if self.warmup_presents >= FRAME_GENERATION_WARMUP_PRESENT_LIMIT {
+            return FrameGenerationObservation::WarmupExpired(
+                self.activation
+                    .unwrap_or(FrameGenerationActivation::Interactive),
+            );
+        }
+        FrameGenerationObservation::Pending
+    }
+
+    pub const fn warmup_presents(self) -> u32 {
+        self.warmup_presents
     }
 }
 
@@ -270,7 +377,11 @@ impl CommandRecordingMode {
 
 #[cfg(all(test, feature = "streamline-fg"))]
 mod tests {
-    use super::{FrameGenerationController, FrameGenerationLifecycle, FrameGenerationMode};
+    use super::{
+        FRAME_GENERATION_WARMUP_PRESENT_LIMIT, FrameGenerationActivation,
+        FrameGenerationController, FrameGenerationFault, FrameGenerationLifecycle,
+        FrameGenerationMode, FrameGenerationObservation,
+    };
 
     #[test]
     fn frame_generation_state_machine_covers_enable_suspend_resume_disable() {
@@ -310,8 +421,75 @@ mod tests {
         let mut off = FrameGenerationController::new(FrameGenerationMode::Off, true);
         assert!(off.accept_complete_frame().is_err());
         assert!(off.request_enable().is_ok());
+        assert_eq!(off.lifecycle(), FrameGenerationLifecycle::OffNative);
+        assert!(off.complete_enable().is_ok());
         off.fault(17);
-        assert_eq!(off.lifecycle(), FrameGenerationLifecycle::FaultPendingDisable(17));
+        assert_eq!(
+            off.lifecycle(),
+            FrameGenerationLifecycle::FaultPendingDisable(FrameGenerationFault::SdkStatus(17))
+        );
+        assert!(off.lifecycle().proxy_loaded());
+    }
+
+    #[test]
+    fn frame_generation_requires_real_generated_frame_within_bounded_warmup() {
+        let mut startup = FrameGenerationController::new(FrameGenerationMode::On, true);
+        startup.accept_complete_frame().unwrap();
+        for _ in 1..FRAME_GENERATION_WARMUP_PRESENT_LIMIT {
+            assert_eq!(
+                startup.observe_present(1, true),
+                FrameGenerationObservation::Pending
+            );
+        }
+        assert_eq!(
+            startup.observe_present(1, true),
+            FrameGenerationObservation::WarmupExpired(FrameGenerationActivation::Startup)
+        );
+        startup.warmup_timeout();
+        assert_eq!(
+            startup.lifecycle(),
+            FrameGenerationLifecycle::FaultPendingDisable(FrameGenerationFault::WarmupTimeout)
+        );
+        assert!(startup.lifecycle().proxy_loaded());
+
+        let mut interactive = FrameGenerationController::new(FrameGenerationMode::Off, true);
+        interactive.request_enable().unwrap();
+        interactive.complete_enable().unwrap();
+        interactive.accept_complete_frame().unwrap();
+        assert_eq!(
+            interactive.observe_present(2, true),
+            FrameGenerationObservation::Confirmed
+        );
+        assert_eq!(
+            interactive.observe_present(1, true),
+            FrameGenerationObservation::AlreadyConfirmed
+        );
+    }
+
+    #[test]
+    fn unfocused_presents_do_not_consume_frame_generation_warmup() {
+        let mut controller = FrameGenerationController::new(FrameGenerationMode::On, true);
+        controller.accept_complete_frame().unwrap();
+        for _ in 0..FRAME_GENERATION_WARMUP_PRESENT_LIMIT * 2 {
+            assert_eq!(
+                controller.observe_present(1, false),
+                FrameGenerationObservation::Ineligible
+            );
+        }
+        assert_eq!(controller.warmup_presents(), 0);
+        assert_eq!(
+            controller.observe_present(2, false),
+            FrameGenerationObservation::Confirmed
+        );
+    }
+
+    #[test]
+    fn unsupported_feature_is_unavailable_even_when_requested_off() {
+        let unavailable = FrameGenerationController::new(FrameGenerationMode::Off, false);
+        assert_eq!(
+            unavailable.lifecycle(),
+            FrameGenerationLifecycle::Unavailable
+        );
     }
 }
 

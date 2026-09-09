@@ -44,7 +44,7 @@ static_assert(offsetof(StreamlineBridgeFrameGenerationOptions, flags) == 16, "St
 static_assert(offsetof(StreamlineBridgeFrameGenerationOptions, color_width) == 32, "Streamline FG color offset changed");
 static_assert(sizeof(StreamlineBridgeFrameGenerationState) == 40, "Streamline FG state ABI changed");
 static_assert(offsetof(StreamlineBridgeFrameGenerationState, estimated_vram_usage_bytes) == 24, "Streamline FG state VRAM offset changed");
-static_assert(sizeof(StreamlineBridgeConstants) == 368, "Streamline constants ABI changed");
+static_assert(sizeof(StreamlineBridgeConstants) == 372, "Streamline constants ABI changed");
 static_assert(sizeof(StreamlineBridgeResourceTag) == 48, "Streamline resource tag ABI changed");
 static_assert(sizeof(StreamlineBridgeReflexState) == 20, "Streamline Reflex ABI changed");
 
@@ -122,7 +122,7 @@ bool valid_buffer_type(uint32_t type) noexcept {
     // existing SR/RR paths plus the two DLSS-G UI release tags.
     switch (type) {
         case 0: case 1: case 2: case 3: case 4: case 7: case 8: case 10:
-        case 13: case 14: case 23: case 69:
+        case 13: case 14: case 23: case 53: case 69:
             return true;
         default:
             return false;
@@ -822,6 +822,10 @@ StreamlineBridgeStatus streamline_bridge_set_constants(
         copy_matrix(constants.prevClipToClip, input->prev_clip_to_clip);
         std::memcpy(&constants.jitterOffset, input->jitter_offset, sizeof(input->jitter_offset));
         std::memcpy(&constants.mvecScale, input->mvec_scale, sizeof(input->mvec_scale));
+        std::memcpy(
+            &constants.cameraPinholeOffset,
+            input->camera_pinhole_offset,
+            sizeof(input->camera_pinhole_offset));
         std::memcpy(&constants.cameraPos, input->camera_position, sizeof(input->camera_position));
         std::memcpy(&constants.cameraUp, input->camera_up, sizeof(input->camera_up));
         std::memcpy(&constants.cameraRight, input->camera_right, sizeof(input->camera_right));
@@ -835,10 +839,6 @@ StreamlineBridgeStatus streamline_bridge_set_constants(
         constants.motionVectors3D = bool_value(input->motion_vectors_3d);
         constants.reset = bool_value(input->reset);
         constants.motionVectorsJittered = bool_value(input->motion_vectors_jittered);
-        // ABI v7 carries the application's FG intent. Streamline 2.12.0's
-        // Constants struct predates this field, so it is intentionally not
-        // written into the SDK object; the intent is consumed by the bridge's
-        // FG options/tags contract instead of corrupting the older SDK ABI.
         const sl::Result result = slSetConstants(
             constants, *static_cast<sl::FrameToken*>(token->token), sl::ViewportHandle(viewport->id));
         return result == sl::Result::eOk ? STREAMLINE_BRIDGE_STATUS_OK
@@ -872,6 +872,18 @@ StreamlineBridgeStatus streamline_bridge_set_tags(
             const bool zero_extent = source.top == 0 && source.left == 0 &&
                 source.width == 0 && source.height == 0;
             if (null_resource) {
+                if (source.buffer_type == sl::kBufferTypeBackbuffer &&
+                    source.state == 0 && source.width != 0 && source.height != 0 &&
+                    source.lifecycle == sl::ResourceLifecycle::eOnlyValidNow) {
+                    // Streamline already owns the intercepted backbuffer. A
+                    // null resource plus a non-empty extent is the SDK's
+                    // documented way to describe its FG region.
+                    sl::Extent extent{source.top, source.left, source.width, source.height};
+                    tags.emplace_back(
+                        nullptr, source.buffer_type,
+                        sl::ResourceLifecycle::eOnlyValidNow, &extent);
+                    continue;
+                }
                 // Null tags are the SDK's explicit way to release resources
                 // whose validity ends at Present.  Rejecting a non-zero
                 // extent/state prevents an accidental unowned binding.

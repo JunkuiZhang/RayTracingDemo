@@ -161,6 +161,11 @@ impl ApplicationHandler for RealtimeApplication {
                     self.fail(event_loop, format!("调整交换链尺寸：{error}"));
                 }
             }
+            WindowEvent::Focused(focused) => {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.set_window_focused(focused);
+                }
+            }
             WindowEvent::RedrawRequested => {
                 let mut benchmark_report = None;
                 let mut capture_report = None;

@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define STREAMLINE_BRIDGE_ABI_VERSION UINT32_C(7)
+#define STREAMLINE_BRIDGE_ABI_VERSION UINT32_C(8)
 
 typedef struct StreamlineBridge StreamlineBridge;
 
@@ -192,6 +192,7 @@ typedef struct StreamlineBridgeConstants {
     float prev_clip_to_clip[16];
     float jitter_offset[2];
     float mvec_scale[2];
+    float camera_pinhole_offset[2];
     float camera_position[3];
     float camera_up[3];
     float camera_right[3];
@@ -205,7 +206,6 @@ typedef struct StreamlineBridgeConstants {
     uint32_t motion_vectors_3d;
     uint32_t reset;
     uint32_t motion_vectors_jittered;
-    uint32_t rendering_game_frames;
 } StreamlineBridgeConstants;
 
 typedef struct StreamlineBridgeResourceTag {

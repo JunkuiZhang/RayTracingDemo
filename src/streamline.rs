@@ -3,7 +3,7 @@
 use std::{ffi::c_void, ptr::NonNull};
 
 pub const SDK_VERSION: &str = "2.12.0";
-pub const ABI_VERSION: u32 = 7;
+pub const ABI_VERSION: u32 = 8;
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_INVALID_ARGUMENT: u32 = 1;
 pub const STATUS_SDK_ERROR: u32 = 2;
@@ -14,6 +14,7 @@ pub const STATUS_ALREADY_UPGRADED: u32 = 6;
 pub const FRAME_GENERATION_OFF: u32 = 0;
 pub const FRAME_GENERATION_ON: u32 = 1;
 pub const RESOURCE_LIFECYCLE_VALID_UNTIL_PRESENT: u32 = 1;
+pub const RESOURCE_LIFECYCLE_ONLY_VALID_NOW: u32 = 0;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -191,6 +192,7 @@ pub struct Constants {
     pub prev_clip_to_clip: [f32; 16],
     pub jitter_offset: [f32; 2],
     pub mvec_scale: [f32; 2],
+    pub camera_pinhole_offset: [f32; 2],
     pub camera_position: [f32; 3],
     pub camera_up: [f32; 3],
     pub camera_right: [f32; 3],
@@ -204,7 +206,6 @@ pub struct Constants {
     pub motion_vectors_3d: u32,
     pub reset: u32,
     pub motion_vectors_jittered: u32,
-    pub rendering_game_frames: u32,
 }
 
 #[repr(C)]
@@ -442,14 +443,14 @@ mod tests {
             offset_of!(FrameGenerationState, estimated_vram_usage_bytes),
             24
         );
-        assert_eq!(size_of::<Constants>(), 368);
+        assert_eq!(size_of::<Constants>(), 372);
         assert_eq!(size_of::<ResourceTag>(), 48);
         assert_eq!(size_of::<ReflexState>(), 20);
     }
 
     #[test]
     fn invalid_bridge_statuses_are_stable() {
-        assert_eq!(ABI_VERSION, 7);
+        assert_eq!(ABI_VERSION, 8);
         assert_eq!(STATUS_OK, 0);
         assert_eq!(STATUS_INVALID_ARGUMENT, 1);
         assert_eq!(size_of::<RawBridge>(), 0);
@@ -513,6 +514,10 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/native/streamline_bridge/src/streamline_bridge.cpp"
         ));
+        let header = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/native/streamline_bridge/include/streamline_bridge.h"
+        ));
         let cmake = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/native/streamline_bridge/CMakeLists.txt"
@@ -527,6 +532,9 @@ mod tests {
         assert!(bridge.contains("sl::DLSSGMode::eOff"));
         assert!(bridge.contains("sl::DLSSGMode::eOn"));
         assert!(bridge.contains("options.flags = request_vram_estimate"));
+        assert!(bridge.contains("options.hudLessBufferFormat = input.hud_less_buffer_format"));
+        assert!(!bridge.contains("input->rendering_game_frames"));
+        assert!(!header.contains("rendering_game_frames"));
         assert!(bridge.contains("slDLSSGGetState"));
         assert!(bridge.contains("*out_native_interface = nullptr"));
         assert!(bridge.contains("slGetNativeInterface"));
