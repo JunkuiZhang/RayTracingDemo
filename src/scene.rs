@@ -509,8 +509,8 @@ mod tests {
     fn default_cornell_scene_has_valid_references_and_stable_ids() {
         let scene = SceneAsset::cornell_box();
         scene.validate().unwrap();
-        assert_eq!(scene.primitives.len(), 18);
-        assert_eq!(scene.instances.len(), 18);
+        assert_eq!(scene.primitives.len(), 21);
+        assert_eq!(scene.instances.len(), 21);
         assert!(
             scene
                 .instances
@@ -541,6 +541,42 @@ mod tests {
             geometric_normal.dot(glam::Vec3::NEG_Y) > 0.999,
             "the one-sided area-light winding must face the Cornell interior"
         );
+        assert!(
+            area_light_mesh
+                .vertices
+                .iter()
+                .all(|vertex| vertex.position[1] == 1.0),
+            "the area light must fill the ceiling opening instead of floating below it"
+        );
+        let ceiling_panels = scene
+            .primitives
+            .iter()
+            .filter(|primitive| primitive.name.starts_with("ceiling "))
+            .collect::<Vec<_>>();
+        assert_eq!(ceiling_panels.len(), 4);
+        for panel in ceiling_panels {
+            assert!(panel.vertices.iter().all(|vertex| vertex.position[1] == 1.0));
+            let outside_light_opening = panel
+                .vertices
+                .iter()
+                .all(|vertex| vertex.position[0] <= -0.25)
+                || panel
+                    .vertices
+                    .iter()
+                    .all(|vertex| vertex.position[0] >= 0.25)
+                || panel
+                    .vertices
+                    .iter()
+                    .all(|vertex| vertex.position[2] <= 0.6666667)
+                || panel
+                    .vertices
+                    .iter()
+                    .all(|vertex| vertex.position[2] >= 1.1666666);
+            assert!(
+                outside_light_opening,
+                "ceiling panels must not overlap the emissive opening"
+            );
+        }
     }
 
     #[test]

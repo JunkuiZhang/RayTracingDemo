@@ -121,17 +121,49 @@ fn create_cornell(include_right_glass: bool) -> SceneAsset {
         [0.0, 1.0, 0.0],
         0,
     );
-    add(
-        "ceiling",
-        [
-            [-1.0, 1.0, 2.0],
-            [1.0, 1.0, 2.0],
-            [1.0, 1.0, 0.0],
-            [-1.0, 1.0, 0.0],
-        ],
-        [0.0, -1.0, 0.0],
-        0,
-    );
+    // Model the emitter as an actual opening in the ceiling. A full ceiling
+    // plus a nearly coplanar light card creates a narrow occlusion cavity and
+    // projects non-physical indirect-light shadows around the fixture.
+    for (name, positions) in [
+        (
+            "ceiling left",
+            [
+                [-1.0, 1.0, 2.0],
+                [-0.25, 1.0, 2.0],
+                [-0.25, 1.0, 0.0],
+                [-1.0, 1.0, 0.0],
+            ],
+        ),
+        (
+            "ceiling right",
+            [
+                [0.25, 1.0, 2.0],
+                [1.0, 1.0, 2.0],
+                [1.0, 1.0, 0.0],
+                [0.25, 1.0, 0.0],
+            ],
+        ),
+        (
+            "ceiling back",
+            [
+                [-0.25, 1.0, 2.0],
+                [0.25, 1.0, 2.0],
+                [0.25, 1.0, 1.1666666],
+                [-0.25, 1.0, 1.1666666],
+            ],
+        ),
+        (
+            "ceiling front",
+            [
+                [-0.25, 1.0, 0.6666667],
+                [0.25, 1.0, 0.6666667],
+                [0.25, 1.0, 0.0],
+                [-0.25, 1.0, 0.0],
+            ],
+        ),
+    ] {
+        add(name, positions, [0.0, -1.0, 0.0], 0);
+    }
     add(
         "back",
         [
@@ -168,10 +200,10 @@ fn create_cornell(include_right_glass: bool) -> SceneAsset {
     add(
         "area light",
         [
-            [-0.25, 0.9966667, 0.6666667],
-            [0.25, 0.9966667, 0.6666667],
-            [0.25, 0.9966667, 1.1666666],
-            [-0.25, 0.9966667, 1.1666666],
+            [-0.25, 1.0, 0.6666667],
+            [0.25, 1.0, 0.6666667],
+            [0.25, 1.0, 1.1666666],
+            [-0.25, 1.0, 1.1666666],
         ],
         [0.0, -1.0, 0.0],
         3,

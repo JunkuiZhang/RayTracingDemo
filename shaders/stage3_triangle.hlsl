@@ -1331,7 +1331,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
                     + 2u + payload.depth * 8u + lightSampleIndex * 32u);
             float3 lightPoint = float3(
                 -0.25 + lightRandom.x * 0.5,
-                0.9966667,
+                1.0,
                 0.6666667 + lightRandom.y * 0.5);
             float3 toLight = lightPoint - hitPosition;
             float lightDistance = length(toLight);
@@ -1951,7 +1951,7 @@ void LegacyClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttri
         float2 lightRandom = SampleOwenSobol2D(
             DispatchRaysIndex().xy,
             2u + payload.depth * 8u);
-        float3 lightPoint = float3(-0.25 + lightRandom.x * 0.5, 0.9966667, 0.6666667 + lightRandom.y * 0.5);
+        float3 lightPoint = float3(-0.25 + lightRandom.x * 0.5, 1.0, 0.6666667 + lightRandom.y * 0.5);
         float3 toLight = lightPoint - hitPosition;
         float lightDistance = length(toLight);
         float3 lightDirection = toLight / lightDistance;
