@@ -10,6 +10,10 @@ pub const NESTED_DIELECTRIC_OUTER_MAX: [f32; 3] = [0.72, -0.35, 1.05];
 pub const NESTED_DIELECTRIC_INNER_MIN: [f32; 3] = [0.20, -0.88, 0.47];
 pub const NESTED_DIELECTRIC_INNER_MAX: [f32; 3] = [0.62, -0.45, 0.93];
 const NESTED_DIELECTRIC_ROTATION: f32 = 5.0_f32.to_radians();
+// A small amount of microfacet roughness avoids treating the demonstration
+// dielectric as mathematically perfect glass, which is both uncommon in real
+// assets and especially sensitive to sparse specular/transmission samples.
+const CORNELL_GLASS_ROUGHNESS: f32 = 0.15;
 
 pub fn create() -> SceneAsset {
     create_cornell(true)
@@ -63,7 +67,7 @@ fn create_cornell(include_right_glass: bool) -> SceneAsset {
             name: "Cornell glass".to_string(),
             base_color_factor: [0.98, 0.98, 0.98, 1.0],
             metallic_factor: 0.0,
-            roughness_factor: 0.0,
+            roughness_factor: CORNELL_GLASS_ROUGHNESS,
             normal_scale: 1.0,
             emissive_factor: [0.0; 3],
             ior: 1.5,
