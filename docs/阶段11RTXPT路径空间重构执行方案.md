@@ -174,6 +174,10 @@ priority 从高到低排序。资产 priority 0 映射到内部 15；空槽编�
 - 任何 NaN/Inf、负 radiance 或非法 hit distance 在写 UAV 前钳制并增加诊断计数。
 
 Pass A 只建立身份和 guide，不把其单次 radiance 当成最终样本；Pass B 才是可增加 SPP 的估计器。
+Fill 将局部 depth 重置为零时仍必须从 stable branch ID 恢复 camera path 的 delta 类别，否则镜面/
+透射分支会误用普通主表面的采样预算。当前面向 RTX 4060 Laptop 的有界策略为：普通主表面 1 个
+灯光样本，delta 分支的第一稳定表面 8 个，后续 specular/transmission bounce 4 个；不得把 8 SPP
+无条件扩展到全屏。
 
 ## 6. NRD 适配
 

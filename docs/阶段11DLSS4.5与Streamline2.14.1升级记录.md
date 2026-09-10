@@ -15,6 +15,8 @@
 - `86be567 fix(scene): integrate area light into ceiling`
 - `81cca50 fix(stage11): mix stable-plane RR guides`
 - `98132c1 test(scene): generalize Cornell geometry checks`
+- `2389229 fix(scene): unify ceiling reconstruction identity`
+- `c522df1 fix(path-tracing): preserve delta-plane sample budget`
 
 结论：项目已从 Streamline 2.12.0 整体升级到 2.14.1，并显式选择本版本新增且作为默认值的
 DLSS Ray Reconstruction `Preset F`。目标机日志确认实际加载 Streamline 2.14.1、
@@ -130,6 +132,18 @@ benchmark gate 的最终单行 JSON。这与既有 NVIDIA NGX telemetry shutdown
 第三轮代码的自动门禁已通过，动态画质仍需在目标机人工确认。重点检查玻璃顶面在相机停止后是否
 稳定，以及灯左侧顶棚是否不再出现矩形暗区；若二者通过，同时还应确认上一轮已经稳定的外轮廓没有
 回退。
+
+第三轮人工复验表明上述两项仍可见。第四轮使用相同 Release/RR 命令分别抓取 final、normal 和
+object/material-ID，进一步定位并修正：
+
+- normal guide 在顶棚连续，但 ID 图确认四个开口面片被创建为四个独立 instance/stable surface，
+  人工分片边界泄漏到重建结果。现在四个带孔面片属于同一个 indexed mesh、同一个 stable ID；
+  修复后的 RTX 4060 Laptop capture 中，灯左侧矩形区域及其斜向亮度缝已经消失；
+- Stable Plane fill 会把本地 depth 重新置零，同时把非 root 的镜面/玻璃分支误标为普通路径，导致
+  已有的额外直射光采样策略在最需要的第一稳定表面失效。现在由稳定 branch ID 恢复 delta 路径类别，
+  第一稳定表面使用有界 8 个灯光样本，后续 specular/transmission bounce 保留 4 个，普通全屏主表面
+  仍为 1 个。相邻 `capture-after-spp=31/32` 的玻璃顶面 ROI MAE 从 `0.2703` 降至 `0.2509`，
+  RGB 差值大于 2 的像素由 7 降至 5；这是方差下降证据，不替代连续动态肉眼验收。
 
 上述修复后的 Preset F 仍需在静止和连续移动中人工复验，重点观察：
 
