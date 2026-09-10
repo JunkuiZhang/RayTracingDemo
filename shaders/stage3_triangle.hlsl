@@ -402,6 +402,12 @@ float4 SampleMaterialTexture(uint textureAndSampler, float2 uv)
 }
 
 static const float PI = 3.14159265359;
+// Stable surfaces reached through a deterministic mirror/glass branch occupy
+// only a small part of the frame but feed a high-contrast signal to RR. Spend
+// a bounded number of extra shadow rays there to reduce visible temporal
+// variance without multiplying the full-screen primary budget.
+static const uint DELTA_STABLE_LIGHT_SAMPLE_COUNT = 8u;
+static const uint SECONDARY_SPECULAR_LIGHT_SAMPLE_COUNT = 4u;
 
 float3 FresnelSchlick(float cosine, float3 f0)
 {
@@ -991,7 +997,10 @@ void StableFillRayGen()
         + branchId * 104729u);
     payload.depth = 0u;
     payload.lastPdf = 0.0;
-    payload.firstKind = 0u;
+    // A non-root stable branch exists only after a mirror/refraction delta
+    // event. Restore that camera-path class when fill restarts local depth at
+    // zero so its targeted sampling policy is not silently lost.
+    payload.firstKind = branchId == STABLE_BRANCH_ROOT ? 0u : 2u;
     payload.hitDistance = 0.0;
     payload.rawDiffuse = 0.0;
     payload.rawSpecular = 0.0;
@@ -1158,7 +1167,9 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     {
         uint2 pixel = DispatchRaysIndex().xy;
         uint2 size = DispatchRaysDimensions().xy;
-        payload.firstKind = kind;
+        bool restartedDeltaPlane = PathSpacePass == 1u && payload.firstKind != 0u;
+        if (!restartedDeltaPlane)
+            payload.firstKind = kind;
         GBufferAlbedo[pixel] = float4(baseColor.xyz, float(kind));
         GBufferNormalRoughness[pixel] = float4(normal * 0.5 + 0.5, roughness);
         GBufferDepth[pixel] = RayTCurrent();
@@ -1322,7 +1333,14 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
         // Spend extra visibility rays only after a path starts in the
         // specular/transmission lobe. This targets mirror/refraction noise
         // without multiplying the full-screen primary path budget.
-        uint lightSampleCount = payload.depth > 0u && payload.firstKind != 0u ? 4u : 1u;
+        bool restartedDeltaPlane = PathSpacePass == 1u
+            && payload.depth == 0u
+            && payload.firstKind != 0u;
+        uint lightSampleCount = restartedDeltaPlane
+            ? DELTA_STABLE_LIGHT_SAMPLE_COUNT
+            : (payload.depth > 0u && payload.firstKind != 0u
+                ? SECONDARY_SPECULAR_LIGHT_SAMPLE_COUNT
+                : 1u);
         for (uint lightSampleIndex = 0u; lightSampleIndex < lightSampleCount; ++lightSampleIndex)
         {
             float2 lightRandom = SampleOwenSobol2D(
@@ -1693,7 +1711,7 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     child.seed = payload.seed;
     child.depth = payload.depth + 1;
     child.lastPdf = kind == 0u ? max(samplePdf, 1.0e-6) : 0.0;
-    child.firstKind = payload.depth == 0u
+    child.firstKind = payload.depth == 0u && payload.firstKind == 0u
         ? (sampledSpecular ? max(kind, 1u) : 0u)
         : payload.firstKind;
     child.hitDistance = 0;

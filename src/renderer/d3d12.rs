@@ -8772,7 +8772,11 @@ mod tests {
         assert!(shader.contains("SampleOwenSobol2D"));
         assert!(shader.contains("SampleGgxVndfDirection"));
         assert!(shader.contains("SampleStratifiedLobe"));
-        assert!(shader.contains("payload.depth > 0u && payload.firstKind != 0u ? 4u : 1u"));
+        assert!(shader.contains("DELTA_STABLE_LIGHT_SAMPLE_COUNT = 8u"));
+        assert!(shader.contains("SECONDARY_SPECULAR_LIGHT_SAMPLE_COUNT = 4u"));
+        assert!(shader.contains("branchId == STABLE_BRANCH_ROOT ? 0u : 2u"));
+        assert!(shader.contains("PathSpacePass == 1u && payload.firstKind != 0u"));
+        assert!(shader.contains("payload.depth == 0u && payload.firstKind == 0u"));
         assert_eq!(shader.matches("6u + payload.depth * 8u").count(), 2);
         assert!(!shader.contains("SampleGgxDirection"));
     }
