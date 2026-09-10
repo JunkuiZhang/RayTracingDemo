@@ -197,6 +197,17 @@ cargo run --release --features streamline-rr --locked -- --output-size 1280x720 
 tag。详细短测见 [`docs/阶段11短测记录.md`](docs/阶段11短测记录.md)，本次 SDK、模型和真机加载
 证据见 [`docs/阶段11DLSS4.5与Streamline2.14.1升级记录.md`](docs/阶段11DLSS4.5与Streamline2.14.1升级记录.md)。
 
+支持 Windows HDR 的显示器可显式启用 FP16 scRGB 输出；默认 SDR 路径保持不变：
+
+```powershell
+cargo run --release --features streamline-rr --locked -- --output-size 1280x720 --denoiser dlss-rr --upscaler dlss-quality --hdr
+```
+
+Windows“设置 → 系统 → 显示 → HDR”必须已开启。漫反射白默认 200 nit；程序默认读取当前
+显示器上报的峰值，也可用 `--hdr-paper-white-nits 220 --hdr-peak-nits 1000` 显式校准。
+HDR 模式的 `--capture-output` 会生成便于普通工具查看的 SDR PNG 预览，不是 HDR 母版。
+实现和短测记录见 [`docs/阶段11HDR显示输出实施记录.md`](docs/阶段11HDR显示输出实施记录.md)。
+
 Frame Generation 的 11G-A SDK/部署、11G-B manual-hooking 交换链边界和 11G-C
 [`输入、选项与生命周期`](docs/阶段11FrameGeneration-11G-C-输入选项与生命周期执行方案.md)均已实现；
 当前仍默认关闭，启用时固定单生成帧的 2x display，并通过显式状态机处理启动/F5、resize、最小化、
