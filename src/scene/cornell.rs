@@ -80,37 +80,9 @@ fn create_cornell(include_right_glass: bool) -> SceneAsset {
     ];
     let mut primitives = Vec::new();
     let mut instances = Vec::new();
-    let mut add =
-        |name: &str, positions: [[f32; 3]; 4], normal: [f32; 3], material_index: usize| {
-            let primitive_index = primitives.len();
-            primitives.push(MeshPrimitive {
-                name: name.to_string(),
-                vertices: positions
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, position)| VertexAsset {
-                        position,
-                        normal,
-                        tangent: [1.0, 0.0, 0.0, 1.0],
-                        texcoord0: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]][index],
-                        has_tangent: false,
-                    })
-                    .collect(),
-                indices: vec![0, 1, 2, 0, 2, 3],
-                material_index,
-                has_texcoord0: true,
-            });
-            let matrix = Mat4::IDENTITY;
-            instances.push(SceneInstance {
-                stable_id: instances.len() as u32,
-                primitive_index,
-                base_world: matrix,
-                current_world: matrix,
-                previous_world: matrix,
-            });
-        };
-
-    add(
+    add_quad(
+        &mut primitives,
+        &mut instances,
         "floor",
         [
             [-1.0, -1.0, 0.0],
@@ -121,49 +93,22 @@ fn create_cornell(include_right_glass: bool) -> SceneAsset {
         [0.0, 1.0, 0.0],
         0,
     );
-    // Model the emitter as an actual opening in the ceiling. A full ceiling
-    // plus a nearly coplanar light card creates a narrow occlusion cavity and
-    // projects non-physical indirect-light shadows around the fixture.
-    for (name, positions) in [
-        (
-            "ceiling left",
-            [
-                [-1.0, 1.0, 2.0],
-                [-0.25, 1.0, 2.0],
-                [-0.25, 1.0, 0.0],
-                [-1.0, 1.0, 0.0],
-            ],
-        ),
-        (
-            "ceiling right",
-            [
-                [0.25, 1.0, 2.0],
-                [1.0, 1.0, 2.0],
-                [1.0, 1.0, 0.0],
-                [0.25, 1.0, 0.0],
-            ],
-        ),
-        (
-            "ceiling back",
-            [
-                [-0.25, 1.0, 2.0],
-                [0.25, 1.0, 2.0],
-                [0.25, 1.0, 1.1666666],
-                [-0.25, 1.0, 1.1666666],
-            ],
-        ),
-        (
-            "ceiling front",
-            [
-                [-0.25, 1.0, 0.6666667],
-                [0.25, 1.0, 0.6666667],
-                [0.25, 1.0, 0.0],
-                [-0.25, 1.0, 0.0],
-            ],
-        ),
-    ] {
-        add(name, positions, [0.0, -1.0, 0.0], 0);
-    }
+    // Keep the four aperture panels in one logical mesh/instance. They are
+    // one continuous material surface, and assigning a different stable ID to
+    // each panel exposes an artificial rectangle to temporal reconstruction.
+    add_ceiling_with_light_aperture(&mut primitives, &mut instances);
+
+    let mut add =
+        |name: &str, positions: [[f32; 3]; 4], normal: [f32; 3], material_index: usize| {
+            add_quad(
+                &mut primitives,
+                &mut instances,
+                name,
+                positions,
+                normal,
+                material_index,
+            );
+        };
     add(
         "back",
         [
@@ -340,6 +285,113 @@ pub fn nested_dielectric() -> SceneAsset {
         liquid_material,
     );
     scene
+}
+
+fn add_quad(
+    primitives: &mut Vec<MeshPrimitive>,
+    instances: &mut Vec<SceneInstance>,
+    name: &str,
+    positions: [[f32; 3]; 4],
+    normal: [f32; 3],
+    material_index: usize,
+) {
+    let primitive_index = primitives.len();
+    primitives.push(MeshPrimitive {
+        name: name.to_string(),
+        vertices: positions
+            .into_iter()
+            .enumerate()
+            .map(|(index, position)| VertexAsset {
+                position,
+                normal,
+                tangent: [1.0, 0.0, 0.0, 1.0],
+                texcoord0: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]][index],
+                has_tangent: false,
+            })
+            .collect(),
+        indices: vec![0, 1, 2, 0, 2, 3],
+        material_index,
+        has_texcoord0: true,
+    });
+    let matrix = Mat4::IDENTITY;
+    instances.push(SceneInstance {
+        stable_id: instances.len() as u32,
+        primitive_index,
+        base_world: matrix,
+        current_world: matrix,
+        previous_world: matrix,
+    });
+}
+
+fn add_ceiling_with_light_aperture(
+    primitives: &mut Vec<MeshPrimitive>,
+    instances: &mut Vec<SceneInstance>,
+) {
+    // Model the emitter as an actual opening in the ceiling. A full ceiling
+    // plus a nearly coplanar light card creates a narrow occlusion cavity and
+    // projects non-physical indirect-light shadows around the fixture.
+    let panels = [
+        [
+            [-1.0, 1.0, 2.0],
+            [-0.25, 1.0, 2.0],
+            [-0.25, 1.0, 0.0],
+            [-1.0, 1.0, 0.0],
+        ],
+        [
+            [0.25, 1.0, 2.0],
+            [1.0, 1.0, 2.0],
+            [1.0, 1.0, 0.0],
+            [0.25, 1.0, 0.0],
+        ],
+        [
+            [-0.25, 1.0, 2.0],
+            [0.25, 1.0, 2.0],
+            [0.25, 1.0, 1.1666666],
+            [-0.25, 1.0, 1.1666666],
+        ],
+        [
+            [-0.25, 1.0, 0.6666667],
+            [0.25, 1.0, 0.6666667],
+            [0.25, 1.0, 0.0],
+            [-0.25, 1.0, 0.0],
+        ],
+    ];
+    let uv = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    let mut vertices = Vec::with_capacity(16);
+    let mut indices = Vec::with_capacity(24);
+    for panel in panels {
+        let base = vertices.len() as u32;
+        vertices.extend(
+            panel
+                .into_iter()
+                .enumerate()
+                .map(|(index, position)| VertexAsset {
+                    position,
+                    normal: [0.0, -1.0, 0.0],
+                    tangent: [1.0, 0.0, 0.0, 1.0],
+                    texcoord0: uv[index],
+                    has_tangent: false,
+                }),
+        );
+        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    let primitive_index = primitives.len();
+    primitives.push(MeshPrimitive {
+        name: "ceiling".to_string(),
+        vertices,
+        indices,
+        material_index: 0,
+        has_texcoord0: true,
+    });
+    let matrix = Mat4::IDENTITY;
+    instances.push(SceneInstance {
+        stable_id: instances.len() as u32,
+        primitive_index,
+        base_world: matrix,
+        current_world: matrix,
+        previous_world: matrix,
+    });
 }
 
 fn add_box(

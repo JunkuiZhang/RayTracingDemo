@@ -1425,24 +1425,28 @@ mod tests {
     fn cornell_box_geometry_has_consistent_primitive_metadata() {
         let scene = SceneAsset::cornell_box();
         scene.validate().unwrap();
-        // Cornell surfaces are intentionally split into multiple quads (the
-        // ceiling has an aperture for the area light), so derive the aggregate
-        // ABI counts instead of coupling this test to an obsolete quad count.
-        assert!(scene
+        // The aperture is four indexed panels in one logical ceiling mesh;
+        // every other primitive remains one quad.
+        let ceiling = scene
             .primitives
             .iter()
-            .all(|primitive| primitive.vertices.len() == 4));
-        assert!(scene
-            .primitives
-            .iter()
-            .all(|primitive| primitive.indices.len() == 6));
+            .find(|primitive| primitive.name == "ceiling")
+            .unwrap();
+        assert_eq!((ceiling.vertices.len(), ceiling.indices.len()), (16, 24));
+        assert!(scene.primitives.iter().all(|primitive| {
+            primitive.indices.len() % 3 == 0
+                && primitive
+                    .indices
+                    .iter()
+                    .all(|&index| index < primitive.vertices.len() as u32)
+        }));
         assert_eq!(
             scene
                 .primitives
                 .iter()
                 .map(|primitive| primitive.vertices.len())
                 .sum::<usize>(),
-            scene.primitives.len() * 4
+            84
         );
         assert_eq!(
             scene
@@ -1450,7 +1454,7 @@ mod tests {
                 .iter()
                 .map(|primitive| primitive.indices.len())
                 .sum::<usize>(),
-            scene.primitives.len() * 6
+            126
         );
         assert_eq!(scene.instances.len(), scene.primitives.len());
         for box_name in ["metal box", "glass box"] {
