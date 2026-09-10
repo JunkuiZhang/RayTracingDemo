@@ -26,6 +26,30 @@ impl SceneKind {
 pub const STREAMLINE_PROJECT_ID: &str = "59083655-5525-475b-95a2-a904bcf8f4c0";
 pub const STREAMLINE_ENGINE_VERSION: &str = concat!("RayTracingDemo-", env!("CARGO_PKG_VERSION"));
 
+pub const DEFAULT_HDR_PAPER_WHITE_NITS: u32 = 200;
+pub const DEFAULT_HDR_PEAK_NITS: u32 = 1_000;
+
+/// Explicit display-output intent. HDR stays opt-in so an SDR desktop keeps
+/// the byte-for-byte presentation and capture behavior used by acceptance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HdrConfig {
+    pub enabled: bool,
+    pub paper_white_nits: u32,
+    /// `None` uses the active display's reported peak, with a conservative
+    /// fallback when the driver does not expose useful luminance metadata.
+    pub peak_nits: Option<u32>,
+}
+
+impl Default for HdrConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            paper_white_nits: DEFAULT_HDR_PAPER_WHITE_NITS,
+            peak_nits: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RealtimeConfig {
     pub scene: SceneKind,
@@ -49,6 +73,7 @@ pub struct RealtimeConfig {
     pub requested_upscaler: Option<UpscalerMode>,
     pub reflex_mode: ReflexMode,
     pub frame_generation: FrameGenerationMode,
+    pub hdr: HdrConfig,
     /// Optional NVIDIA-assigned NGX identity. `None` uses this custom engine's
     /// stable Project ID and package-derived engine version instead.
     pub streamline_application_id: Option<u32>,

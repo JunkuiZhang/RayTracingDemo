@@ -32,6 +32,11 @@ pub struct CaptureMetadata {
     pub denoiser_backend: String,
     pub upscaler_mode: String,
     pub reflex_mode: String,
+    pub display_mode: String,
+    pub hdr_paper_white_nits: Option<u32>,
+    pub hdr_peak_nits: Option<u32>,
+    pub display_peak_nits: Option<u32>,
+    pub bits_per_color: Option<u32>,
     pub streamline_sdk_version: Option<String>,
     pub viewport_id: Option<u32>,
 }
@@ -48,10 +53,10 @@ pub enum CaptureLayoutError {
 impl std::fmt::Display for CaptureLayoutError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
-            Self::WidthOverflow => "capture width overflows RGBA8 row size",
+            Self::WidthOverflow => "capture width overflows source row size",
             Self::HeightOverflow => "capture height overflows row offset",
             Self::OffsetOutOfBounds => "capture footprint offset is outside the buffer",
-            Self::RowPitchTooSmall => "capture row pitch is smaller than RGBA8 row size",
+            Self::RowPitchTooSmall => "capture row pitch is smaller than the source row size",
             Self::BufferTooSmall => "capture readback buffer is shorter than the footprint",
         };
         formatter.write_str(message)
@@ -92,6 +97,80 @@ pub fn unpack_rgba8_rows(
         rgba.extend_from_slice(&mapped[start..start + row_bytes]);
     }
     Ok(rgba)
+}
+
+/// Converts a linear FP16 scRGB presentation surface to an SDR PNG preview.
+/// The live HDR signal is left untouched; this only maps reference white back
+/// to 1.0 so existing PNG tooling remains useful for deterministic captures.
+pub fn unpack_scrgb_f16_rows_to_rgba8(
+    mapped: &[u8],
+    footprint_offset: usize,
+    row_pitch: usize,
+    width: u32,
+    height: u32,
+    paper_white_nits: u32,
+) -> Result<Vec<u8>, CaptureLayoutError> {
+    let row_bytes = (width as usize)
+        .checked_mul(8)
+        .ok_or(CaptureLayoutError::WidthOverflow)?;
+    if row_pitch < row_bytes {
+        return Err(CaptureLayoutError::RowPitchTooSmall);
+    }
+    let rows = height as usize;
+    let source_bytes = row_pitch
+        .checked_mul(rows)
+        .ok_or(CaptureLayoutError::HeightOverflow)?;
+    let end = footprint_offset
+        .checked_add(source_bytes)
+        .ok_or(CaptureLayoutError::OffsetOutOfBounds)?;
+    if end > mapped.len() {
+        return Err(CaptureLayoutError::BufferTooSmall);
+    }
+
+    let pixel_count = (width as usize)
+        .checked_mul(rows)
+        .ok_or(CaptureLayoutError::HeightOverflow)?;
+    let mut rgba = Vec::with_capacity(
+        pixel_count
+            .checked_mul(4)
+            .ok_or(CaptureLayoutError::HeightOverflow)?,
+    );
+    let reference_white_scale = (paper_white_nits.max(80) as f32) / 80.0;
+    for row in 0..rows {
+        let start = footprint_offset + row * row_pitch;
+        for pixel in mapped[start..start + row_bytes].chunks_exact(8) {
+            for channel in 0..3 {
+                let bits = u16::from_le_bytes([pixel[channel * 2], pixel[channel * 2 + 1]]);
+                let linear = half_to_f32(bits);
+                let normalized = if linear.is_finite() {
+                    (linear / reference_white_scale).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let srgb = if normalized <= 0.003_130_8 {
+                    normalized * 12.92
+                } else {
+                    1.055 * normalized.powf(1.0 / 2.4) - 0.055
+                };
+                rgba.push((srgb * 255.0).round() as u8);
+            }
+            rgba.push(255);
+        }
+    }
+    Ok(rgba)
+}
+
+fn half_to_f32(bits: u16) -> f32 {
+    let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exponent = ((bits >> 10) & 0x1f) as i32;
+    let mantissa = (bits & 0x03ff) as u32;
+    let magnitude = match exponent {
+        0 => (mantissa as f32) * 2.0_f32.powi(-24),
+        31 if mantissa == 0 => f32::INFINITY,
+        31 => f32::NAN,
+        _ => (1.0 + mantissa as f32 / 1024.0) * 2.0_f32.powi(exponent - 15),
+    };
+    sign * magnitude
 }
 
 pub fn write_png_atomic(
@@ -196,6 +275,14 @@ pub fn capture_json_line(metadata: &CaptureMetadata, png_bytes: u64) -> String {
             "sdk_version": metadata.streamline_sdk_version,
             "viewport_id": metadata.viewport_id,
         },
+        "display": {
+            "mode": metadata.display_mode,
+            "paper_white_nits": metadata.hdr_paper_white_nits,
+            "peak_nits": metadata.hdr_peak_nits,
+            "display_peak_nits": metadata.display_peak_nits,
+            "bits_per_color": metadata.bits_per_color,
+            "capture_encoding": if metadata.display_mode == "hdr-scrgb" { "sdr-png-preview" } else { "sdr-rgba8" },
+        },
         "png_bytes": png_bytes,
     })
     .to_string()
@@ -233,6 +320,25 @@ mod tests {
     }
 
     #[test]
+    fn scrgb_fp16_capture_maps_reference_white_to_sdr_and_rejects_short_rows() {
+        // 2.5 scRGB equals the default 200-nit reference white. Alpha is
+        // intentionally ignored because PNG captures are always opaque.
+        let pixel = [0x00, 0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0x3c];
+        assert_eq!(
+            unpack_scrgb_f16_rows_to_rgba8(&pixel, 0, 8, 1, 1, 200).unwrap(),
+            vec![255, 255, 255, 255]
+        );
+        assert_eq!(
+            unpack_scrgb_f16_rows_to_rgba8(&pixel[..7], 0, 8, 1, 1, 200),
+            Err(CaptureLayoutError::BufferTooSmall)
+        );
+        assert_eq!(
+            unpack_scrgb_f16_rows_to_rgba8(&pixel, 0, 7, 1, 1, 200),
+            Err(CaptureLayoutError::RowPitchTooSmall)
+        );
+    }
+
+    #[test]
     fn capture_json_preserves_fixed_and_dynamic_metadata() {
         let metadata = CaptureMetadata {
             png_path: "capture.png".to_string(),
@@ -257,6 +363,11 @@ mod tests {
             denoiser_backend: "svgf".to_string(),
             upscaler_mode: "native".to_string(),
             reflex_mode: "unavailable".to_string(),
+            display_mode: "sdr".to_string(),
+            hdr_paper_white_nits: None,
+            hdr_peak_nits: None,
+            display_peak_nits: None,
+            bits_per_color: None,
             streamline_sdk_version: None,
             viewport_id: None,
         };
@@ -270,6 +381,24 @@ mod tests {
         assert_eq!(value["modes"]["denoiser"], "svgf");
         assert_eq!(value["path_space"]["consumer"], "nrd-stable-planes");
         assert_eq!(value["path_space"]["allocated_bytes"], 123_456);
+        assert_eq!(value["display"]["mode"], "sdr");
+        assert_eq!(value["display"]["capture_encoding"], "sdr-rgba8");
         assert_eq!(value["png_bytes"], 256);
+
+        let hdr_metadata = CaptureMetadata {
+            display_mode: "hdr-scrgb".to_string(),
+            hdr_paper_white_nits: Some(200),
+            hdr_peak_nits: Some(1_000),
+            display_peak_nits: Some(1_200),
+            bits_per_color: Some(10),
+            ..metadata
+        };
+        let hdr: serde_json::Value =
+            serde_json::from_str(&capture_json_line(&hdr_metadata, 512)).unwrap();
+        assert_eq!(hdr["display"]["capture_encoding"], "sdr-png-preview");
+        assert_eq!(hdr["display"]["paper_white_nits"], 200);
+        assert_eq!(hdr["display"]["peak_nits"], 1_000);
+        assert_eq!(hdr["display"]["display_peak_nits"], 1_200);
+        assert_eq!(hdr["display"]["bits_per_color"], 10);
     }
 }

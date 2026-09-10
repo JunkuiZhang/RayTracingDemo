@@ -46,7 +46,10 @@ use crate::{
     as_policy::AccelerationStructureStats,
     debug_view::DebugView,
     path_space::{ActivePathSpace, PathSpaceMode, resolve_path_space},
-    realtime::{AtrousMode, CommandRecordingMode, RealtimeConfig, ReflexMode},
+    realtime::{
+        AtrousMode, CommandRecordingMode, DEFAULT_HDR_PEAK_NITS, HdrConfig, RealtimeConfig,
+        ReflexMode,
+    },
     reconstruction::{
         CameraPose, DenoiserBackend, NRD_COMMIT_PREFIX, NRD_VERSION,
         RECONSTRUCTION_CONTRACT_VERSION, ReconstructionFrameInput, ReconstructionFrameState,
@@ -62,7 +65,10 @@ use crate::{
 };
 
 use self::{
-    capture::{CaptureMetadata, capture_json_line, unpack_rgba8_rows, write_png_atomic},
+    capture::{
+        CaptureMetadata, capture_json_line, unpack_rgba8_rows, unpack_scrgb_f16_rows_to_rgba8,
+        write_png_atomic,
+    },
     descriptor::DescriptorHeap,
     memory::{
         VideoMemoryMeasurement, VideoMemorySnapshot, VideoMemoryStatus, VideoMemoryTelemetry,
@@ -282,6 +288,123 @@ impl SwapChainInterfaces {
     fn is_proxied(&self) -> bool {
         self.proxy.is_some()
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DisplayOutputState {
+    hdr: HdrConfig,
+    effective_peak_nits: u32,
+    display_peak_nits: Option<u32>,
+    bits_per_color: Option<u32>,
+}
+
+impl DisplayOutputState {
+    const fn requested(config: HdrConfig) -> Self {
+        Self {
+            hdr: config,
+            effective_peak_nits: match config.peak_nits {
+                Some(peak) => peak,
+                None => DEFAULT_HDR_PEAK_NITS,
+            },
+            display_peak_nits: None,
+            bits_per_color: None,
+        }
+    }
+
+    const fn format(self) -> DXGI_FORMAT {
+        if self.hdr.enabled {
+            DXGI_FORMAT_R16G16B16A16_FLOAT
+        } else {
+            DXGI_FORMAT_R8G8B8A8_UNORM
+        }
+    }
+
+    const fn hlsl_mode(self) -> u32 {
+        if self.hdr.enabled { 1 } else { 0 }
+    }
+
+    const fn name(self) -> &'static str {
+        if self.hdr.enabled { "hdr-scrgb" } else { "sdr" }
+    }
+}
+
+unsafe fn configure_display_output(
+    swap_chain: &SwapChainInterfaces,
+    requested: DisplayOutputState,
+) -> Result<DisplayOutputState> {
+    if !requested.hdr.enabled {
+        return Ok(requested);
+    }
+
+    let color_space = DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
+    let support = unsafe { swap_chain.hooked().CheckColorSpaceSupport(color_space) }
+        .map_err(|error| dx_error("检查 scRGB 色彩空间支持", error))?;
+    if support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT.0 as u32 == 0 {
+        return Err(WindowsError::new(
+            windows::core::HRESULT(0x80004005_u32 as i32),
+            "当前输出不支持呈现 FP16 scRGB；请确认 Windows HDR 已开启",
+        ));
+    }
+
+    let output = unsafe { swap_chain.hooked().GetContainingOutput() }
+        .map_err(|error| dx_error("获取 HDR 所在显示器", error))?;
+    let output: IDXGIOutput6 = output
+        .cast()
+        .map_err(|error| dx_error("获取 IDXGIOutput6 HDR 能力", error))?;
+    let description =
+        unsafe { output.GetDesc1() }.map_err(|error| dx_error("读取显示器 HDR 能力", error))?;
+    if description.ColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 {
+        return Err(WindowsError::new(
+            windows::core::HRESULT(0x80004005_u32 as i32),
+            "当前窗口所在显示器未启用 Windows HDR；请先在系统显示设置中开启 HDR",
+        ));
+    }
+
+    unsafe { swap_chain.hooked().SetColorSpace1(color_space) }
+        .map_err(|error| dx_error("设置 FP16 scRGB 交换链色彩空间", error))?;
+    let display_peak_nits = description
+        .MaxLuminance
+        .is_finite()
+        .then_some(description.MaxLuminance.round() as u32)
+        .filter(|peak| *peak >= requested.hdr.paper_white_nits);
+    let effective_peak_nits = requested
+        .hdr
+        .peak_nits
+        .or(display_peak_nits)
+        .unwrap_or(DEFAULT_HDR_PEAK_NITS)
+        .max(requested.hdr.paper_white_nits);
+    let configured = DisplayOutputState {
+        hdr: requested.hdr,
+        effective_peak_nits,
+        display_peak_nits,
+        bits_per_color: Some(description.BitsPerColor),
+    };
+    eprintln!(
+        "display_output mode={} format=R16G16B16A16_FLOAT colorspace=scRGB paper_white_nits={} peak_nits={} display_peak_nits={} bits_per_color={}",
+        configured.name(),
+        configured.hdr.paper_white_nits,
+        configured.effective_peak_nits,
+        configured
+            .display_peak_nits
+            .map_or_else(|| "unknown".to_string(), |value| value.to_string()),
+        configured.bits_per_color.unwrap_or(0),
+    );
+    Ok(configured)
+}
+
+unsafe fn restore_display_color_space(
+    swap_chain: &SwapChainInterfaces,
+    display: DisplayOutputState,
+) -> Result<()> {
+    if display.hdr.enabled {
+        unsafe {
+            swap_chain
+                .hooked()
+                .SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709)
+        }
+        .map_err(|error| dx_error("恢复 FP16 scRGB 交换链色彩空间", error))?;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "streamline")]
@@ -534,6 +657,7 @@ impl StreamlineRuntime {
         output_extent: Extent2D,
         render_extent: Extent2D,
         mode: FrameGenerationMode,
+        color_format: DXGI_FORMAT,
     ) -> crate::streamline::FrameGenerationOptions {
         crate::streamline::FrameGenerationOptions {
             struct_size: size_of::<crate::streamline::FrameGenerationOptions>() as u32,
@@ -549,10 +673,10 @@ impl StreamlineRuntime {
             mvec_depth_height: render_extent.height,
             color_width: output_extent.width,
             color_height: output_extent.height,
-            color_buffer_format: DXGI_FORMAT_R8G8B8A8_UNORM.0 as u32,
+            color_buffer_format: color_format.0 as u32,
             mvec_buffer_format: DXGI_FORMAT_R16G16_FLOAT.0 as u32,
             depth_buffer_format: DXGI_FORMAT_R32_FLOAT.0 as u32,
-            hud_less_buffer_format: DXGI_FORMAT_R8G8B8A8_UNORM.0 as u32,
+            hud_less_buffer_format: color_format.0 as u32,
         }
     }
 
@@ -1855,6 +1979,8 @@ struct PendingCapture {
     total_bytes: usize,
     width: u32,
     height: u32,
+    hdr_scrgb: bool,
+    paper_white_nits: u32,
     metadata: CaptureMetadata,
     fence_value: u64,
 }
@@ -1912,6 +2038,7 @@ pub struct Dx12Renderer {
     window_focused: bool,
     #[cfg(feature = "streamline-fg")]
     swap_chain_description: DXGI_SWAP_CHAIN_DESC1,
+    display_output: DisplayOutputState,
     rtv_heap: DescriptorHeap,
     render_targets: [Option<TrackedResource>; FRAME_COUNT],
     active_generation: RenderResourceGeneration,
@@ -2223,10 +2350,11 @@ impl Dx12Renderer {
             let present_allow_tearing = dxgi_tearing_supported(factory_interfaces.hooked());
             #[cfg(not(feature = "streamline-fg"))]
             let present_allow_tearing = false;
+            let requested_display_output = DisplayOutputState::requested(config.hdr);
             let swap_chain_description = DXGI_SWAP_CHAIN_DESC1 {
                 Width: width,
                 Height: height,
-                Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                Format: requested_display_output.format(),
                 Stereo: false.into(),
                 SampleDesc: DXGI_SAMPLE_DESC {
                     Count: 1,
@@ -2291,6 +2419,7 @@ impl Dx12Renderer {
                     &swap_chain_description,
                 )?
             };
+            let display_output = configure_display_output(&swap_chain, requested_display_output)?;
             #[cfg(feature = "streamline-fg")]
             let fg_loaded = if let Some(runtime) = streamline.as_ref() {
                 if runtime.frame_generation_supported() {
@@ -2458,7 +2587,7 @@ impl Dx12Renderer {
                 TONEMAP_SHADER,
                 14,
                 1,
-                3,
+                6,
                 "Tone Map 与调试视图",
             )
             .map_err(|error| dx_error("创建 Tone Map 管线", error))?;
@@ -2661,6 +2790,7 @@ impl Dx12Renderer {
                     output_extent,
                     render_extent,
                     FrameGenerationMode::On,
+                    display_output.format(),
                 );
                 let state = runtime.get_frame_generation_state(viewport, Some(&estimate))?;
                 if state.min_width_or_height != 0
@@ -2725,6 +2855,7 @@ impl Dx12Renderer {
                         && config.denoiser != DenoiserBackend::DlssRayReconstruction,
                     with_dlss_rr: config.denoiser == DenoiserBackend::DlssRayReconstruction,
                     with_stable_planes: active_path_space.uses_stable_planes(),
+                    display_format: display_output.format(),
                 },
             )
             .map_err(|error| dx_error("创建初始渲染资源代际", error))?;
@@ -2743,6 +2874,7 @@ impl Dx12Renderer {
                 window_focused: window.has_focus(),
                 #[cfg(feature = "streamline-fg")]
                 swap_chain_description,
+                display_output,
                 rtv_heap,
                 render_targets: [None, None, None],
                 active_generation,
@@ -4200,6 +4332,9 @@ impl Dx12Renderer {
                     self.debug_view.hlsl_value(),
                     1.0_f32.to_bits(),
                     tonemap_input_mode(self.denoiser, dlss_active || rr_active),
+                    self.display_output.hlsl_mode(),
+                    (self.display_output.hdr.paper_white_nits as f32).to_bits(),
+                    (self.display_output.effective_peak_nits as f32).to_bits(),
                 ],
             );
             self.command_list
@@ -4379,6 +4514,7 @@ impl Dx12Renderer {
                     output_extent,
                     render_extent,
                     FrameGenerationMode::On,
+                    self.display_output.format(),
                 );
                 runtime.set_frame_generation_options(viewport, &options)?;
                 self.frame_generation
@@ -4604,9 +4740,14 @@ impl Dx12Renderer {
                 "capture readback size does not fit usize",
             )
         })?;
+        let source_bytes_per_pixel = if self.display_output.hdr.enabled {
+            8
+        } else {
+            4
+        };
         if total_bytes == 0
             || row_count != output_extent.height
-            || row_size < output_extent.width as u64 * 4
+            || row_size < output_extent.width as u64 * source_bytes_per_pixel
         {
             return Err(WindowsError::new(
                 windows::core::HRESULT(0x80004005_u32 as i32),
@@ -4691,6 +4832,8 @@ impl Dx12Renderer {
             total_bytes,
             width: output_extent.width,
             height: output_extent.height,
+            hdr_scrgb: self.display_output.hdr.enabled,
+            paper_white_nits: self.display_output.hdr.paper_white_nits,
             metadata: CaptureMetadata {
                 png_path: request.path.to_string_lossy().into_owned(),
                 gpu_name: self.gpu_name.clone(),
@@ -4723,6 +4866,19 @@ impl Dx12Renderer {
                 denoiser_backend: self.denoiser.as_str().to_string(),
                 upscaler_mode: self.upscaler.as_str().to_string(),
                 reflex_mode: self.reflex_mode_name().to_string(),
+                display_mode: self.display_output.name().to_string(),
+                hdr_paper_white_nits: self
+                    .display_output
+                    .hdr
+                    .enabled
+                    .then_some(self.display_output.hdr.paper_white_nits),
+                hdr_peak_nits: self
+                    .display_output
+                    .hdr
+                    .enabled
+                    .then_some(self.display_output.effective_peak_nits),
+                display_peak_nits: self.display_output.display_peak_nits,
+                bits_per_color: self.display_output.bits_per_color,
                 streamline_sdk_version,
                 viewport_id,
             },
@@ -4751,13 +4907,24 @@ impl Dx12Renderer {
                 .readback
                 .Map(0, Some(&read_range), Some(&mut mapped))?;
             let mapped = std::slice::from_raw_parts(mapped.cast::<u8>(), pending.total_bytes);
-            let rgba = unpack_rgba8_rows(
-                mapped,
-                pending.footprint.Offset as usize,
-                pending.footprint.Footprint.RowPitch as usize,
-                pending.width,
-                pending.height,
-            );
+            let rgba = if pending.hdr_scrgb {
+                unpack_scrgb_f16_rows_to_rgba8(
+                    mapped,
+                    pending.footprint.Offset as usize,
+                    pending.footprint.Footprint.RowPitch as usize,
+                    pending.width,
+                    pending.height,
+                    pending.paper_white_nits,
+                )
+            } else {
+                unpack_rgba8_rows(
+                    mapped,
+                    pending.footprint.Offset as usize,
+                    pending.footprint.Footprint.RowPitch as usize,
+                    pending.width,
+                    pending.height,
+                )
+            };
             pending
                 .readback
                 .Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }));
@@ -4843,8 +5010,17 @@ impl Dx12Renderer {
                 FRAME_COUNT as u32,
                 width,
                 height,
-                DXGI_FORMAT_R8G8B8A8_UNORM,
+                self.display_output.format(),
                 resize_flags,
+            )?;
+            restore_display_color_space(
+                #[cfg(feature = "streamline-fg")]
+                self.swap_chain
+                    .as_ref()
+                    .expect("swap chain exists during resize"),
+                #[cfg(not(feature = "streamline-fg"))]
+                &self.swap_chain,
+                self.display_output,
             )?;
             for frame in &mut self.frames {
                 frame.fence_value = 0;
@@ -4911,6 +5087,7 @@ impl Dx12Renderer {
                         && self.denoiser != DenoiserBackend::DlssRayReconstruction,
                     with_dlss_rr: self.denoiser == DenoiserBackend::DlssRayReconstruction,
                     with_stable_planes: self.active_path_space.uses_stable_planes(),
+                    display_format: self.display_output.format(),
                 },
             )?;
             self.next_generation_id = self.next_generation_id.saturating_add(1);
@@ -5080,6 +5257,7 @@ impl Dx12Renderer {
                     && self.denoiser != DenoiserBackend::DlssRayReconstruction,
                 with_dlss_rr: self.denoiser == DenoiserBackend::DlssRayReconstruction,
                 with_stable_planes: self.active_path_space.uses_stable_planes(),
+                display_format: self.display_output.format(),
             },
         )
         .map_err(|error| {
@@ -5225,6 +5403,7 @@ impl Dx12Renderer {
                         && self.denoiser != DenoiserBackend::DlssRayReconstruction,
                     with_dlss_rr: self.denoiser == DenoiserBackend::DlssRayReconstruction,
                     with_stable_planes: self.active_path_space.uses_stable_planes(),
+                    display_format: self.display_output.format(),
                 },
             )
             .map_err(|error| {
@@ -5350,6 +5529,7 @@ impl Dx12Renderer {
                     && next != DenoiserBackend::DlssRayReconstruction,
                 with_dlss_rr: next == DenoiserBackend::DlssRayReconstruction,
                 with_stable_planes: next_active_path_space.uses_stable_planes(),
+                display_format: self.display_output.format(),
             },
         )
         .map_err(|error| {
@@ -5519,6 +5699,10 @@ impl Dx12Renderer {
 
     pub fn upscaler_name(&self) -> &'static str {
         self.upscaler.as_str()
+    }
+
+    pub fn display_output_name(&self) -> &'static str {
+        self.display_output.name()
     }
 
     pub fn reflex_mode_name(&self) -> &'static str {
@@ -5775,6 +5959,7 @@ impl Dx12Renderer {
                 dlss_viewport_id,
                 rr_support: self.rr_support_json(),
                 reflex: self.reflex_json(),
+                display_output: self.display_output,
                 denoiser_switch_count: self
                     .denoiser_switch_count
                     .saturating_sub(self.benchmark_denoiser_switch_baseline),
@@ -6070,6 +6255,7 @@ struct BenchmarkJsonContext<'a> {
     dlss_viewport_id: Option<u32>,
     rr_support: serde_json::Value,
     reflex: serde_json::Value,
+    display_output: DisplayOutputState,
     denoiser_switch_count: u64,
     nrd_compiled: bool,
 }
@@ -6119,6 +6305,7 @@ fn benchmark_json_line(
         dlss_viewport_id,
         rr_support,
         reflex,
+        display_output,
         denoiser_switch_count,
         nrd_compiled,
     } = context;
@@ -6197,6 +6384,15 @@ fn benchmark_json_line(
         },
         "dlss_rr": rr_support,
         "reflex": reflex,
+        "display": {
+            "mode": display_output.name(),
+            "format": if display_output.hdr.enabled { "R16G16B16A16_FLOAT" } else { "R8G8B8A8_UNORM" },
+            "color_space": if display_output.hdr.enabled { "RGB_FULL_G10_NONE_P709" } else { "RGB_FULL_G22_NONE_P709" },
+            "paper_white_nits": display_output.hdr.enabled.then_some(display_output.hdr.paper_white_nits),
+            "peak_nits": display_output.hdr.enabled.then_some(display_output.effective_peak_nits),
+            "display_peak_nits": display_output.display_peak_nits,
+            "bits_per_color": display_output.bits_per_color,
+        },
         "denoiser": {
             "requested": denoiser_backend,
             "active": denoiser_backend,
@@ -6494,6 +6690,7 @@ impl Dx12Renderer {
                 self.active_generation.output_extent,
                 self.active_generation.render_extent,
                 FrameGenerationMode::Off,
+                self.display_output.format(),
             );
             unsafe { runtime.set_frame_generation_options(viewport, &options)? };
             if let (Some(token), Some(viewport_id)) =
@@ -6531,6 +6728,7 @@ impl Dx12Renderer {
                 self.streamline.as_ref(),
             )?
         };
+        unsafe { restore_display_color_space(&new_chain, self.display_output)? };
         self.swap_chain = Some(new_chain);
         unsafe { self.create_render_targets()? };
         for frame in &mut self.frames {
@@ -6566,6 +6764,7 @@ impl Dx12Renderer {
                 self.active_generation.output_extent,
                 self.active_generation.render_extent,
                 FrameGenerationMode::On,
+                self.display_output.format(),
             );
             let state = unsafe { runtime.get_frame_generation_state(viewport, Some(&estimate))? };
             if state.num_frames_to_generate_max < 1
@@ -6614,7 +6813,7 @@ impl Dx12Renderer {
             self.render_targets[index] = Some(TrackedResource::new(
                 resource,
                 D3D12_RESOURCE_STATE_PRESENT,
-                DXGI_FORMAT_R8G8B8A8_UNORM,
+                self.display_output.format(),
                 self.width,
                 self.height,
                 format!("交换链缓冲 {index}"),
@@ -7409,7 +7608,7 @@ impl Dx12Renderer {
             &shaders.tonemap,
             14,
             1,
-            3,
+            6,
             "Tone Map 与调试视图",
         )?;
         let stable_plane_build = ComputePipeline::new_with_root_srv(
@@ -7576,6 +7775,7 @@ impl Dx12Renderer {
                 self.active_generation.output_extent,
                 self.active_generation.render_extent,
                 FrameGenerationMode::Off,
+                self.display_output.format(),
             );
             unsafe { runtime.set_frame_generation_options(viewport, &options)? };
             unsafe { runtime.clear_frame_generation_tags(token, viewport_id)? };
@@ -8605,6 +8805,28 @@ mod tests {
     }
 
     #[test]
+    fn hdr_display_contract_uses_fp16_scrgb_and_absolute_luminance() {
+        let sdr = DisplayOutputState::requested(HdrConfig::default());
+        assert_eq!(sdr.format(), DXGI_FORMAT_R8G8B8A8_UNORM);
+        assert_eq!(sdr.hlsl_mode(), 0);
+
+        let hdr = DisplayOutputState::requested(HdrConfig {
+            enabled: true,
+            paper_white_nits: 200,
+            peak_nits: Some(800),
+        });
+        assert_eq!(hdr.format(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+        assert_eq!(hdr.hlsl_mode(), 1);
+        assert_eq!(hdr.effective_peak_nits, 800);
+
+        let shader = include_str!("../../shaders/stage6_tonemap.hlsl");
+        assert!(shader.contains("OutputMode == 1u"));
+        assert!(shader.contains("scRgbReferenceWhiteNits = 80.0"));
+        assert!(shader.contains("sourceNits = luminance * PaperWhiteNits"));
+        assert!(shader.contains("headroomNits * (1.0 - exp(-highlightNits / headroomNits))"));
+    }
+
+    #[test]
     fn tonemap_debug_views_sample_each_resource_at_its_own_extent() {
         let shader = include_str!("../../shaders/stage6_tonemap.hlsl");
         assert!(shader.contains("LoadForOutput(Texture2D<float4>"));
@@ -8934,6 +9156,7 @@ mod tests {
                     "result_raw": 5,
                 }),
                 reflex: serde_json::Value::Null,
+                display_output: DisplayOutputState::requested(HdrConfig::default()),
                 denoiser_switch_count: 0,
                 nrd_compiled: false,
             },

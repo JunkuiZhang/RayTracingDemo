@@ -266,6 +266,7 @@ pub(super) struct RenderGenerationDesc {
     pub(super) with_dlss_sr: bool,
     pub(super) with_dlss_rr: bool,
     pub(super) with_stable_planes: bool,
+    pub(super) display_format: DXGI_FORMAT,
 }
 
 impl RenderResourceGeneration {
@@ -284,6 +285,7 @@ impl RenderResourceGeneration {
             with_dlss_sr,
             with_dlss_rr,
             with_stable_planes,
+            display_format,
         } = description;
         let shader_heap = DescriptorHeap::new(
             device,
@@ -328,7 +330,7 @@ impl RenderResourceGeneration {
         let display_output = create_uav_texture(
             device,
             output_extent,
-            DXGI_FORMAT_R8G8B8A8_UNORM,
+            display_format,
             format!("代际 {id} Tone Map 显示输出"),
         )?;
         let raw_diffuse = create_uav_texture(

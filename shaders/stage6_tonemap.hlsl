@@ -24,11 +24,46 @@ cbuffer ToneMapConstants : register(b0)
     // DLSS SR returns a complete HDR texture. RR instead excludes direct
     // emissive coverage so it can be stabilized and added exactly once here.
     uint InputMode;
+    // 0 = SDR RGBA8/sRGB, 1 = HDR FP16/linear scRGB.
+    uint OutputMode;
+    float PaperWhiteNits;
+    float PeakNits;
 };
 
 float3 ToneMap(float3 hdr)
 {
-    hdr *= Exposure;
+    hdr = max(hdr * Exposure, 0.0);
+    if (OutputMode == 1u)
+    {
+        // scRGB is scene-referred on an HDR desktop: 1.0 linear represents
+        // 80 nit. Preserve chromaticity while applying a smooth luminance
+        // shoulder to the active panel peak instead of clipping highlights.
+        const float scRgbReferenceWhiteNits = 80.0;
+        float luminance = dot(hdr, float3(0.2126, 0.7152, 0.0722));
+        float sourceNits = luminance * PaperWhiteNits;
+        float headroomNits = max(PeakNits - PaperWhiteNits, 0.0);
+        // Keep diffuse values through paper white linear, then apply a C1
+        // continuous shoulder that approaches the panel peak. This avoids
+        // changing ordinary material brightness merely because HDR is active.
+        float mappedNits = min(sourceNits, PaperWhiteNits);
+        if (sourceNits > PaperWhiteNits && headroomNits > 1e-3)
+        {
+            float highlightNits = sourceNits - PaperWhiteNits;
+            mappedNits = PaperWhiteNits
+                + headroomNits * (1.0 - exp(-highlightNits / headroomNits));
+        }
+        else if (headroomNits <= 1e-3)
+        {
+            mappedNits = min(sourceNits, PeakNits);
+        }
+        float scale = luminance > 1e-6 ? mappedNits / (luminance * scRgbReferenceWhiteNits) : 0.0;
+        float3 scRgb = hdr * scale;
+        float maximum = max(scRgb.r, max(scRgb.g, scRgb.b));
+        float scRgbPeak = PeakNits / scRgbReferenceWhiteNits;
+        if (maximum > scRgbPeak)
+            scRgb *= scRgbPeak / maximum;
+        return all(isfinite(scRgb)) ? scRgb : 0.0;
+    }
     float3 mapped = saturate(
         (hdr * (2.51 * hdr + 0.03))
         / (hdr * (2.43 * hdr + 0.59) + 0.14));

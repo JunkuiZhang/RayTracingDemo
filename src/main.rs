@@ -109,12 +109,15 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                 | "--upscaler"
                 | "--reflex-mode"
                 | "--frame-generation"
+                | "--hdr"
+                | "--hdr-paper-white-nits"
+                | "--hdr-peak-nits"
                 | "--streamline-application-id"
         )
     });
     if cpu_reference_requested && realtime_requested {
         return Err(
-            "--cpu-reference 不能与实时渲染选项（--model、--scene、--animate-model、--benchmark-seconds、--capture-output、--capture-after-spp、--debug-view、--atrous-mode、--output-size、--render-scale、--dynamic-resolution、--target-gpu-ms、--command-recording-mode、--acceleration-structure-mode、--path-space-mode、--denoiser、--upscaler、--reflex-mode、--frame-generation、--streamline-application-id）同时使用"
+            "--cpu-reference 不能与实时渲染选项（--model、--scene、--animate-model、--benchmark-seconds、--capture-output、--capture-after-spp、--debug-view、--atrous-mode、--output-size、--render-scale、--dynamic-resolution、--target-gpu-ms、--command-recording-mode、--acceleration-structure-mode、--path-space-mode、--denoiser、--upscaler、--reflex-mode、--frame-generation、--hdr、--hdr-paper-white-nits、--hdr-peak-nits、--streamline-application-id）同时使用"
                 .to_string(),
         );
     }
@@ -139,6 +142,12 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
         let benchmark_requested = arguments
             .iter()
             .any(|argument| argument == "--benchmark-seconds");
+        let hdr_paper_white_requested = arguments
+            .iter()
+            .any(|argument| argument == "--hdr-paper-white-nits");
+        let hdr_peak_requested = arguments
+            .iter()
+            .any(|argument| argument == "--hdr-peak-nits");
         if dynamic_requested && render_scale_requested {
             return Err("--dynamic-resolution 不能与 --render-scale 同时使用".to_string());
         }
@@ -244,6 +253,15 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
                     let value = arguments.next().ok_or("--frame-generation 缺少模式")?;
                     config.frame_generation = parse_frame_generation_mode(&value)?;
                 }
+                "--hdr" => config.hdr.enabled = true,
+                "--hdr-paper-white-nits" => {
+                    let value = arguments.next().ok_or("--hdr-paper-white-nits 缺少数值")?;
+                    config.hdr.paper_white_nits = parse_hdr_paper_white_nits(&value)?;
+                }
+                "--hdr-peak-nits" => {
+                    let value = arguments.next().ok_or("--hdr-peak-nits 缺少数值")?;
+                    config.hdr.peak_nits = Some(parse_hdr_peak_nits(&value)?);
+                }
                 "--streamline-application-id" => {
                     let value = arguments
                         .next()
@@ -291,6 +309,16 @@ fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> Result<Comman
         }
         if config.capture_output.is_none() && config.capture_after_spp.is_some() {
             return Err("--capture-after-spp 只能与 --capture-output 一起使用".to_string());
+        }
+        if (hdr_paper_white_requested || hdr_peak_requested) && !config.hdr.enabled {
+            return Err("HDR 亮度参数只能与 --hdr 一起使用".to_string());
+        }
+        if config
+            .hdr
+            .peak_nits
+            .is_some_and(|peak| peak < config.hdr.paper_white_nits)
+        {
+            return Err("--hdr-peak-nits 不能低于 --hdr-paper-white-nits".to_string());
         }
         validate_frame_generation_request(&config)?;
         return Ok(Command::Realtime(config));
@@ -515,6 +543,29 @@ fn parse_frame_generation_mode(value: &str) -> Result<realtime::FrameGenerationM
     }
 }
 
+fn parse_hdr_paper_white_nits(value: &str) -> Result<u32, String> {
+    parse_bounded_nits(value, "--hdr-paper-white-nits", 80, 500)
+}
+
+fn parse_hdr_peak_nits(value: &str) -> Result<u32, String> {
+    parse_bounded_nits(value, "--hdr-peak-nits", 300, 10_000)
+}
+
+fn parse_bounded_nits(
+    value: &str,
+    option: &str,
+    minimum: u32,
+    maximum: u32,
+) -> Result<u32, String> {
+    let nits = value
+        .parse::<u32>()
+        .map_err(|_| format!("{option} 必须是 {minimum}..{maximum} 范围内的整数"))?;
+    if !(minimum..=maximum).contains(&nits) {
+        return Err(format!("{option} 必须在 {minimum}..{maximum} nit 范围内"));
+    }
+    Ok(nits)
+}
+
 fn validate_frame_generation_request(config: &realtime::RealtimeConfig) -> Result<(), String> {
     let mode = config.frame_generation.as_str();
     if config.frame_generation == realtime::FrameGenerationMode::Off {
@@ -560,7 +611,7 @@ fn print_help() {
         "RayTracingDemo\n\n\
          用法：\n  \
          cargo run --release                 启动实时 DX12 窗口\n  \
-         cargo run --release -- --model <路径> [--animate-model] [--benchmark-seconds <秒> | --capture-output <PNG>] [--capture-after-spp <SPP>] [--debug-view <名称>] [--atrous-mode <模式>] [--output-size <宽x高>] [--render-scale <比例> | --dynamic-resolution [--target-gpu-ms <毫秒>]] [--command-recording-mode <模式>] [--acceleration-structure-mode <模式>] [--path-space-mode <模式>] [--denoiser <后端>] [--upscaler <模式>] [--streamline-application-id <ID>]\n  \
+         cargo run --release -- --model <路径> [--animate-model] [--benchmark-seconds <秒> | --capture-output <PNG>] [--capture-after-spp <SPP>] [--debug-view <名称>] [--atrous-mode <模式>] [--output-size <宽x高>] [--render-scale <比例> | --dynamic-resolution [--target-gpu-ms <毫秒>]] [--command-recording-mode <模式>] [--acceleration-structure-mode <模式>] [--path-space-mode <模式>] [--denoiser <后端>] [--upscaler <模式>] [--hdr [--hdr-paper-white-nits <nit>] [--hdr-peak-nits <nit>]] [--streamline-application-id <ID>]\n  \
          cargo run --release -- --cpu-reference [选项]\n\n\
          选项：\n  \
          --samples <数量>       每像素采样数，默认 1\n  \
@@ -583,6 +634,9 @@ fn print_help() {
          --upscaler <模式>       上采样：native、dlaa、dlss-quality、dlss-balanced、dlss-performance，默认 native\n  \
          --reflex-mode <模式>    Reflex：off、on 或 on-boost，默认 on；feature-off 时 unavailable\n  \
          --frame-generation <模式> FG：off 或 on，默认 off；on 需要 streamline-fg 与 DLSS/RR guides\n  \
+         --hdr                    启用 Windows FP16 scRGB HDR 输出；需要在系统中开启 HDR\n  \
+         --hdr-paper-white-nits <nit> HDR 漫反射白，80..500，默认 200\n  \
+         --hdr-peak-nits <nit>    HDR 高光峰值，300..10000；默认使用显示器上报值\n  \
          --streamline-application-id <ID> 可选的 NVIDIA 分配 NGX application ID；默认使用内置 Project ID\n  \\
          --help, -h             显示帮助"
     );
@@ -611,6 +665,48 @@ mod tests {
             realtime::FrameGenerationMode::On
         );
         assert!(parse_frame_generation_mode("auto").is_err());
+    }
+
+    #[test]
+    fn hdr_is_opt_in_and_calibration_is_bounded() {
+        let Command::Realtime(defaults) = parse_arguments(Vec::<String>::new()).unwrap() else {
+            panic!("realtime is the default command");
+        };
+        assert!(!defaults.hdr.enabled);
+        assert_eq!(
+            defaults.hdr.paper_white_nits,
+            realtime::DEFAULT_HDR_PAPER_WHITE_NITS
+        );
+        assert_eq!(defaults.hdr.peak_nits, None);
+
+        let Command::Realtime(config) = parse_arguments([
+            "--hdr".to_string(),
+            "--hdr-paper-white-nits".to_string(),
+            "220".to_string(),
+            "--hdr-peak-nits".to_string(),
+            "800".to_string(),
+        ])
+        .unwrap() else {
+            panic!("HDR options select realtime mode");
+        };
+        assert!(config.hdr.enabled);
+        assert_eq!(config.hdr.paper_white_nits, 220);
+        assert_eq!(config.hdr.peak_nits, Some(800));
+
+        for arguments in [
+            vec!["--hdr-paper-white-nits", "200"],
+            vec!["--hdr", "--hdr-paper-white-nits", "79"],
+            vec!["--hdr", "--hdr-peak-nits", "10001"],
+            vec![
+                "--hdr",
+                "--hdr-paper-white-nits",
+                "500",
+                "--hdr-peak-nits",
+                "400",
+            ],
+        ] {
+            assert!(parse_arguments(arguments.into_iter().map(str::to_string)).is_err());
+        }
     }
 
     #[test]
