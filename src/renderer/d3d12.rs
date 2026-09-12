@@ -66,7 +66,7 @@ use crate::{
 
 use self::{
     capture::{
-        CaptureMetadata, capture_json_line, unpack_rgba8_rows, unpack_scrgb_f16_rows_to_rgba8,
+        CaptureMetadata, capture_json_line, unpack_hdr10_rows_to_rgba8, unpack_rgba8_rows,
         write_png_atomic,
     },
     descriptor::DescriptorHeap,
@@ -313,7 +313,9 @@ impl DisplayOutputState {
 
     const fn format(self) -> DXGI_FORMAT {
         if self.hdr.enabled {
-            DXGI_FORMAT_R16G16B16A16_FLOAT
+            // DLSS Frame Generation explicitly requires RGB10 + HDR10 and
+            // does not support the otherwise convenient FP16 scRGB path.
+            DXGI_FORMAT_R10G10B10A2_UNORM
         } else {
             DXGI_FORMAT_R8G8B8A8_UNORM
         }
@@ -324,8 +326,59 @@ impl DisplayOutputState {
     }
 
     const fn name(self) -> &'static str {
-        if self.hdr.enabled { "hdr-scrgb" } else { "sdr" }
+        if self.hdr.enabled { "hdr10" } else { "sdr" }
     }
+
+    const fn hdr10_metadata(self) -> DXGI_HDR_METADATA_HDR10 {
+        let peak_nits = self.effective_peak_nits;
+        DXGI_HDR_METADATA_HDR10 {
+            // CTA-861-G chromaticities use units of 0.00002.
+            RedPrimary: [35_400, 14_600],
+            GreenPrimary: [8_500, 39_850],
+            BluePrimary: [6_550, 2_300],
+            WhitePoint: [15_635, 16_450],
+            // Mastering luminance uses units of 0.0001 nit.
+            MaxMasteringLuminance: peak_nits.saturating_mul(10_000),
+            MinMasteringLuminance: 1,
+            MaxContentLightLevel: if peak_nits > u16::MAX as u32 {
+                u16::MAX
+            } else {
+                peak_nits as u16
+            },
+            MaxFrameAverageLightLevel: if self.hdr.paper_white_nits > u16::MAX as u32 {
+                u16::MAX
+            } else {
+                self.hdr.paper_white_nits as u16
+            },
+        }
+    }
+}
+
+unsafe fn apply_hdr10_output_state(
+    swap_chain: &SwapChainInterfaces,
+    display: DisplayOutputState,
+) -> Result<()> {
+    unsafe {
+        swap_chain
+            .hooked()
+            .SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
+    }
+    .map_err(|error| dx_error("设置 HDR10/BT.2100 交换链色彩空间", error))?;
+
+    let swap_chain4: IDXGISwapChain4 = swap_chain
+        .hooked()
+        .cast()
+        .map_err(|error| dx_error("获取 IDXGISwapChain4 HDR metadata 接口", error))?;
+    let metadata = display.hdr10_metadata();
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            (&metadata as *const DXGI_HDR_METADATA_HDR10).cast::<u8>(),
+            size_of::<DXGI_HDR_METADATA_HDR10>(),
+        )
+    };
+    unsafe { swap_chain4.SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, Some(bytes)) }
+        .map_err(|error| dx_error("设置 HDR10 mastering metadata", error))?;
+    Ok(())
 }
 
 unsafe fn configure_display_output(
@@ -336,13 +389,13 @@ unsafe fn configure_display_output(
         return Ok(requested);
     }
 
-    let color_space = DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
+    let color_space = DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
     let support = unsafe { swap_chain.hooked().CheckColorSpaceSupport(color_space) }
-        .map_err(|error| dx_error("检查 scRGB 色彩空间支持", error))?;
+        .map_err(|error| dx_error("检查 HDR10/BT.2100 色彩空间支持", error))?;
     if support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT.0 as u32 == 0 {
         return Err(WindowsError::new(
             windows::core::HRESULT(0x80004005_u32 as i32),
-            "当前输出不支持呈现 FP16 scRGB；请确认 Windows HDR 已开启",
+            "当前输出不支持呈现 RGB10 HDR10/BT.2100；请确认 Windows HDR 已开启",
         ));
     }
 
@@ -360,8 +413,6 @@ unsafe fn configure_display_output(
         ));
     }
 
-    unsafe { swap_chain.hooked().SetColorSpace1(color_space) }
-        .map_err(|error| dx_error("设置 FP16 scRGB 交换链色彩空间", error))?;
     let display_peak_nits = description
         .MaxLuminance
         .is_finite()
@@ -379,8 +430,9 @@ unsafe fn configure_display_output(
         display_peak_nits,
         bits_per_color: Some(description.BitsPerColor),
     };
+    unsafe { apply_hdr10_output_state(swap_chain, configured)? };
     eprintln!(
-        "display_output mode={} format=R16G16B16A16_FLOAT colorspace=scRGB paper_white_nits={} peak_nits={} display_peak_nits={} bits_per_color={}",
+        "display_output mode={} format=R10G10B10A2_UNORM colorspace=HDR10-BT.2100-PQ paper_white_nits={} peak_nits={} display_peak_nits={} bits_per_color={}",
         configured.name(),
         configured.hdr.paper_white_nits,
         configured.effective_peak_nits,
@@ -397,12 +449,7 @@ unsafe fn restore_display_color_space(
     display: DisplayOutputState,
 ) -> Result<()> {
     if display.hdr.enabled {
-        unsafe {
-            swap_chain
-                .hooked()
-                .SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709)
-        }
-        .map_err(|error| dx_error("恢复 FP16 scRGB 交换链色彩空间", error))?;
+        unsafe { apply_hdr10_output_state(swap_chain, display)? };
     }
     Ok(())
 }
@@ -1979,7 +2026,7 @@ struct PendingCapture {
     total_bytes: usize,
     width: u32,
     height: u32,
-    hdr_scrgb: bool,
+    hdr10: bool,
     paper_white_nits: u32,
     metadata: CaptureMetadata,
     fence_value: u64,
@@ -4740,11 +4787,8 @@ impl Dx12Renderer {
                 "capture readback size does not fit usize",
             )
         })?;
-        let source_bytes_per_pixel = if self.display_output.hdr.enabled {
-            8
-        } else {
-            4
-        };
+        // SDR RGBA8 and HDR10 RGB10A2 are both four bytes per pixel.
+        let source_bytes_per_pixel = 4;
         if total_bytes == 0
             || row_count != output_extent.height
             || row_size < output_extent.width as u64 * source_bytes_per_pixel
@@ -4832,7 +4876,7 @@ impl Dx12Renderer {
             total_bytes,
             width: output_extent.width,
             height: output_extent.height,
-            hdr_scrgb: self.display_output.hdr.enabled,
+            hdr10: self.display_output.hdr.enabled,
             paper_white_nits: self.display_output.hdr.paper_white_nits,
             metadata: CaptureMetadata {
                 png_path: request.path.to_string_lossy().into_owned(),
@@ -4907,8 +4951,8 @@ impl Dx12Renderer {
                 .readback
                 .Map(0, Some(&read_range), Some(&mut mapped))?;
             let mapped = std::slice::from_raw_parts(mapped.cast::<u8>(), pending.total_bytes);
-            let rgba = if pending.hdr_scrgb {
-                unpack_scrgb_f16_rows_to_rgba8(
+            let rgba = if pending.hdr10 {
+                unpack_hdr10_rows_to_rgba8(
                     mapped,
                     pending.footprint.Offset as usize,
                     pending.footprint.Footprint.RowPitch as usize,
@@ -6386,8 +6430,8 @@ fn benchmark_json_line(
         "reflex": reflex,
         "display": {
             "mode": display_output.name(),
-            "format": if display_output.hdr.enabled { "R16G16B16A16_FLOAT" } else { "R8G8B8A8_UNORM" },
-            "color_space": if display_output.hdr.enabled { "RGB_FULL_G10_NONE_P709" } else { "RGB_FULL_G22_NONE_P709" },
+            "format": if display_output.hdr.enabled { "R10G10B10A2_UNORM" } else { "R8G8B8A8_UNORM" },
+            "color_space": if display_output.hdr.enabled { "RGB_FULL_G2084_NONE_P2020" } else { "RGB_FULL_G22_NONE_P709" },
             "paper_white_nits": display_output.hdr.enabled.then_some(display_output.hdr.paper_white_nits),
             "peak_nits": display_output.hdr.enabled.then_some(display_output.effective_peak_nits),
             "display_peak_nits": display_output.display_peak_nits,
@@ -8805,7 +8849,7 @@ mod tests {
     }
 
     #[test]
-    fn hdr_display_contract_uses_fp16_scrgb_and_absolute_luminance() {
+    fn hdr_display_contract_uses_rgb10_hdr10_and_absolute_luminance() {
         let sdr = DisplayOutputState::requested(HdrConfig::default());
         assert_eq!(sdr.format(), DXGI_FORMAT_R8G8B8A8_UNORM);
         assert_eq!(sdr.hlsl_mode(), 0);
@@ -8815,15 +8859,23 @@ mod tests {
             paper_white_nits: 200,
             peak_nits: Some(800),
         });
-        assert_eq!(hdr.format(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+        assert_eq!(hdr.format(), DXGI_FORMAT_R10G10B10A2_UNORM);
         assert_eq!(hdr.hlsl_mode(), 1);
         assert_eq!(hdr.effective_peak_nits, 800);
 
         let shader = include_str!("../../shaders/stage6_tonemap.hlsl");
         assert!(shader.contains("OutputMode == 1u"));
-        assert!(shader.contains("scRgbReferenceWhiteNits = 80.0"));
+        assert!(shader.contains("Rec709ToRec2020"));
+        assert!(shader.contains("EncodeSt2084"));
         assert!(shader.contains("sourceNits = luminance * PaperWhiteNits"));
         assert!(shader.contains("headroomNits * (1.0 - exp(-highlightNits / headroomNits))"));
+
+        let metadata = hdr.hdr10_metadata();
+        assert_eq!(metadata.RedPrimary, [35_400, 14_600]);
+        assert_eq!(metadata.WhitePoint, [15_635, 16_450]);
+        assert_eq!(metadata.MaxMasteringLuminance, 8_000_000);
+        assert_eq!(metadata.MaxContentLightLevel, 800);
+        assert_eq!(metadata.MaxFrameAverageLightLevel, 200);
     }
 
     #[test]

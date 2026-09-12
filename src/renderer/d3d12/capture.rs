@@ -99,10 +99,10 @@ pub fn unpack_rgba8_rows(
     Ok(rgba)
 }
 
-/// Converts a linear FP16 scRGB presentation surface to an SDR PNG preview.
-/// The live HDR signal is left untouched; this only maps reference white back
-/// to 1.0 so existing PNG tooling remains useful for deterministic captures.
-pub fn unpack_scrgb_f16_rows_to_rgba8(
+/// Converts a packed RGB10 HDR10/BT.2100 presentation surface to an SDR PNG
+/// preview. The live HDR signal is left untouched; capture decoding removes
+/// ST.2084, converts BT.2020 to Rec.709, and maps paper white back to 1.0.
+pub fn unpack_hdr10_rows_to_rgba8(
     mapped: &[u8],
     footprint_offset: usize,
     row_pitch: usize,
@@ -111,7 +111,7 @@ pub fn unpack_scrgb_f16_rows_to_rgba8(
     paper_white_nits: u32,
 ) -> Result<Vec<u8>, CaptureLayoutError> {
     let row_bytes = (width as usize)
-        .checked_mul(8)
+        .checked_mul(4)
         .ok_or(CaptureLayoutError::WidthOverflow)?;
     if row_pitch < row_bytes {
         return Err(CaptureLayoutError::RowPitchTooSmall);
@@ -135,18 +135,29 @@ pub fn unpack_scrgb_f16_rows_to_rgba8(
             .checked_mul(4)
             .ok_or(CaptureLayoutError::HeightOverflow)?,
     );
-    let reference_white_scale = (paper_white_nits.max(80) as f32) / 80.0;
+    let paper_white_nits = paper_white_nits.max(1) as f32;
     for row in 0..rows {
         let start = footprint_offset + row * row_pitch;
-        for pixel in mapped[start..start + row_bytes].chunks_exact(8) {
-            for channel in 0..3 {
-                let bits = u16::from_le_bytes([pixel[channel * 2], pixel[channel * 2 + 1]]);
-                let linear = half_to_f32(bits);
-                let normalized = if linear.is_finite() {
-                    (linear / reference_white_scale).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
+        for pixel in mapped[start..start + row_bytes].chunks_exact(4) {
+            let packed = u32::from_le_bytes(pixel.try_into().expect("chunks_exact yields 4 bytes"));
+            let pq_rec2020 = [
+                (packed & 0x3ff) as f32 / 1023.0,
+                ((packed >> 10) & 0x3ff) as f32 / 1023.0,
+                ((packed >> 20) & 0x3ff) as f32 / 1023.0,
+            ];
+            let rec2020_nits = pq_rec2020.map(decode_st2084);
+            let rec709_nits = [
+                1.660_491 * rec2020_nits[0]
+                    - 0.587_641 * rec2020_nits[1]
+                    - 0.072_850 * rec2020_nits[2],
+                -0.124_550 * rec2020_nits[0]
+                    + 1.132_900 * rec2020_nits[1]
+                    - 0.008_349 * rec2020_nits[2],
+                -0.018_151 * rec2020_nits[0] - 0.100_579 * rec2020_nits[1]
+                    + 1.118_730 * rec2020_nits[2],
+            ];
+            for linear_nits in rec709_nits {
+                let normalized = (linear_nits / paper_white_nits).clamp(0.0, 1.0);
                 let srgb = if normalized <= 0.003_130_8 {
                     normalized * 12.92
                 } else {
@@ -160,17 +171,15 @@ pub fn unpack_scrgb_f16_rows_to_rgba8(
     Ok(rgba)
 }
 
-fn half_to_f32(bits: u16) -> f32 {
-    let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
-    let exponent = ((bits >> 10) & 0x1f) as i32;
-    let mantissa = (bits & 0x03ff) as u32;
-    let magnitude = match exponent {
-        0 => (mantissa as f32) * 2.0_f32.powi(-24),
-        31 if mantissa == 0 => f32::INFINITY,
-        31 => f32::NAN,
-        _ => (1.0 + mantissa as f32 / 1024.0) * 2.0_f32.powi(exponent - 15),
-    };
-    sign * magnitude
+fn decode_st2084(encoded: f32) -> f32 {
+    const M1: f32 = 2610.0 / 16384.0;
+    const M2: f32 = 2523.0 / 32.0;
+    const C1: f32 = 3424.0 / 4096.0;
+    const C2: f32 = 2413.0 / 128.0;
+    const C3: f32 = 2392.0 / 128.0;
+    let powered = encoded.clamp(0.0, 1.0).powf(1.0 / M2);
+    let denominator = (C2 - C3 * powered).max(f32::EPSILON);
+    ((powered - C1).max(0.0) / denominator).powf(1.0 / M1) * 10_000.0
 }
 
 pub fn write_png_atomic(
@@ -281,7 +290,7 @@ pub fn capture_json_line(metadata: &CaptureMetadata, png_bytes: u64) -> String {
             "peak_nits": metadata.hdr_peak_nits,
             "display_peak_nits": metadata.display_peak_nits,
             "bits_per_color": metadata.bits_per_color,
-            "capture_encoding": if metadata.display_mode == "hdr-scrgb" { "sdr-png-preview" } else { "sdr-rgba8" },
+            "capture_encoding": if metadata.display_mode == "hdr10" { "sdr-png-preview" } else { "sdr-rgba8" },
         },
         "png_bytes": png_bytes,
     })
@@ -320,20 +329,29 @@ mod tests {
     }
 
     #[test]
-    fn scrgb_fp16_capture_maps_reference_white_to_sdr_and_rejects_short_rows() {
-        // 2.5 scRGB equals the default 200-nit reference white. Alpha is
-        // intentionally ignored because PNG captures are always opaque.
-        let pixel = [0x00, 0x41, 0x00, 0x41, 0x00, 0x41, 0x00, 0x3c];
+    fn hdr10_capture_maps_reference_white_to_sdr_and_rejects_short_rows() {
+        // Encode a neutral 200-nit HDR10 pixel. Quantization may land one SDR
+        // code below white, but all channels must remain neutral and opaque.
+        const M1: f32 = 2610.0 / 16384.0;
+        const M2: f32 = 2523.0 / 32.0;
+        const C1: f32 = 3424.0 / 4096.0;
+        const C2: f32 = 2413.0 / 128.0;
+        const C3: f32 = 2392.0 / 128.0;
+        let powered = (200.0_f32 / 10_000.0).powf(M1);
+        let pq = ((C1 + C2 * powered) / (1.0 + C3 * powered)).powf(M2);
+        let code = (pq * 1023.0).round() as u32;
+        let pixel = (code | (code << 10) | (code << 20) | (3 << 30)).to_le_bytes();
+        let rgba = unpack_hdr10_rows_to_rgba8(&pixel, 0, 4, 1, 1, 200).unwrap();
+        assert!(rgba[0] >= 254);
+        assert_eq!(rgba[0], rgba[1]);
+        assert_eq!(rgba[1], rgba[2]);
+        assert_eq!(rgba[3], 255);
         assert_eq!(
-            unpack_scrgb_f16_rows_to_rgba8(&pixel, 0, 8, 1, 1, 200).unwrap(),
-            vec![255, 255, 255, 255]
-        );
-        assert_eq!(
-            unpack_scrgb_f16_rows_to_rgba8(&pixel[..7], 0, 8, 1, 1, 200),
+            unpack_hdr10_rows_to_rgba8(&pixel[..3], 0, 4, 1, 1, 200),
             Err(CaptureLayoutError::BufferTooSmall)
         );
         assert_eq!(
-            unpack_scrgb_f16_rows_to_rgba8(&pixel, 0, 7, 1, 1, 200),
+            unpack_hdr10_rows_to_rgba8(&pixel, 0, 3, 1, 1, 200),
             Err(CaptureLayoutError::RowPitchTooSmall)
         );
     }
@@ -386,7 +404,7 @@ mod tests {
         assert_eq!(value["png_bytes"], 256);
 
         let hdr_metadata = CaptureMetadata {
-            display_mode: "hdr-scrgb".to_string(),
+            display_mode: "hdr10".to_string(),
             hdr_paper_white_nits: Some(200),
             hdr_peak_nits: Some(1_000),
             display_peak_nits: Some(1_200),

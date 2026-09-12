@@ -634,7 +634,7 @@ fn print_help() {
          --upscaler <模式>       上采样：native、dlaa、dlss-quality、dlss-balanced、dlss-performance，默认 native\n  \
          --reflex-mode <模式>    Reflex：off、on 或 on-boost，默认 on；feature-off 时 unavailable\n  \
          --frame-generation <模式> FG：off 或 on，默认 off；on 需要 streamline-fg 与 DLSS/RR guides\n  \
-         --hdr                    启用 Windows FP16 scRGB HDR 输出；需要在系统中开启 HDR\n  \
+         --hdr                    启用 Windows RGB10 HDR10/BT.2100 输出；需要在系统中开启 HDR\n  \
          --hdr-paper-white-nits <nit> HDR 漫反射白，80..500，默认 200\n  \
          --hdr-peak-nits <nit>    HDR 高光峰值，300..10000；默认使用显示器上报值\n  \
          --streamline-application-id <ID> 可选的 NVIDIA 分配 NGX application ID；默认使用内置 Project ID\n  \\

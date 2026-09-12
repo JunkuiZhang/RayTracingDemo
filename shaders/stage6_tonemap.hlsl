@@ -24,21 +24,47 @@ cbuffer ToneMapConstants : register(b0)
     // DLSS SR returns a complete HDR texture. RR instead excludes direct
     // emissive coverage so it can be stabilized and added exactly once here.
     uint InputMode;
-    // 0 = SDR RGBA8/sRGB, 1 = HDR FP16/linear scRGB.
+    // 0 = SDR RGBA8/sRGB, 1 = HDR RGB10/PQ BT.2100.
     uint OutputMode;
     float PaperWhiteNits;
     float PeakNits;
 };
+
+float3 Rec709ToRec2020(float3 color)
+{
+    // Scene lighting is authored in linear Rec.709. HDR10 presentation uses
+    // the BT.2020 primaries before applying the ST.2084 transfer function.
+    const float3x3 conversion = float3x3(
+        0.6274040, 0.3292820, 0.0433136,
+        0.0690970, 0.9195400, 0.0113612,
+        0.0163916, 0.0880132, 0.8955950);
+    return max(mul(conversion, color), 0.0);
+}
+
+float3 EncodeSt2084(float3 nits)
+{
+    // SMPTE ST.2084 is absolute and normalized to 10,000 nit.
+    const float m1 = 2610.0 / 16384.0;
+    const float m2 = 2523.0 / 32.0;
+    const float c1 = 3424.0 / 4096.0;
+    const float c2 = 2413.0 / 128.0;
+    const float c3 = 2392.0 / 128.0;
+    float3 powered = pow(saturate(nits / 10000.0), m1);
+    return pow((c1 + c2 * powered) / (1.0 + c3 * powered), m2);
+}
+
+float3 EncodeHdr10ReferenceColor(float3 linearRec709)
+{
+    return EncodeSt2084(Rec709ToRec2020(max(linearRec709, 0.0) * PaperWhiteNits));
+}
 
 float3 ToneMap(float3 hdr)
 {
     hdr = max(hdr * Exposure, 0.0);
     if (OutputMode == 1u)
     {
-        // scRGB is scene-referred on an HDR desktop: 1.0 linear represents
-        // 80 nit. Preserve chromaticity while applying a smooth luminance
-        // shoulder to the active panel peak instead of clipping highlights.
-        const float scRgbReferenceWhiteNits = 80.0;
+        // Preserve Rec.709 chromaticity while mapping scene white to the
+        // calibrated paper white and rolling highlights into the panel peak.
         float luminance = dot(hdr, float3(0.2126, 0.7152, 0.0722));
         float sourceNits = luminance * PaperWhiteNits;
         float headroomNits = max(PeakNits - PaperWhiteNits, 0.0);
@@ -56,13 +82,13 @@ float3 ToneMap(float3 hdr)
         {
             mappedNits = min(sourceNits, PeakNits);
         }
-        float scale = luminance > 1e-6 ? mappedNits / (luminance * scRgbReferenceWhiteNits) : 0.0;
-        float3 scRgb = hdr * scale;
-        float maximum = max(scRgb.r, max(scRgb.g, scRgb.b));
-        float scRgbPeak = PeakNits / scRgbReferenceWhiteNits;
-        if (maximum > scRgbPeak)
-            scRgb *= scRgbPeak / maximum;
-        return all(isfinite(scRgb)) ? scRgb : 0.0;
+        float scale = luminance > 1e-6 ? mappedNits / luminance : 0.0;
+        float3 rec2020Nits = Rec709ToRec2020(hdr * scale);
+        float maximum = max(rec2020Nits.r, max(rec2020Nits.g, rec2020Nits.b));
+        if (maximum > PeakNits)
+            rec2020Nits *= PeakNits / maximum;
+        float3 encoded = EncodeSt2084(rec2020Nits);
+        return all(isfinite(encoded)) ? encoded : 0.0;
     }
     float3 mapped = saturate(
         (hdr * (2.51 * hdr + 0.03))
@@ -340,5 +366,11 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
             all(isfinite(motion)),
             hitDistance > 0.0 && all(isfinite(normal)));
     }
+    // Engineering debug colors are linear Rec.709 reference colors rather
+    // than scene radiance. Encode them for HDR10 without applying exposure or
+    // the highlight shoulder; the normal scene views already called ToneMap.
+    bool sceneToneMapped = DebugMode == 0u || DebugMode == 1u || DebugMode == 13u;
+    if (OutputMode == 1u && !sceneToneMapped)
+        color = EncodeHdr10ReferenceColor(color);
     Output[pixel] = float4(color, 1.0);
 }
