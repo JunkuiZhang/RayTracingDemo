@@ -637,8 +637,36 @@ using System;
 using System.Runtime.InteropServices;
 namespace Stage11FgAcceptance.Native {
     public static class WindowFocus {
-        [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-        [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+        [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+        [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr processId);
+        [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint attach, uint attachTo, bool value);
+        [DllImport("user32.dll")] private static extern bool BringWindowToTop(IntPtr hWnd);
+        [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll")] private static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+
+        public static bool TrySetForeground(IntPtr target) {
+            if (target == IntPtr.Zero) return false;
+            ShowWindowAsync(target, 9);
+            uint currentThread = GetCurrentThreadId();
+            uint targetThread = GetWindowThreadProcessId(target, IntPtr.Zero);
+            IntPtr previous = GetForegroundWindow();
+            uint foregroundThread = previous == IntPtr.Zero
+                ? 0
+                : GetWindowThreadProcessId(previous, IntPtr.Zero);
+            bool attachedForeground = foregroundThread != 0 && foregroundThread != currentThread &&
+                AttachThreadInput(currentThread, foregroundThread, true);
+            bool attachedTarget = targetThread != 0 && targetThread != currentThread &&
+                AttachThreadInput(currentThread, targetThread, true);
+            try {
+                BringWindowToTop(target);
+                SetForegroundWindow(target);
+                return GetForegroundWindow() == target;
+            } finally {
+                if (attachedTarget) AttachThreadInput(currentThread, targetThread, false);
+                if (attachedForeground) AttachThreadInput(currentThread, foregroundThread, false);
+            }
+        }
     }
 }
 "@
@@ -695,8 +723,9 @@ foreach ($case in $cases) {
             while ([DateTime]::UtcNow -lt $deadline -and -not $process.HasExited -and -not $focusSucceeded) {
                 $process.Refresh()
                 if ($process.MainWindowHandle -ne [IntPtr]::Zero) {
-                    [Stage11FgAcceptance.Native.WindowFocus]::ShowWindowAsync($process.MainWindowHandle, 9) | Out-Null
-                    $focusSucceeded = [Stage11FgAcceptance.Native.WindowFocus]::SetForegroundWindow($process.MainWindowHandle)
+                    $focusSucceeded = [Stage11FgAcceptance.Native.WindowFocus]::TrySetForeground(
+                        $process.MainWindowHandle
+                    )
                 }
                 if (-not $focusSucceeded) { Start-Sleep -Milliseconds 50 }
             }
