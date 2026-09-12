@@ -21,8 +21,9 @@
 结论：项目已从 Streamline 2.12.0 整体升级到 2.14.1，并显式选择本版本新增且作为默认值的
 DLSS Ray Reconstruction `Preset F`。目标机日志确认实际加载 Streamline 2.14.1、
 `nvngx_dlssd.dll` 310.9.1，并创建和执行了 853×480 到 1280×720 的 RR context；这不是只替换
-DLL 或只改版本字符串。自动短矩阵和 Release 构建均通过。阶段 11 仍不标记完成：升级后的聚焦
-FG 2x 证据、RR 人工画质复验和已知 NGX shutdown 卡住问题仍需分别验收。
+DLL 或只改版本字符串。自动短矩阵和 Release 构建均通过，升级后的聚焦 FG 2x 证据也已取得。
+阶段 11 仍不标记完成：11G-E 生命周期/FrameView 验收、RR 人工画质记录和已知 NGX shutdown
+卡住问题仍需分别收口。
 
 ## 1. 为什么整体升级
 
@@ -158,9 +159,9 @@ history pass；若上述输入修复后仍有残余抖动，应先用 depth/norm
 
 ### 5.3 Frame Generation 重新验收
 
-11G-C 的真实 inputs/options/lifecycle 已实现，但依赖升级后仍需一次窗口聚焦的 2x 真机证据。只有日志
-同时满足 `status=0` 且 `numFramesActuallyPresented>=2`，才能证明当前 2.14.1 组合实际生成中间帧。
-窗口失焦得到 `actual_presented=1` 只证明驱动正确暂停，不能计作通过。
+11G-C 的真实 inputs/options/lifecycle 已实现，依赖升级后的窗口聚焦 2x 真机门禁也已通过：日志取得
+`status=0`、`actual_presented=2`、`max_generated=1`、`focused=1`、warmup 4，并输出
+`frame_generation_confirmed`。窗口失焦时的 `actual_presented=1` 仍只表示驱动暂停，不能代替该证据。
 
 ## 6. 复验命令
 
@@ -191,7 +192,7 @@ $env:RAY_TRACING_STREAMLINE_LOG = '1'
 
 ## 7. 下一步
 
-先用本节命令完成修复后的 5.2 和 5.3 两项短人工门禁。若 Preset F 画质无明显回退且聚焦 FG 证明
-`numFramesActuallyPresented>=2`，阶段 11 下一代码包进入 11G-D：建立 application/base FPS、
-display FPS、generated/dropped frame 和 Reflex latency 的统一实时/JSON 统计。之后再做 11G-E 的
-resize、最小化/恢复、开关往返、Debug Layer 和短稳定性验收；在这些完成前不进入阶段 12。
+聚焦 FG 的 `numFramesActuallyPresented>=2` 门禁已经通过，11G-D 也已建立 application/base FPS、
+display FPS、generated/dropped frame 和 Reflex application-frame latency 的统一实时/JSON 统计。
+下一代码包进入 11G-E：resize、最小化/恢复、F5 开关往返、Debug Layer、FrameView pacing 和短稳定性
+验收；在这些完成前不进入阶段 12。

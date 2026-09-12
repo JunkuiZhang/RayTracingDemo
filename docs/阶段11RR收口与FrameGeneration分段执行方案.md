@@ -371,6 +371,9 @@ Unavailable -> OffNative -> Enabling -> OnProxy -> Suspending -> OffNative
 
 ## 8. 11G-D：统计、标题和 JSON
 
+实施状态（2026-09-12）：已完成。实现与验证记录见
+[`阶段11FrameGeneration-11G-D-统计与延迟实施记录.md`](阶段11FrameGeneration-11G-D-统计与延迟实施记录.md)。
+
 ### 8.1 统计定义
 
 `slDLSSGGetState` 在每个 application Present 后查询一次，普通查询传 null options。因为

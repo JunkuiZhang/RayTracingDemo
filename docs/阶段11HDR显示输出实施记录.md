@@ -80,16 +80,23 @@ RGB10 readback 解码 PQ、转换 BT.2020 → Rec.709，并按 paper white 生�
   `HDR10-BT.2100-PQ`、`BitsPerColor=10`；RR 路径成功初始化；
 - 同一 HDR10 启动中，FG proxy 成功创建、`fg_loaded=1`、能力查询 `status=0`。
 
-自动启动的测试窗口报告 `focused=0`，而 Streamline FG 在失焦时按设计不生成帧，所以这次自动化
-不能替代最终的聚焦窗口计数门禁。请在窗口保持前台时运行：
+随后在 RTX 4060 Laptop 的前台聚焦窗口完成了最终 HDR+FG 计数门禁，关键日志为：
+
+```text
+frame_generation_state status=0 actual_presented=2 max_generated=1 vsync_supported=1 sync_interval=0 focused=1 warmup=4 requested=on state=on-proxy
+frame_generation_confirmed status=0 num_frames_actually_presented=2 vsync_supported=1 sync_interval=0
+```
+
+这证明当前 HDR10 交换链真实插入了一个中间帧，而不只是 proxy/feature 加载成功。复现命令为：
 
 ```powershell
 $env:RAY_TRACING_STREAMLINE_LOG = '1'
 .\target\release\ray_tracing_demo.exe --output-size 1280x720 --denoiser dlss-rr --upscaler dlss-quality --path-space-mode stable-planes --frame-generation on --hdr --hdr-paper-white-nits 200 --hdr-peak-nits 1000
 ```
 
-通过标准是日志同时出现 `focused=1`、`status=0`、`numFramesActuallyPresented>=2`（窗口标题也应
-显示 FG 2x），而不是仅凭 `fg_loaded=1` 判定成功。
+通过标准仍是日志同时出现 `focused=1`、`status=0`、`numFramesActuallyPresented>=2`，而不是仅凭
+`fg_loaded=1` 判定成功。本次证据已经满足该标准；`iFlip=0` 只是日志中的显示链诊断，不推翻 SDK
+实际返回的两帧计数。
 
 目标主显示器实际启动诊断为 Windows HDR active、`BitsPerColor=10`，驱动上报
 `MaxLuminance=4000 nit`。这不代表屏幕峰值已被仪器验证；画质验收可先按显示器认证峰值覆盖。
@@ -101,8 +108,8 @@ $env:RAY_TRACING_STREAMLINE_LOG = '1'
 - 当前只在启动时绑定窗口所在显示器；拖到另一台 SDR/HDR 显示器后，不会自动检测并事务性重建；
 - Windows HDR Calibration、显示器 OSD、驱动 EDID 和实际峰值都会影响观感；校准参数不能替代测量；
 - PNG 只承担 SDR 诊断预览；真正 HDR 截图应增加线性 EXR 或带正确元数据的 HDR 图像格式；
-- 取得聚焦 HDR+FG 计数证据后，进入 11G-D 的 base/display/generated/dropped/latency 统计，
-  再做 11G-E 生命周期验收。
+- 11G-D 的 base/display/generated/dropped/latency 统计已经实现；下一步是 11G-E 生命周期、
+  Debug Layer 与 FrameView pacing 验收。
 
 ## 6. 设计依据
 

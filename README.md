@@ -210,12 +210,14 @@ Windows“设置 → 系统 → 显示 → HDR”必须已开启。漫反射白�
 HDR 模式的 `--capture-output` 会生成便于普通工具查看的 SDR PNG 预览，不是 HDR 母版。
 实现和短测记录见 [`docs/阶段11HDR显示输出实施记录.md`](docs/阶段11HDR显示输出实施记录.md)。
 
-Frame Generation 的 11G-A SDK/部署、11G-B manual-hooking 交换链边界和 11G-C
-[`输入、选项与生命周期`](docs/阶段11FrameGeneration-11G-C-输入选项与生命周期执行方案.md)均已实现；
-当前仍默认关闭，启用时固定单生成帧的 2x display，并通过显式状态机处理启动/F5、resize、最小化、
-资源 generation、null tag 和退出。Streamline 2.14.1 升级后仍需取得窗口聚焦时
-`status=0`、`numFramesActuallyPresented>=2` 的真机证据；正式 base/display FPS 与
-generated/dropped 统计是下一包 11G-D。
+Frame Generation 的 11G-A SDK/部署、11G-B manual-hooking 交换链边界、11G-C
+[`输入、选项与生命周期`](docs/阶段11FrameGeneration-11G-C-输入选项与生命周期执行方案.md)和 11G-D
+[`统计与延迟`](docs/阶段11FrameGeneration-11G-D-统计与延迟实施记录.md)均已实现。FG 仍默认关闭，
+启用时固定单生成帧的 2x display，并通过显式状态机处理启动/F5、resize、最小化、资源 generation、
+null tag 和退出。RTX 4060 Laptop 的聚焦窗口已经取得 `status=0`、
+`numFramesActuallyPresented=2` 的真实生成证据。窗口标题和 benchmark JSON 现在分别报告
+application/base FPS、display FPS、generated/dropped frame；Reflex 只报告 SDK 的 application-frame
+时间戳，缺失时显示 `N/A`，不根据 FPS 估算延迟。下一包是 11G-E 有界生命周期与 FrameView 验收。
 
 ### RTXPT-style stable planes（NRD/RR 默认路径）
 
