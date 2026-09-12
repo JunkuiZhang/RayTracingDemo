@@ -641,10 +641,14 @@ namespace Stage11FgAcceptance.Native {
         [DllImport("user32.dll")] private static extern bool BringWindowToTop(IntPtr hWnd);
         [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hWnd);
         [DllImport("user32.dll")] private static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+        [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hWnd);
 
         public static bool TrySetForeground(IntPtr target) {
             if (target == IntPtr.Zero) return false;
-            ShowWindowAsync(target, 9);
+            // SW_RESTORE changes a maximized window back to its stored desktop
+            // bounds and creates a large, unrelated resize during validation.
+            // Restore only an actually minimized target.
+            if (IsIconic(target)) ShowWindowAsync(target, 9);
             uint currentThread = GetCurrentThreadId();
             uint targetThread = GetWindowThreadProcessId(target, IntPtr.Zero);
             IntPtr previous = GetForegroundWindow();
@@ -679,7 +683,10 @@ foreach ($case in $cases) {
     $exe = [string]$paths[$case.exe_kind]
     $arguments = @(
         "--benchmark-seconds", [string]$Seconds,
-        "--output-size", $(if ($case.configuration -eq "Debug") { "1280x720" } else { "1920x1080" }),
+        # Debug validates API/InfoQueue correctness, not image quality. Keep it
+        # small enough that the unoptimized renderer still honors the bounded
+        # timeout; Release cases retain the full 1920x1080 workload.
+        "--output-size", $(if ($case.configuration -eq "Debug") { "640x360" } else { "1920x1080" }),
         "--denoiser", $(if ($case.rr) { "dlss-rr" } else { "svgf" }),
         "--upscaler", $(if ($case.exe_kind -eq "default") { "native" } else { "dlss-quality" }),
         "--frame-generation", $(if ($case.fg_on) { "on" } else { "off" }),
