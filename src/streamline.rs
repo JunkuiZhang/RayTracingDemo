@@ -3,7 +3,7 @@
 use std::{ffi::c_void, ptr::NonNull};
 
 pub const SDK_VERSION: &str = "2.14.1";
-pub const ABI_VERSION: u32 = 9;
+pub const ABI_VERSION: u32 = 10;
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_INVALID_ARGUMENT: u32 = 1;
 pub const STATUS_SDK_ERROR: u32 = 2;
@@ -232,6 +232,13 @@ pub struct ReflexState {
     pub low_latency_available: u32,
     pub latency_report_available: u32,
     pub flash_indicator_driver_controlled: u32,
+    pub report_frame_id: u64,
+    pub input_sample_time: u64,
+    pub simulation_start_time: u64,
+    pub render_submit_start_time: u64,
+    pub present_end_time: u64,
+    pub gpu_active_render_time_us: u32,
+    pub gpu_frame_time_us: u32,
 }
 
 #[repr(C)]
@@ -446,12 +453,13 @@ mod tests {
         );
         assert_eq!(size_of::<Constants>(), 376);
         assert_eq!(size_of::<ResourceTag>(), 48);
-        assert_eq!(size_of::<ReflexState>(), 20);
+        assert_eq!(size_of::<ReflexState>(), 72);
+        assert_eq!(offset_of!(ReflexState, report_frame_id), 24);
     }
 
     #[test]
     fn invalid_bridge_statuses_are_stable() {
-        assert_eq!(ABI_VERSION, 9);
+        assert_eq!(ABI_VERSION, 10);
         assert_eq!(STATUS_OK, 0);
         assert_eq!(STATUS_INVALID_ARGUMENT, 1);
         assert_eq!(size_of::<RawBridge>(), 0);

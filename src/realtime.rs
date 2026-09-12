@@ -1,4 +1,4 @@
-use std::{error::Error, path::PathBuf};
+use std::{error::Error, path::PathBuf, time::Duration};
 
 use crate::{
     debug_view::DebugView, path_space::PathSpaceMode, reconstruction::DenoiserBackend,
@@ -95,6 +95,81 @@ impl FrameGenerationMode {
             Self::On => "on",
         }
     }
+}
+
+/// Monotonic presentation counters owned by the successful Present path.
+/// Generated frames never receive an application frame token, so this is the
+/// only accounting layer that may combine host and DLSS-G presentation data.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PresentationCounters {
+    pub application_frames: u64,
+    pub displayed_frames: u64,
+    pub generated_frames: u64,
+    pub dropped_generated_frames: u64,
+}
+
+impl PresentationCounters {
+    pub fn observe_present(&mut self, requested_generated_frames: u32, actual_presented: u32) {
+        let requested_multiplier = requested_generated_frames.saturating_add(1);
+        self.application_frames = self.application_frames.saturating_add(1);
+        self.displayed_frames = self
+            .displayed_frames
+            .saturating_add(u64::from(actual_presented));
+        self.generated_frames = self
+            .generated_frames
+            .saturating_add(u64::from(actual_presented.saturating_sub(1)));
+        self.dropped_generated_frames = self.dropped_generated_frames.saturating_add(u64::from(
+            requested_multiplier.saturating_sub(actual_presented),
+        ));
+    }
+
+    pub const fn delta(self, baseline: Self) -> Self {
+        Self {
+            application_frames: self
+                .application_frames
+                .saturating_sub(baseline.application_frames),
+            displayed_frames: self
+                .displayed_frames
+                .saturating_sub(baseline.displayed_frames),
+            generated_frames: self
+                .generated_frames
+                .saturating_sub(baseline.generated_frames),
+            dropped_generated_frames: self
+                .dropped_generated_frames
+                .saturating_sub(baseline.dropped_generated_frames),
+        }
+    }
+
+    pub fn rates(self, elapsed: Duration) -> PresentationRates {
+        let seconds = elapsed.as_secs_f64();
+        let base_fps = if seconds > 0.0 {
+            self.application_frames as f64 / seconds
+        } else {
+            0.0
+        };
+        let display_fps = if seconds > 0.0 {
+            self.displayed_frames as f64 / seconds
+        } else {
+            0.0
+        };
+        let actual_presented_multiplier = if self.application_frames > 0 {
+            self.displayed_frames as f64 / self.application_frames as f64
+        } else {
+            0.0
+        };
+        PresentationRates {
+            base_fps,
+            display_fps,
+            actual_presented_multiplier,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PresentationRates {
+    pub base_fps: f64,
+    pub display_fps: f64,
+    pub actual_presented_multiplier: f64,
 }
 
 #[cfg(feature = "streamline-fg")]
@@ -397,6 +472,46 @@ impl CommandRecordingMode {
             Self::Baseline => "baseline",
             Self::Optimized => "optimized",
         }
+    }
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use std::time::Duration;
+
+    use super::PresentationCounters;
+
+    #[test]
+    fn presentation_counters_distinguish_base_generated_and_dropped_frames() {
+        let mut counters = PresentationCounters::default();
+        counters.observe_present(0, 1);
+        counters.observe_present(1, 2);
+        counters.observe_present(1, 1);
+        assert_eq!(counters.application_frames, 3);
+        assert_eq!(counters.displayed_frames, 4);
+        assert_eq!(counters.generated_frames, 1);
+        assert_eq!(counters.dropped_generated_frames, 1);
+
+        let delta = counters.delta(PresentationCounters {
+            application_frames: 1,
+            displayed_frames: 1,
+            generated_frames: 0,
+            dropped_generated_frames: 0,
+        });
+        assert_eq!(delta.application_frames, 2);
+        assert_eq!(delta.displayed_frames, 3);
+        let rates = delta.rates(Duration::from_millis(500));
+        assert_eq!(rates.base_fps, 4.0);
+        assert_eq!(rates.display_fps, 6.0);
+        assert_eq!(rates.actual_presented_multiplier, 1.5);
+    }
+
+    #[test]
+    fn zero_duration_and_empty_windows_do_not_invent_rates() {
+        let rates = PresentationCounters::default().rates(Duration::ZERO);
+        assert_eq!(rates.base_fps, 0.0);
+        assert_eq!(rates.display_fps, 0.0);
+        assert_eq!(rates.actual_presented_multiplier, 0.0);
     }
 }
 

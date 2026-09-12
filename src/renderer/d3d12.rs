@@ -11,7 +11,7 @@ use std::{
     ffi::c_void,
     mem::{ManuallyDrop, size_of},
     path::PathBuf,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 #[cfg(feature = "streamline-fg")]
@@ -47,8 +47,8 @@ use crate::{
     debug_view::DebugView,
     path_space::{ActivePathSpace, PathSpaceMode, resolve_path_space},
     realtime::{
-        AtrousMode, CommandRecordingMode, DEFAULT_HDR_PEAK_NITS, HdrConfig, RealtimeConfig,
-        ReflexMode,
+        AtrousMode, CommandRecordingMode, DEFAULT_HDR_PEAK_NITS, HdrConfig, PresentationCounters,
+        RealtimeConfig, ReflexMode,
     },
     reconstruction::{
         CameraPose, DenoiserBackend, NRD_COMMIT_PREFIX, NRD_VERSION,
@@ -895,6 +895,25 @@ impl StreamlineRuntime {
             ));
         }
         Ok(())
+    }
+
+    unsafe fn get_reflex_state(&self) -> Result<crate::streamline::ReflexState> {
+        let mut state = crate::streamline::ReflexState {
+            struct_size: size_of::<crate::streamline::ReflexState>() as u32,
+            abi_version: crate::streamline::ABI_VERSION,
+            ..Default::default()
+        };
+        let status = unsafe {
+            crate::streamline::streamline_bridge_reflex_get_state(self.bridge.as_raw(), &mut state)
+        };
+        if status != crate::streamline::STATUS_OK {
+            return Err(streamline_error_with_detail(
+                "查询 Reflex latency report",
+                status,
+                self.bridge.last_error(),
+            ));
+        }
+        Ok(state)
     }
 
     fn dlss_options(
@@ -2174,7 +2193,23 @@ pub struct Dx12Renderer {
     #[cfg(feature = "streamline-fg")]
     fg_vsync_supported: bool,
     #[cfg(feature = "streamline-fg")]
+    fg_max_generated_frames: u32,
+    #[cfg(feature = "streamline-fg")]
+    fg_estimated_vram_bytes: u64,
+    #[cfg(feature = "streamline-fg")]
+    fg_dynamic_mfg_supported: bool,
+    #[cfg(feature = "streamline-fg")]
+    fg_status_raw: Option<u32>,
+    #[cfg(feature = "streamline-fg")]
     fg_last_state_log_key: Option<(u32, u32, u32, u32, bool)>,
+    presentation_counters: PresentationCounters,
+    benchmark_presentation_baseline: PresentationCounters,
+    #[cfg(feature = "streamline")]
+    reflex_state: Option<crate::streamline::ReflexState>,
+    #[cfg(feature = "streamline")]
+    reflex_state_query_failures: u64,
+    #[cfg(feature = "streamline")]
+    benchmark_reflex_state_query_failure_baseline: u64,
     shader_reloader: ShaderReloader,
     frames: Vec<FrameContext>,
     command_list: ID3D12GraphicsCommandList,
@@ -2823,7 +2858,13 @@ impl Dx12Renderer {
             #[cfg(not(feature = "streamline"))]
             let render_extent = render_extent(output_extent, initial_scale);
             #[cfg(feature = "streamline-fg")]
-            let fg_vsync_supported = if config.frame_generation == FrameGenerationMode::On {
+            let (
+                fg_vsync_supported,
+                fg_max_generated_frames,
+                fg_estimated_vram_bytes,
+                fg_dynamic_mfg_supported,
+                fg_status_raw,
+            ) = if config.frame_generation == FrameGenerationMode::On {
                 let runtime = streamline.as_ref().ok_or_else(|| {
                     streamline_error("DLSS-G runtime", crate::streamline::STATUS_NOT_INITIALIZED)
                 })?;
@@ -2860,14 +2901,22 @@ impl Dx12Renderer {
                 }
                 let supported = state.vsync_support_available != 0;
                 eprintln!(
-                    "frame_generation_capabilities vsync_supported={} max_generated={} min_dimension={}",
+                    "frame_generation_capabilities vsync_supported={} max_generated={} dynamic_mfg_supported={} estimated_vram_bytes={} min_dimension={}",
                     u32::from(supported),
                     state.num_frames_to_generate_max,
+                    state.dynamic_mfg_supported,
+                    state.estimated_vram_usage_bytes,
                     state.min_width_or_height,
                 );
-                supported
+                (
+                    supported,
+                    state.num_frames_to_generate_max,
+                    state.estimated_vram_usage_bytes,
+                    state.dynamic_mfg_supported != 0,
+                    Some(state.status_raw),
+                )
             } else {
-                false
+                (false, 0, 0, false, None)
             };
             let initial_reconstruction_frame_state =
                 ReconstructionFrameState::from_camera(ReconstructionFrameInput {
@@ -3025,7 +3074,23 @@ impl Dx12Renderer {
                 #[cfg(feature = "streamline-fg")]
                 fg_vsync_supported,
                 #[cfg(feature = "streamline-fg")]
+                fg_max_generated_frames,
+                #[cfg(feature = "streamline-fg")]
+                fg_estimated_vram_bytes,
+                #[cfg(feature = "streamline-fg")]
+                fg_dynamic_mfg_supported,
+                #[cfg(feature = "streamline-fg")]
+                fg_status_raw,
+                #[cfg(feature = "streamline-fg")]
                 fg_last_state_log_key: None,
+                presentation_counters: PresentationCounters::default(),
+                benchmark_presentation_baseline: PresentationCounters::default(),
+                #[cfg(feature = "streamline")]
+                reflex_state: None,
+                #[cfg(feature = "streamline")]
+                reflex_state_query_failures: 0,
+                #[cfg(feature = "streamline")]
+                benchmark_reflex_state_query_failure_baseline: 0,
                 shader_reloader: ShaderReloader::new(),
                 frames,
                 command_list,
@@ -4614,6 +4679,10 @@ impl Dx12Renderer {
             {
                 return Err(device_removed_error(self.native_device(), error));
             }
+            #[cfg(feature = "streamline-fg")]
+            let mut presentation_observation = (0_u32, 1_u32);
+            #[cfg(not(feature = "streamline-fg"))]
+            let presentation_observation = (0_u32, 1_u32);
             #[cfg(feature = "streamline")]
             if self.swap_chain_is_proxied() {
                 // The upgraded swap-chain proxy invokes Streamline common's
@@ -4633,7 +4702,15 @@ impl Dx12Renderer {
                 )
             {
                 let state = runtime.get_frame_generation_state(viewport, None)?;
+                presentation_observation.0 = u32::from(fg_tags_live);
+                presentation_observation.1 = state.num_frames_actually_presented;
                 self.fg_vsync_supported = state.vsync_support_available != 0;
+                self.fg_max_generated_frames = state.num_frames_to_generate_max;
+                self.fg_dynamic_mfg_supported = state.dynamic_mfg_supported != 0;
+                self.fg_status_raw = Some(state.status_raw);
+                if state.estimated_vram_usage_bytes != 0 {
+                    self.fg_estimated_vram_bytes = state.estimated_vram_usage_bytes;
+                }
                 let state_log_key = (
                     state.status_raw,
                     state.num_frames_actually_presented,
@@ -4697,6 +4774,12 @@ impl Dx12Renderer {
                     }
                 }
             }
+            // Count exactly one application frame after a successful host
+            // Present. The SDK value is the number displayed since the last
+            // state query and may include one generated frame; it must not
+            // create additional frame tokens or advance simulation/history.
+            self.presentation_counters
+                .observe_present(presentation_observation.0, presentation_observation.1);
 
             let fence_value = self.next_fence_value;
             self.next_fence_value += 1;
@@ -4910,6 +4993,8 @@ impl Dx12Renderer {
                 denoiser_backend: self.denoiser.as_str().to_string(),
                 upscaler_mode: self.upscaler.as_str().to_string(),
                 reflex_mode: self.reflex_mode_name().to_string(),
+                frame_generation_requested: self.frame_generation_requested_name().to_string(),
+                frame_generation_active: self.frame_generation_active_name().to_string(),
                 display_mode: self.display_output.name().to_string(),
                 hdr_paper_white_nits: self
                     .display_output
@@ -5794,6 +5879,12 @@ impl Dx12Renderer {
         self.stable_plane_counter_telemetry = Default::default();
         self.gpu_profiler.begin_benchmark_measurement();
         self.memory_telemetry.begin_benchmark_measurement();
+        self.benchmark_presentation_baseline = self.presentation_counters;
+        #[cfg(feature = "streamline")]
+        {
+            self.benchmark_reflex_state_query_failure_baseline =
+                self.reflex_state_query_failures;
+        }
         self.benchmark_history_reset_baseline = self.history_reset_count;
         self.benchmark_extent_change_baseline = self.render_extent_change_count;
         self.benchmark_generation_create_baseline = self.render_generation_create_count;
@@ -6003,6 +6094,7 @@ impl Dx12Renderer {
                 dlss_viewport_id,
                 rr_support: self.rr_support_json(),
                 reflex: self.reflex_json(),
+                frame_generation: self.frame_generation_json(duration_seconds),
                 display_output: self.display_output,
                 denoiser_switch_count: self
                     .denoiser_switch_count
@@ -6104,6 +6196,80 @@ impl Dx12Renderer {
         })
     }
 
+    fn frame_generation_json(&self, duration_seconds: u64) -> serde_json::Value {
+        let counters = self
+            .presentation_counters
+            .delta(self.benchmark_presentation_baseline);
+        let rates = counters.rates(Duration::from_secs(duration_seconds));
+        #[cfg(feature = "streamline-fg")]
+        {
+            let runtime = self.streamline.as_ref();
+            let supported = runtime.is_some_and(StreamlineRuntime::frame_generation_supported);
+            let support_result_raw = runtime.map(|runtime| runtime._support.fg_result);
+            let requested = self.frame_generation.requested();
+            let active = self.frame_generation.lifecycle() == FrameGenerationLifecycle::OnProxy;
+            let reason = if requested == FrameGenerationMode::Off {
+                None
+            } else if !supported {
+                Some("unsupported-or-runtime-unavailable".to_string())
+            } else if self.fg_status_raw.is_some_and(|status| status != 0) {
+                Some(format!(
+                    "sdk-status-{}",
+                    self.fg_status_raw.unwrap_or_default()
+                ))
+            } else if requested == FrameGenerationMode::On && !active {
+                Some(self.frame_generation.lifecycle().as_str().to_string())
+            } else {
+                None
+            };
+            return serde_json::json!({
+                "compiled": true,
+                "supported": supported,
+                "requested": requested.as_str(),
+                "active": if active { "on" } else { "off" },
+                "lifecycle": self.frame_generation.lifecycle().as_str(),
+                "support_result_raw": support_result_raw,
+                "status_raw": self.fg_status_raw,
+                "requested_generated_frames": if requested == FrameGenerationMode::On { 1 } else { 0 },
+                "max_generated_frames": self.fg_max_generated_frames,
+                "application_frames": counters.application_frames,
+                "displayed_frames": counters.displayed_frames,
+                "generated_frames": counters.generated_frames,
+                "dropped_generated_frames": counters.dropped_generated_frames,
+                "actual_presented_multiplier": rates.actual_presented_multiplier,
+                "base_fps": rates.base_fps,
+                "display_fps": rates.display_fps,
+                "estimated_vram_bytes": self.fg_estimated_vram_bytes,
+                "vsync_supported": self.fg_vsync_supported,
+                "dynamic_mfg_supported": self.fg_dynamic_mfg_supported,
+                "reason": reason,
+            });
+        }
+        #[cfg(not(feature = "streamline-fg"))]
+        serde_json::json!({
+            "compiled": false,
+            "supported": false,
+            "requested": "off",
+            "active": "unavailable",
+            "lifecycle": "unavailable",
+            "support_result_raw": serde_json::Value::Null,
+            "status_raw": serde_json::Value::Null,
+            "requested_generated_frames": 0,
+            "max_generated_frames": serde_json::Value::Null,
+            "application_frames": counters.application_frames,
+            "displayed_frames": counters.displayed_frames,
+            "generated_frames": counters.generated_frames,
+            "dropped_generated_frames": counters.dropped_generated_frames,
+            "actual_presented_multiplier": rates.actual_presented_multiplier,
+            "base_fps": rates.base_fps,
+            "display_fps": rates.display_fps,
+            "estimated_vram_bytes": serde_json::Value::Null,
+            "vsync_supported": serde_json::Value::Null,
+            "dynamic_mfg_supported": serde_json::Value::Null,
+            "reason": "feature-not-compiled",
+        })
+    }
+
     fn reflex_json(&self) -> serde_json::Value {
         #[cfg(feature = "streamline")]
         {
@@ -6116,6 +6282,13 @@ impl Dx12Renderer {
             } else {
                 "unavailable"
             };
+            let report_available = self
+                .reflex_state
+                .as_ref()
+                .is_some_and(|state| state.latency_report_available != 0);
+            let latency = self.reflex_state.as_ref().and_then(|state| {
+                (state.present_end_time != 0).then(|| reflex_latency_json_value(state))
+            });
             serde_json::json!({
                 "compiled": true,
                 "sdk_version": crate::streamline::SDK_VERSION,
@@ -6139,7 +6312,11 @@ impl Dx12Renderer {
                     .reflex_present_common_count
                     .saturating_sub(self.benchmark_reflex_present_common_baseline),
                 "order_errors": self.reflex_marker_order_errors,
-                "report_available": false,
+                "report_available": report_available,
+                "latency": latency,
+                "latency_query_failures": self.reflex_state_query_failures.saturating_sub(
+                    self.benchmark_reflex_state_query_failure_baseline,
+                ),
             })
         }
         #[cfg(not(feature = "streamline"))]
@@ -6166,9 +6343,39 @@ impl Dx12Renderer {
                 "present_common_count": 0,
                 "order_errors": 0,
                 "report_available": false,
+                "latency": serde_json::Value::Null,
+                "latency_query_failures": 0,
             })
         }
     }
+}
+
+#[cfg(feature = "streamline")]
+fn reflex_timestamp_delta_ms(start_us: u64, end_us: u64) -> Option<f64> {
+    (start_us != 0 && end_us >= start_us).then(|| (end_us - start_us) as f64 / 1_000.0)
+}
+
+#[cfg(feature = "streamline")]
+fn reflex_latency_json_value(state: &crate::streamline::ReflexState) -> serde_json::Value {
+    serde_json::json!({
+        "frame_id": state.report_frame_id,
+        "input_sample_to_present_ms": reflex_timestamp_delta_ms(
+            state.input_sample_time,
+            state.present_end_time,
+        ),
+        "simulation_to_present_ms": reflex_timestamp_delta_ms(
+            state.simulation_start_time,
+            state.present_end_time,
+        ),
+        "render_submit_to_present_ms": reflex_timestamp_delta_ms(
+            state.render_submit_start_time,
+            state.present_end_time,
+        ),
+        "gpu_active_render_ms": f64::from(state.gpu_active_render_time_us) / 1_000.0,
+        "gpu_frame_ms": f64::from(state.gpu_frame_time_us) / 1_000.0,
+        "timestamp_unit": "microseconds",
+        "scope": "application-frame; not scan-out/display latency",
+    })
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -6299,6 +6506,7 @@ struct BenchmarkJsonContext<'a> {
     dlss_viewport_id: Option<u32>,
     rr_support: serde_json::Value,
     reflex: serde_json::Value,
+    frame_generation: serde_json::Value,
     display_output: DisplayOutputState,
     denoiser_switch_count: u64,
     nrd_compiled: bool,
@@ -6349,6 +6557,7 @@ fn benchmark_json_line(
         dlss_viewport_id,
         rr_support,
         reflex,
+        frame_generation,
         display_output,
         denoiser_switch_count,
         nrd_compiled,
@@ -6375,7 +6584,7 @@ fn benchmark_json_line(
         })
         .collect::<Vec<_>>();
     serde_json::json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "reconstruction_contract_version": RECONSTRUCTION_CONTRACT_VERSION,
         "build": {
             "git_head": env!("RAY_TRACING_BUILD_GIT_HEAD"),
@@ -6428,6 +6637,7 @@ fn benchmark_json_line(
         },
         "dlss_rr": rr_support,
         "reflex": reflex,
+        "frame_generation": frame_generation,
         "display": {
             "mode": display_output.name(),
             "format": if display_output.hdr.enabled { "R10G10B10A2_UNORM" } else { "R8G8B8A8_UNORM" },
@@ -6659,6 +6869,45 @@ impl Dx12Renderer {
         self.debug_view.title()
     }
 
+    pub const fn presentation_counters(&self) -> PresentationCounters {
+        self.presentation_counters
+    }
+
+    #[cfg(feature = "streamline")]
+    pub fn refresh_reflex_latency(&mut self) {
+        let Some(runtime) = self
+            .streamline
+            .as_ref()
+            .filter(|runtime| runtime.reflex_supported())
+        else {
+            self.reflex_state = None;
+            return;
+        };
+        match unsafe { runtime.get_reflex_state() } {
+            Ok(state) => self.reflex_state = Some(state),
+            Err(error) => {
+                if self.reflex_state_query_failures == 0 {
+                    eprintln!("reflex_latency_report unavailable reason={error}");
+                }
+                self.reflex_state_query_failures =
+                    self.reflex_state_query_failures.saturating_add(1);
+            }
+        }
+    }
+
+    #[cfg(not(feature = "streamline"))]
+    pub fn refresh_reflex_latency(&mut self) {}
+
+    pub fn reflex_latency_title(&self) -> String {
+        #[cfg(feature = "streamline")]
+        if let Some(milliseconds) = self.reflex_state.as_ref().and_then(|state| {
+            reflex_timestamp_delta_ms(state.simulation_start_time, state.present_end_time)
+        }) {
+            return format!("S→P {milliseconds:.2} ms");
+        }
+        "N/A".to_string()
+    }
+
     pub fn set_window_focused(&mut self, focused: bool) {
         self.window_focused = focused;
     }
@@ -6668,8 +6917,32 @@ impl Dx12Renderer {
         self.frame_generation.lifecycle().as_str()
     }
 
+    #[cfg(feature = "streamline-fg")]
+    fn frame_generation_requested_name(&self) -> &'static str {
+        self.frame_generation.requested().as_str()
+    }
+
+    #[cfg(feature = "streamline-fg")]
+    fn frame_generation_active_name(&self) -> &'static str {
+        if self.frame_generation.lifecycle() == FrameGenerationLifecycle::OnProxy {
+            "on"
+        } else {
+            "off"
+        }
+    }
+
     #[cfg(not(feature = "streamline-fg"))]
     pub fn frame_generation_state_name(&self) -> &'static str {
+        "unavailable"
+    }
+
+    #[cfg(not(feature = "streamline-fg"))]
+    fn frame_generation_requested_name(&self) -> &'static str {
+        "off"
+    }
+
+    #[cfg(not(feature = "streamline-fg"))]
+    fn frame_generation_active_name(&self) -> &'static str {
         "unavailable"
     }
 
@@ -6828,9 +7101,17 @@ impl Dx12Renderer {
                 ));
             }
             self.fg_vsync_supported = state.vsync_support_available != 0;
+            self.fg_max_generated_frames = state.num_frames_to_generate_max;
+            self.fg_estimated_vram_bytes = state.estimated_vram_usage_bytes;
+            self.fg_dynamic_mfg_supported = state.dynamic_mfg_supported != 0;
+            self.fg_status_raw = Some(state.status_raw);
         } else {
             self.frame_generation.complete_disable();
             self.fg_vsync_supported = false;
+            self.fg_max_generated_frames = 0;
+            self.fg_estimated_vram_bytes = 0;
+            self.fg_dynamic_mfg_supported = false;
+            self.fg_status_raw = None;
         }
         eprintln!(
             "frame_generation_chain_recreated reason={reason} requested={} state={} fg_loaded={} vsync_supported={} extent={}x{} idle_wait_delta={}",
@@ -8589,10 +8870,18 @@ mod tests {
         let fg_options = present_path.find("set_frame_generation_options").unwrap();
         let present_start = present_path.find("PCL_PRESENT_START").unwrap();
         let present = present_path.find(".Present(present_sync_interval").unwrap();
+        let fg_state = present_path
+            .find("get_frame_generation_state(viewport, None)")
+            .unwrap();
+        let presentation_count = present_path
+            .find("presentation_counters\n                .observe_present")
+            .unwrap();
         assert!(execute < render_submit_end);
         assert!(render_submit_end < fg_options);
         assert!(fg_options < present_start);
         assert!(present_start < present);
+        assert!(present < fg_state);
+        assert!(fg_state < presentation_count);
         assert!(present_path.contains("FrameGenerationObservation::WarmupExpired"));
         assert!(present_path.contains("state.vsync_support_available"));
 
@@ -8876,6 +9165,35 @@ mod tests {
         assert_eq!(metadata.MaxMasteringLuminance, 8_000_000);
         assert_eq!(metadata.MaxContentLightLevel, 800);
         assert_eq!(metadata.MaxFrameAverageLightLevel, 200);
+    }
+
+    #[cfg(feature = "streamline")]
+    #[test]
+    fn reflex_latency_uses_only_monotonic_sdk_timestamps() {
+        assert_eq!(reflex_timestamp_delta_ms(1_000, 4_500), Some(3.5));
+        assert_eq!(reflex_timestamp_delta_ms(0, 4_500), None);
+        assert_eq!(reflex_timestamp_delta_ms(5_000, 4_500), None);
+
+        let state = crate::streamline::ReflexState {
+            report_frame_id: 42,
+            input_sample_time: 500,
+            simulation_start_time: 1_000,
+            render_submit_start_time: 2_000,
+            present_end_time: 4_500,
+            gpu_active_render_time_us: 1_250,
+            gpu_frame_time_us: 2_000,
+            ..Default::default()
+        };
+        let value = reflex_latency_json_value(&state);
+        assert_eq!(value["frame_id"], 42);
+        assert_eq!(value["input_sample_to_present_ms"], 4.0);
+        assert_eq!(value["simulation_to_present_ms"], 3.5);
+        assert_eq!(value["render_submit_to_present_ms"], 2.5);
+        assert_eq!(value["gpu_active_render_ms"], 1.25);
+        assert_eq!(
+            value["scope"],
+            "application-frame; not scan-out/display latency"
+        );
     }
 
     #[test]
@@ -9208,6 +9526,13 @@ mod tests {
                     "result_raw": 5,
                 }),
                 reflex: serde_json::Value::Null,
+                frame_generation: serde_json::json!({
+                    "compiled": false,
+                    "application_frames": 120,
+                    "displayed_frames": 120,
+                    "base_fps": 4.0,
+                    "display_fps": 4.0,
+                }),
                 display_output: DisplayOutputState::requested(HdrConfig::default()),
                 denoiser_switch_count: 0,
                 nrd_compiled: false,
@@ -9238,7 +9563,7 @@ mod tests {
         );
         assert!(!json.contains(['\r', '\n']));
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value["schema_version"], 2);
+        assert_eq!(value["schema_version"], 3);
         assert_eq!(value["reconstruction_contract_version"], 1);
         assert_eq!(value["gpu_name"], "RTX 4060 \"Laptop\"");
         assert_eq!(value["resolution_mode"], "fixed");
@@ -9247,6 +9572,8 @@ mod tests {
         assert_eq!(value["path_space"]["active"], "stable-planes");
         assert_eq!(value["path_space"]["consumer"], "nrd-stable-planes");
         assert!(value["dynamic_resolution"].is_null());
+        assert_eq!(value["frame_generation"]["application_frames"], 120);
+        assert_eq!(value["frame_generation"]["display_fps"], 4.0);
         assert_eq!(value["render_scale_requested"], 1.0);
         assert_eq!(value["render_generation_id"], 1);
         assert_eq!(value["render_generation_create_count"], 0);

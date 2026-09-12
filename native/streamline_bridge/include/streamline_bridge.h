@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define STREAMLINE_BRIDGE_ABI_VERSION UINT32_C(9)
+#define STREAMLINE_BRIDGE_ABI_VERSION UINT32_C(10)
 
 typedef struct StreamlineBridge StreamlineBridge;
 
@@ -230,6 +230,16 @@ typedef struct StreamlineBridgeReflexState {
     uint32_t low_latency_available;
     uint32_t latency_report_available;
     uint32_t flash_indicator_driver_controlled;
+    // Latest application-frame report copied from the SDK's 64-entry ring.
+    // Raw timestamps stay in microseconds; consumers must not reinterpret
+    // them as scan-out/display latency.
+    uint64_t report_frame_id;
+    uint64_t input_sample_time;
+    uint64_t simulation_start_time;
+    uint64_t render_submit_start_time;
+    uint64_t present_end_time;
+    uint32_t gpu_active_render_time_us;
+    uint32_t gpu_frame_time_us;
 } StreamlineBridgeReflexState;
 
 StreamlineBridgeStatus streamline_bridge_create(

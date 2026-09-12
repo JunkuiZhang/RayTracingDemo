@@ -17,7 +17,7 @@ use winit::{
 };
 
 use crate::{
-    realtime::RealtimeConfig,
+    realtime::{PresentationCounters, RealtimeConfig},
     renderer::d3d12::{Dx12Renderer, profiler::GpuPass},
 };
 
@@ -62,7 +62,7 @@ struct RealtimeApplication {
     renderer: Option<Dx12Renderer>,
     failure: Option<String>,
     stats_started: Option<Instant>,
-    frames_since_stats: u32,
+    stats_presentation_baseline: PresentationCounters,
     benchmark: Option<BenchmarkState>,
     benchmark_result: Option<String>,
     capture_result: Option<String>,
@@ -189,6 +189,7 @@ impl ApplicationHandler for RealtimeApplication {
                             .sampling_started
                             .is_some_and(|started| started.elapsed() >= benchmark.duration)
                         {
+                            renderer.refresh_reflex_latency();
                             renderer.refresh_memory_telemetry();
                             renderer.finish_memory_measurement();
                             benchmark_report = Some(renderer.benchmark_json(
@@ -198,14 +199,17 @@ impl ApplicationHandler for RealtimeApplication {
                         }
                     }
                     capture_report = renderer.take_capture_result();
-                    self.frames_since_stats += 1;
                     let now = Instant::now();
                     let started = self.stats_started.get_or_insert(now);
                     let elapsed = now.duration_since(*started);
                     if elapsed >= Duration::from_millis(500) {
-                        let fps = self.frames_since_stats as f64 / elapsed.as_secs_f64();
+                        renderer.refresh_reflex_latency();
+                        let presentation = renderer.presentation_counters();
+                        let rates = presentation
+                            .delta(self.stats_presentation_baseline)
+                            .rates(elapsed);
                         window.set_title(&format!(
-                            "RayTracingDemo - 阶段 11 | {} | Path {} | Upscaler {} | Display {} | FG {} | Reflex {} | Cmd {} | FPS {:.0} | GPU {:.2} ms (p95 {:.2}) | DLSS {:.2} ms | 输出 {}x{} | 内部 {}x{} [{}] | Gen {} / retired {} | VRAM {} | AS {:.2} PT {:.2} T {:.2} A {:.2} ({}) | SPP {} | 视图 {} | {} | {}",
+                            "RayTracingDemo - 阶段 11 | {} | Path {} | Upscaler {} | Display {} | FG state {} | Reflex {} | Cmd {} | Base {:.0} / Display {:.0} / FG {:.2}x | GPU {:.2} ms (p95 {:.2}) | DLSS {:.2} ms | Latency {} | 输出 {}x{} | 内部 {}x{} [{}] | Gen {} / retired {} | VRAM {} | AS {:.2} PT {:.2} T {:.2} A {:.2} ({}) | SPP {} | 视图 {} | {} | {}",
                             renderer.denoiser_name(),
                             renderer.active_path_space_name(),
                             renderer.upscaler_name(),
@@ -213,10 +217,13 @@ impl ApplicationHandler for RealtimeApplication {
                             renderer.frame_generation_state_name(),
                             renderer.reflex_mode_name(),
                             renderer.command_recording_mode_name(),
-                            fps,
+                            rates.base_fps,
+                            rates.display_fps,
+                            rates.actual_presented_multiplier,
                             renderer.gpu_time_ms(),
                             renderer.gpu_time_p95_ms(),
                             renderer.dlss_evaluate_time_ms(),
+                            renderer.reflex_latency_title(),
                             renderer.output_width(),
                             renderer.output_height(),
                             renderer.render_width(),
@@ -236,7 +243,7 @@ impl ApplicationHandler for RealtimeApplication {
                             renderer.shader_status()
                         ));
                         self.stats_started = Some(now);
-                        self.frames_since_stats = 0;
+                        self.stats_presentation_baseline = presentation;
                     }
                 }
                 if let Some(report) = benchmark_report {

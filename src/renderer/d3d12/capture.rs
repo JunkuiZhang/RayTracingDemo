@@ -6,7 +6,7 @@ use std::{
 
 use crate::debug_view::DebugView;
 
-pub const CAPTURE_SCHEMA_VERSION: u32 = 2;
+pub const CAPTURE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CaptureMetadata {
@@ -32,6 +32,8 @@ pub struct CaptureMetadata {
     pub denoiser_backend: String,
     pub upscaler_mode: String,
     pub reflex_mode: String,
+    pub frame_generation_requested: String,
+    pub frame_generation_active: String,
     pub display_mode: String,
     pub hdr_paper_white_nits: Option<u32>,
     pub hdr_peak_nits: Option<u32>,
@@ -284,6 +286,11 @@ pub fn capture_json_line(metadata: &CaptureMetadata, png_bytes: u64) -> String {
             "sdk_version": metadata.streamline_sdk_version,
             "viewport_id": metadata.viewport_id,
         },
+        "capture_source": "application_display_output",
+        "frame_generation": {
+            "requested": metadata.frame_generation_requested,
+            "active": metadata.frame_generation_active,
+        },
         "display": {
             "mode": metadata.display_mode,
             "paper_white_nits": metadata.hdr_paper_white_nits,
@@ -381,6 +388,8 @@ mod tests {
             denoiser_backend: "svgf".to_string(),
             upscaler_mode: "native".to_string(),
             reflex_mode: "unavailable".to_string(),
+            frame_generation_requested: "off".to_string(),
+            frame_generation_active: "unavailable".to_string(),
             display_mode: "sdr".to_string(),
             hdr_paper_white_nits: None,
             hdr_peak_nits: None,
@@ -401,6 +410,9 @@ mod tests {
         assert_eq!(value["path_space"]["allocated_bytes"], 123_456);
         assert_eq!(value["display"]["mode"], "sdr");
         assert_eq!(value["display"]["capture_encoding"], "sdr-rgba8");
+        assert_eq!(value["capture_source"], "application_display_output");
+        assert_eq!(value["frame_generation"]["requested"], "off");
+        assert_eq!(value["frame_generation"]["active"], "unavailable");
         assert_eq!(value["png_bytes"], 256);
 
         let hdr_metadata = CaptureMetadata {

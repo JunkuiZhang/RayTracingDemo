@@ -57,7 +57,9 @@ static_assert(sizeof(StreamlineBridgeFrameGenerationState) == 40, "Streamline FG
 static_assert(offsetof(StreamlineBridgeFrameGenerationState, estimated_vram_usage_bytes) == 24, "Streamline FG state VRAM offset changed");
 static_assert(sizeof(StreamlineBridgeConstants) == 376, "Streamline constants ABI changed");
 static_assert(sizeof(StreamlineBridgeResourceTag) == 48, "Streamline resource tag ABI changed");
-static_assert(sizeof(StreamlineBridgeReflexState) == 20, "Streamline Reflex ABI changed");
+static_assert(sizeof(StreamlineBridgeReflexState) == 72, "Streamline Reflex ABI changed");
+static_assert(offsetof(StreamlineBridgeReflexState, report_frame_id) == 24,
+              "Streamline Reflex report offset changed");
 
 class ScopedStdoutToStderr {
 public:
@@ -1040,6 +1042,26 @@ StreamlineBridgeStatus streamline_bridge_reflex_get_state(
         out_state->low_latency_available = state.lowLatencyAvailable ? 1 : 0;
         out_state->latency_report_available = state.latencyReportAvailable ? 1 : 0;
         out_state->flash_indicator_driver_controlled = state.flashIndicatorDriverControlled ? 1 : 0;
+        // Reflex returns a fixed-size recent-report array. Pick the newest
+        // complete application frame without exposing SDK-owned array layout
+        // through the stable C ABI.
+        const sl::ReflexReport* latest = nullptr;
+        if (state.latencyReportAvailable) {
+            for (const sl::ReflexReport& report : state.frameReport) {
+                if (report.presentEndTime != 0 &&
+                    (latest == nullptr || report.frameID > latest->frameID))
+                    latest = &report;
+            }
+        }
+        if (latest != nullptr) {
+            out_state->report_frame_id = latest->frameID;
+            out_state->input_sample_time = latest->inputSampleTime;
+            out_state->simulation_start_time = latest->simStartTime;
+            out_state->render_submit_start_time = latest->renderSubmitStartTime;
+            out_state->present_end_time = latest->presentEndTime;
+            out_state->gpu_active_render_time_us = latest->gpuActiveRenderTimeUs;
+            out_state->gpu_frame_time_us = latest->gpuFrameTimeUs;
+        }
         return STREAMLINE_BRIDGE_STATUS_OK;
     } catch (...) {
         return STREAMLINE_BRIDGE_STATUS_EXCEPTION;
