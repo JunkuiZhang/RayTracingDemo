@@ -4,7 +4,7 @@
 
 目标硬件：NVIDIA GeForce RTX 4060 Laptop GPU
 
-状态：IMPLEMENTED；自动短门禁通过，下一步进入 11G-E 有界验收
+状态：IMPLEMENTED；11G-E 自动验收已通过，人工显示链门槛仍为 PENDING
 
 ## 1. 前置门禁
 
@@ -121,7 +121,11 @@ capture schema 升为 v3，并明确记录：
 Reflex 单调时间戳/单位、benchmark schema v3 和 capture provenance。仓库级
 `cargo fmt --all -- --check` 仍会发现本包前已有的全局格式差异；未做全仓机械格式化，以免混入无关改动。
 
-## 7. 下一步：11G-E
+## 7. 后续状态：11G-E
+
+11G-E runner、Release 五项矩阵和 Debug FG 验收已经完成，正式记录见
+[`阶段11FrameGeneration-11G-E-有界验收记录.md`](阶段11FrameGeneration-11G-E-有界验收记录.md)。
+以下内容保留为原始 11G-E 交付要求：
 
 11G-E 应新增有界 FG runner，并分开验证：
 

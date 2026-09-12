@@ -194,5 +194,7 @@ $env:RAY_TRACING_STREAMLINE_LOG = '1'
 
 聚焦 FG 的 `numFramesActuallyPresented>=2` 门禁已经通过，11G-D 也已建立 application/base FPS、
 display FPS、generated/dropped frame 和 Reflex application-frame latency 的统一实时/JSON 统计。
-下一代码包进入 11G-E：resize、最小化/恢复、F5 开关往返、Debug Layer、FrameView pacing 和短稳定性
-验收；在这些完成前不进入阶段 12。
+11G-E 的 Release 自动矩阵和 Debug Layer 已通过，见
+[`阶段11FrameGeneration-11G-E-有界验收记录.md`](阶段11FrameGeneration-11G-E-有界验收记录.md)。
+下一步只执行剩余人工显示链验收：resize、最小化/恢复、F5 开关往返、运动画质、FrameView pacing 和
+外部 Reflex 证据；在这些完成前不进入阶段 12。

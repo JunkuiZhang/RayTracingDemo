@@ -437,6 +437,12 @@ Capture 仍保存 application `display_output`，不是 generated frame；captur
 
 ## 9. 11G-E：FG 有界验收
 
+实施状态（2026-09-12）：**自动化部分已通过，人工显示链门槛仍为 PENDING**。实现、Release 五项
+矩阵、Debug InfoQueue 0 和待办项见
+[`阶段11FrameGeneration-11G-E-有界验收记录.md`](阶段11FrameGeneration-11G-E-有界验收记录.md)。
+自动 PASS 不替代 F5/resize/最小化/恢复、运动画质、FrameView pacing 和外部 Reflex 证据，因此
+阶段 11 当前仍未完成。
+
 新增 `scripts/stage11_fg_acceptance.ps1`，仍采用有界子进程和 raw artifact。首轮只运行：
 
 | case | 参数 | 自动门槛 |
@@ -504,6 +510,6 @@ Capture 仍保存 application `display_output`，不是 generated frame；captur
 
 参考依据为仓库固定 SDK 中的：
 
-- `external/streamline-v2.12.0/docs/ProgrammingGuideManualHooking.md`
-- `external/streamline-v2.12.0/docs/ProgrammingGuideDLSS_G.md`
-- `external/streamline-v2.12.0/include/sl_dlss_g.h`
+- `external/streamline-v2.14.1/docs/ProgrammingGuideManualHooking.md`
+- `external/streamline-v2.14.1/docs/ProgrammingGuideDLSS_G.md`
+- `external/streamline-v2.14.1/include/sl_dlss_g.h`

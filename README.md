@@ -217,7 +217,11 @@ Frame Generation 的 11G-A SDK/部署、11G-B manual-hooking 交换链边界、1
 null tag 和退出。RTX 4060 Laptop 的聚焦窗口已经取得 `status=0`、
 `numFramesActuallyPresented=2` 的真实生成证据。窗口标题和 benchmark JSON 现在分别报告
 application/base FPS、display FPS、generated/dropped frame；Reflex 只报告 SDK 的 application-frame
-时间戳，缺失时显示 `N/A`，不根据 FPS 估算延迟。下一包是 11G-E 有界生命周期与 FrameView 验收。
+时间戳，缺失时显示 `N/A`，不根据 FPS 估算延迟。11G-E 的
+[`有界自动验收`](docs/阶段11FrameGeneration-11G-E-有界验收记录.md)已在干净 HEAD 上通过：Release
+五项矩阵与 Debug FG 均正常退出，FG-on 为真实 2x，稳态 idle wait 为 0，Debug InfoQueue 为 0。
+F5/resize/最小化/恢复、运动画质、FrameView `MsBetweenDisplayChange` 和外部 Reflex 证据仍需人工完成，
+所以阶段 11 尚未标记完成。
 
 ### RTXPT-style stable planes（NRD/RR 默认路径）
 
