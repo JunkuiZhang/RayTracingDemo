@@ -197,7 +197,9 @@ cargo run --release --features streamline-rr --locked -- --output-size 1280x720 
 tag。详细短测见 [`docs/阶段11短测记录.md`](docs/阶段11短测记录.md)，本次 SDK、模型和真机加载
 证据见 [`docs/阶段11DLSS4.5与Streamline2.14.1升级记录.md`](docs/阶段11DLSS4.5与Streamline2.14.1升级记录.md)。
 
-支持 Windows HDR 的显示器可显式启用 FP16 scRGB 输出；默认 SDR 路径保持不变：
+支持 Windows HDR 的显示器可显式启用 RGB10 HDR10/BT.2100 PQ 输出；默认 SDR 路径保持不变。
+这里使用 HDR10 而不是 FP16 scRGB，因为 Streamline DLSS Frame Generation 的 HDR 交换链明确
+要求 RGB10 + HDR10：
 
 ```powershell
 cargo run --release --features streamline-rr --locked -- --output-size 1280x720 --denoiser dlss-rr --upscaler dlss-quality --hdr

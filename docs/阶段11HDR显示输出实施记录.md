@@ -1,18 +1,25 @@
 # 阶段 11 HDR 显示输出实施记录
 
-日期：2026-09-11
+日期：2026-09-12
 目标机器：NVIDIA GeForce RTX 4060 Laptop GPU，Windows HDR 主显示器
 
-## 1. 结论
+## 1. 最终结论与纠错
 
-实时后端已经增加显式、可校准的 HDR 显示路径。`--hdr` 使用
-`DXGI_FORMAT_R16G16B16A16_FLOAT` flip-model 交换链和
-`DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709` 线性 scRGB；不传参数时仍使用原来的
-RGBA8 SDR 路径。
+实时后端提供显式、可校准的 HDR 显示路径。`--hdr` 使用
+`DXGI_FORMAT_R10G10B10A2_UNORM` flip-model 交换链、
+`DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020` 色彩空间和 HDR10 mastering metadata；
+不传参数时仍使用原来的 RGBA8 SDR 路径。
 
-选择 scRGB 而不是直接输出 HDR10/PQ，是因为这是 Microsoft 针对普通 Win32 HDR 应用推荐的
-通用路径：应用保留线性浮点内容，桌面合成器负责映射到显示器。scRGB 的绝对亮度标尺是
-`1.0 = 80 nit`。
+第一版使用 FP16 scRGB。该格式对普通 Win32 HDR 应用很方便，但 NVIDIA Streamline 2.14.1 的
+DLSS Frame Generation 集成契约明确规定：HDR 交换链应使用 UINT10/RGB10、BT.2100/HDR10，
+不支持 FP16/scRGB。RTX 4060 Laptop 上的 A/B 也精确复现了此限制：
+
+- HDR + scRGB：FG `status=0`，但 120 次 warmup 后 `numFramesActuallyPresented` 始终为 1；
+- SDR + RGBA8：同一机器和配置在第 3 次 warmup 达到 `numFramesActuallyPresented=2`；
+- iFlip 在两组中均为 0，因此它不是这次失败的区分变量。
+
+因此最终实现统一改成 RGB10 HDR10，而不是为 FG 单独维护第二套 HDR 路径。这样运行时 F5
+开关 FG 不需要重建成另一种交换链格式，生命周期更直接，也不会出现“HDR 能显示但 FG 静默不插帧”。
 
 ## 2. 用户接口
 
@@ -22,13 +29,13 @@ RGBA8 SDR 路径。
 --hdr-peak-nits <300..10000>       默认读取当前显示器的 MaxLuminance
 ```
 
-亮度调节参数必须与 `--hdr` 同时使用，峰值不能低于 paper white。启动 HDR 时程序会：
+亮度参数必须与 `--hdr` 同时使用，峰值不能低于 paper white。启动 HDR 时程序会：
 
-1. 检查交换链能否以 scRGB Present；
+1. 检查交换链能否以 BT.2100/PQ Present；
 2. 通过 `IDXGIOutput6::GetDesc1` 检查窗口所在输出是否处于 Windows HDR 状态；
-3. 设置交换链色彩空间；
-4. 在 resize 和 Frame Generation 交换链重建后恢复该色彩空间；
-5. 不满足条件时明确报错，不静默退回 SDR，以免用户误把 SDR 当成 HDR 验收。
+3. 设置交换链为 HDR10 色彩空间，并提交 BT.2020/D65、峰值、MaxCLL 和 MaxFALL metadata；
+4. 在 resize 和 Frame Generation proxy 交换链重建后重新提交色彩空间和 metadata；
+5. 不满足条件时明确报错，不静默退回 SDR。
 
 推荐启动命令：
 
@@ -37,7 +44,7 @@ cargo build --release --features streamline-rr,streamline-fg --locked
 .\target\release\ray_tracing_demo.exe --output-size 1280x720 --denoiser dlss-rr --upscaler dlss-quality --path-space-mode stable-planes --hdr
 ```
 
-若显示器 EDID/驱动上报的峰值不符合实际认证值，应按显示器规格显式覆盖，例如：
+若显示器/驱动上报的峰值不符合实际认证值，可显式覆盖，例如：
 
 ```powershell
 .\target\release\ray_tracing_demo.exe --output-size 1280x720 --denoiser dlss-rr --upscaler dlss-quality --path-space-mode stable-planes --hdr --hdr-paper-white-nits 200 --hdr-peak-nits 1000
@@ -46,52 +53,61 @@ cargo build --release --features streamline-rr,streamline-fg --locked
 ## 3. 颜色管线
 
 RR/DLSS/NRD 之前的 noisy radiance 和重建结果继续保持线性 HDR，不提前裁剪或 gamma 编码。
-Tone Map 的 HDR 分支先把场景线性白映射到配置的 paper white；paper white 以下保持线性，
-其上使用一阶连续、渐近显示峰值的高光 shoulder，再按 `80 nit/scRGB unit` 写入 FP16 输出。
-这使日常材质不会因开启 HDR 改变相对亮度，同时为面积灯和镜面高光保留真实高光余量。
+最终 tone map 的 HDR 分支执行以下唯一一次显示编码：
 
-SDR 分支继续使用原 ACES 近似和 gamma，因而不改变默认画面。调试视图仍是工程诊断用途，不作为
-HDR 母版画质验收。
+1. 把场景线性白映射到配置的 paper white；
+2. paper white 以下保持线性，其上用一阶连续 shoulder 渐近到显示峰值；
+3. 把线性 Rec.709 转换为线性 BT.2020；
+4. 把绝对 nit 值按 SMPTE ST.2084/PQ 编码到 RGB10。
 
-Streamline Frame Generation 的 color/hudless 格式现在来自实际显示格式，不再硬编码 RGBA8。
-HDR capture 从 FP16 scRGB readback 生成 SDR PNG 预览，并在 JSON 中标记
-`capture_encoding=sdr-png-preview`；它不是包含 HDR 元数据的母版文件。
+SDR 分支继续使用原 ACES 近似和 gamma，默认画面不变。工程调试视图跳过曝光和高光 shoulder，
+但在 HDR 模式仍按 paper white 做 Rec.709 → BT.2020 → PQ 编码，避免把线性调试色直接写入 PQ
+交换链。
 
-## 4. 自动验证
+Streamline Frame Generation 的 color/hudless tag 使用实际显示格式。HDR capture 则从打包的
+RGB10 readback 解码 PQ、转换 BT.2020 → Rec.709，并按 paper white 生成 SDR PNG 预览；JSON
+标记 `display.mode=hdr10` 和 `capture_encoding=sdr-png-preview`。该 PNG 不是 HDR 母版。
 
-以下均通过：
+## 4. 验证结果
 
-- `cargo test --all-targets --locked`：186 项（image_diff 6 + 主程序 180）；
-- `cargo test --all-targets --features streamline-rr --locked`：204 项（6 + 198）；
-- `cargo test --all-targets --features streamline-rr,streamline-fg --locked`：207 项（6 + 201）；
+自动验证均通过：
+
 - `cargo check --all-targets --features streamline-rr,streamline-fg --locked`；
-- Release `streamline-rr,streamline-fg` 构建；
-- SDR RR 1280×720、1 秒 benchmark：正常退出，JSON 为 RGBA8/SDR；
-- HDR RR 1280×720、1 秒 benchmark：正常退出，交换链为 FP16 scRGB；
-- HDR RR 1280×720、8 SPP capture：至少一次正常退出并生成可查看的 SDR PNG 预览；最终
-  tone-map 复验也生成了有效预览，但随后命中下述间歇性 NGX 退出卡住。
+- `cargo test --all-targets --locked`：186 项（image_diff 6 + 主程序 180）；
+- `cargo test --all-targets --features streamline-rr,streamline-fg --locked`：207 项（6 + 201）；
+- `cargo build --release --features streamline-rr,streamline-fg --locked`；
+- RTX 4060 Laptop 有界启动确认：`mode=hdr10`、`R10G10B10A2_UNORM`、
+  `HDR10-BT.2100-PQ`、`BitsPerColor=10`；RR 路径成功初始化；
+- 同一 HDR10 启动中，FG proxy 成功创建、`fg_loaded=1`、能力查询 `status=0`。
 
-目标主显示器的实际启动诊断为：Windows HDR active、`BitsPerColor=10`，驱动
-`MaxLuminance=4000 nit`。这是驱动/EDID 上报值，不代表已独立测量过屏幕峰值；画质验收可先用
-显示器认证峰值覆盖。
+自动启动的测试窗口报告 `focused=0`，而 Streamline FG 在失焦时按设计不生成帧，所以这次自动化
+不能替代最终的聚焦窗口计数门禁。请在窗口保持前台时运行：
 
-HDR + Frame Generation 组合能建立 FP16 proxy swap chain 并持续渲染；RR/FG 有界命令结束时仍可能
-命中项目升级记录中已经存在的 NVIDIA NGX telemetry shutdown 卡住问题。因此这里仅将其记录为
-“HDR/FG 运行路径已进入”，不把被终止的进程冒充为完整退出验收通过。
+```powershell
+$env:RAY_TRACING_STREAMLINE_LOG = '1'
+.\target\release\ray_tracing_demo.exe --output-size 1280x720 --denoiser dlss-rr --upscaler dlss-quality --path-space-mode stable-planes --frame-generation on --hdr --hdr-paper-white-nits 200 --hdr-peak-nits 1000
+```
+
+通过标准是日志同时出现 `focused=1`、`status=0`、`numFramesActuallyPresented>=2`（窗口标题也应
+显示 FG 2x），而不是仅凭 `fg_loaded=1` 判定成功。
+
+目标主显示器实际启动诊断为 Windows HDR active、`BitsPerColor=10`，驱动上报
+`MaxLuminance=4000 nit`。这不代表屏幕峰值已被仪器验证；画质验收可先按显示器认证峰值覆盖。
+目标机仍可能在 `slShutdown()` 的 NVIDIA NGX telemetry shutdown 内卡住，因此“渲染/FG 已执行”
+与“进程正常退出”必须分开记录。
 
 ## 5. 已知边界与下一步
 
-- 当前在启动时绑定窗口所在显示器；把运行中的窗口拖到另一台 SDR/HDR 显示器后，不会自动重建
-  色彩空间。正式多显示器支持需要监听输出拓扑/窗口位置变化并事务性重建交换链。
-- Windows HDR 校准、显示器 OSD、驱动 EDID 和屏幕实际峰值会共同影响观感。引擎提供校准参数，
-  但不能替代 Windows HDR Calibration 或仪器测量。
-- PNG 只承担 SDR 诊断预览；若以后需要 HDR 截图，应增加线性 EXR 或带正确色彩元数据的 HDR
-  图像格式，不能把当前 PNG 改名充当 HDR 文件。
-- HDR 不改变阶段 11 的主线门禁：FG display/generated/dropped/latency 统计和生命周期验收仍是
-  下一项工作。
+- 当前只在启动时绑定窗口所在显示器；拖到另一台 SDR/HDR 显示器后，不会自动检测并事务性重建；
+- Windows HDR Calibration、显示器 OSD、驱动 EDID 和实际峰值都会影响观感；校准参数不能替代测量；
+- PNG 只承担 SDR 诊断预览；真正 HDR 截图应增加线性 EXR 或带正确元数据的 HDR 图像格式；
+- 取得聚焦 HDR+FG 计数证据后，进入 11G-D 的 base/display/generated/dropped/latency 统计，
+  再做 11G-E 生命周期验收。
 
 ## 6. 设计依据
 
-- [Microsoft：Use DirectX with Advanced Color on high/standard dynamic range displays](https://learn.microsoft.com/en-us/windows/win32/direct3darticles/high-dynamic-range)
-- [Microsoft：IDXGISwapChain3::CheckColorSpaceSupport](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_4/nf-dxgi1_4-idxgiswapchain3-checkcolorspacesupport)
-- [Microsoft：IDXGIOutput6::GetDesc1](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_6/nf-dxgi1_6-idxgioutput6-getdesc1)
+- 项目内 Streamline 2.14.1 指南：
+  `external/streamline-v2.14.1/docs/ProgrammingGuideDLSS_G.md` 的 HDR Swap Chain Format 一节；
+- [NVIDIA：Streamline DLSS Frame Generation FAQ](https://developer.nvidia.com/rtx/streamline/get-started)；
+- [Microsoft：Use DirectX with Advanced Color on high/standard dynamic range displays](https://learn.microsoft.com/en-us/windows/win32/direct3darticles/high-dynamic-range)；
+- [Microsoft：IDXGISwapChain4::SetHDRMetaData](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_5/nf-dxgi1_5-idxgiswapchain4-sethdrmetadata)。
