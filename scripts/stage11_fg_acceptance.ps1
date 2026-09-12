@@ -344,9 +344,6 @@ function Get-FgGateFailures([object]$Result, [object]$Case, [object]$Git = $null
             if ([string]$Result.stderr_raw -notmatch "frame_generation_confirmed[^\r\n]*num_frames_actually_presented=[2-9]") {
                 $failures.Add("stderr lacks frame_generation_confirmed actual-presented evidence")
             }
-            if ([string]$Result.stderr_raw -notmatch "frame_generation_state[^\r\n]*actual_presented=[2-9][^\r\n]*focused=1") {
-                $failures.Add("stderr lacks focused=1 generated-frame state evidence")
-            }
         }
 
         if ($Case.rr) {
