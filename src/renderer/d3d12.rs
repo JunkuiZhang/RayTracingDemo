@@ -4406,6 +4406,16 @@ impl Dx12Renderer {
                 self.submit_transition_batch(&mut command_recording_stats);
             }
 
+            // FG keeps the tagged color resource in COPY_SOURCE through the
+            // proxy Present. Present has returned before this frame starts, so
+            // restore the UAV state explicitly before tone mapping writes it.
+            // The tracker cannot infer this transition from descriptor usage.
+            self.active_generation.display_output.collect_transition(
+                &mut self.transition_batch,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            );
+            self.submit_transition_batch(&mut command_recording_stats);
+
             self.gpu_profiler
                 .begin(&self.command_list, frame_index, GpuPass::ToneMap);
             self.gpu_profiler
@@ -8664,6 +8674,15 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn renderer_state_stays_below_windows_debug_stack_budget() {
+        let bytes = size_of::<Dx12Renderer>();
+        assert!(
+            bytes < 32 * 1024,
+            "Dx12Renderer grew to {bytes} bytes; keep large telemetry rings heap-backed"
+        );
+    }
+
     #[cfg(feature = "streamline")]
     #[test]
     fn streamline_constants_separate_small_scene_depth_layers() {
@@ -8865,6 +8884,13 @@ mod tests {
             .map(|offset| render_start + offset)
             .unwrap();
         let present_path = &source[render_start..render_end];
+        let display_output_uav_restore = source
+            .find("restore the UAV state explicitly before tone mapping writes it")
+            .unwrap();
+        let tone_map = source[display_output_uav_restore..]
+            .find("GpuPass::ToneMap")
+            .map(|offset| display_output_uav_restore + offset)
+            .unwrap();
         let execute = present_path.find(".ExecuteCommandLists").unwrap();
         let render_submit_end = present_path.find("PCL_RENDER_SUBMIT_END").unwrap();
         let fg_options = present_path.find("set_frame_generation_options").unwrap();
@@ -8876,6 +8902,7 @@ mod tests {
         let presentation_count = present_path
             .find("presentation_counters\n                .observe_present")
             .unwrap();
+        assert!(display_output_uav_restore < tone_map);
         assert!(execute < render_submit_end);
         assert!(render_submit_end < fg_options);
         assert!(fg_options < present_start);
@@ -9231,6 +9258,11 @@ mod tests {
 
     #[test]
     fn descriptor_tables_do_not_overlap_and_fit_the_heap() {
+        assert_eq!(
+            STABLE_PLANE_COUNTER_UAV_REGISTER + 1,
+            DXR_UAV_REGISTER_COUNT,
+            "the stable-plane counter must close the DXR UAV register range"
+        );
         let mut ranges = vec![(
             DXR_TABLE_BASE,
             texture::DXR_UAV_BASE + DXR_UAV_REGISTER_COUNT,

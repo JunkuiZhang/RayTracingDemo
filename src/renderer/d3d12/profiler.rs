@@ -365,7 +365,10 @@ pub struct GpuProfiler {
     timestamp_frequency: u64,
     frame_count: usize,
     last_sample: Option<GpuTimingSample>,
-    windows: [RollingStats; PASS_COUNT],
+    // Keep the 33 x 240 sample rings on the heap. Embedding them in the
+    // renderer makes unoptimized initialization copy a roughly 64 KiB value
+    // through several call frames and can exhaust the Windows GUI stack.
+    windows: Vec<RollingStats>,
     benchmark: Option<BenchmarkAccumulator>,
     command_recording: Option<CommandRecordingAccumulator>,
     valid_sample_serial: u64,
@@ -422,7 +425,7 @@ impl GpuProfiler {
             timestamp_frequency: unsafe { command_queue.GetTimestampFrequency()? },
             frame_count,
             last_sample: None,
-            windows: [RollingStats::default(); PASS_COUNT],
+            windows: vec![RollingStats::default(); PASS_COUNT],
             benchmark: None,
             command_recording: None,
             valid_sample_serial: 0,
@@ -677,7 +680,7 @@ impl GpuProfiler {
 
     pub fn statistics(&self) -> GpuTimingReport {
         GpuTimingReport {
-            passes: self.windows.map(|window| window.snapshot()),
+            passes: std::array::from_fn(|index| self.windows[index].snapshot()),
         }
     }
 

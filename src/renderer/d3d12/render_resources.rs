@@ -971,7 +971,10 @@ impl RenderResourceGeneration {
             super::STABLE_PLANE_RECORD_UAV_REGISTER
         );
         debug_assert_eq!(
-            super::STABLE_SPECULAR_ALBEDO_UAV_REGISTER + 1,
+            // The counter buffer is the final stable-plane UAV (u39).
+            // Keep this closure check on the actual last binding so Debug
+            // builds catch holes or overlaps when the layout grows.
+            super::STABLE_PLANE_COUNTER_UAV_REGISTER + 1,
             DXR_UAV_REGISTER_COUNT
         );
 
